@@ -1,0 +1,40 @@
+name = "agent-drop"
+main = "src/index.ts"
+compatibility_date = "2026-03-15"
+account_id = "your-cloudflare-account-id"
+
+[assets]
+directory = "./web/dist"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+run_worker_first = ["/api/*"]
+
+[[routes]]
+pattern = "example.com/*"
+zone_name = "example.com"
+
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "agent-drop-storage"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "agent-drop-db"
+database_id = "your-d1-database-id"
+migrations_dir = "migrations"
+
+[[queues.producers]]
+queue = "agent-drop-webhooks"
+binding = "WEBHOOK_QUEUE"
+
+[[queues.consumers]]
+queue = "agent-drop-webhooks"
+max_retries = 50
+max_batch_size = 5
+max_batch_timeout = 10
+retry_delay = 2
+
+[vars]
+DOMAIN = "example.com"
+SES_REGION = "eu-central-1"
+GOOGLE_CLIENT_ID_PUBLIC = "your-google-client-id"

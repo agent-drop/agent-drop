@@ -1,0 +1,181 @@
+@import "tailwindcss";
+
+@theme {
+	--font-mono: "JetBrains Mono", ui-monospace, monospace;
+
+	/* Tokyo Night base */
+	--color-bg: #1a1b26;
+	--color-bg-dark: #16161e;
+	--color-bg-highlight: #292e42;
+	--color-surface: #24283b;
+	--color-surface-raised: #292e42;
+	--color-surface-border: #3b4261;
+
+	/* Foreground - BRIGHTER */
+	--color-fg: #c0caf5;
+	--color-fg-dim: #7982a9;
+	--color-fg-dark: #565f89;
+	--color-comment: #565f89;
+
+	/* Neon accents - CRANKED UP */
+	--color-neon-cyan: #7dcfff;
+	--color-neon-blue: #7aa2f7;
+	--color-neon-purple: #bb9af7;
+	--color-neon-green: #9ece6a;
+	--color-neon-magenta: #ff00aa;
+	--color-neon-orange: #ff9e64;
+	--color-neon-red: #ff2d95;
+	--color-neon-teal: #73daca;
+	--color-neon-yellow: #e0af68;
+
+	/* CGA/VGA bright variants */
+	--color-cga-cyan: #55ffff;
+	--color-cga-yellow: #ffff55;
+	--color-cga-magenta: #ff55ff;
+	--color-cga-white: #ffffff;
+	--color-cga-green: #55ff55;
+	--color-cga-red: #ff5555;
+
+	/* Semantic */
+	--color-terminal: #7dcfff;
+	--color-terminal-dim: #3d59a1;
+	--color-terminal-bright: #b4f9f8;
+	--color-glow: rgba(125, 207, 255, 0.08);
+	--color-glow-strong: rgba(125, 207, 255, 0.15);
+}
+
+body {
+	background-color: var(--color-bg);
+	color: var(--color-fg);
+	font-family: var(--font-mono);
+	min-height: 100dvh;
+}
+
+::selection {
+	background-color: var(--color-neon-blue);
+	color: var(--color-bg);
+}
+
+/* Scanline effect - very subtle */
+body::after {
+	content: "";
+	position: fixed;
+	inset: 0;
+	background: repeating-linear-gradient(
+		0deg,
+		transparent,
+		transparent 3px,
+		rgba(0, 0, 0, 0.015) 3px,
+		rgba(0, 0, 0, 0.015) 6px
+	);
+	pointer-events: none;
+	z-index: 9999;
+}
+
+/* Glow effects */
+.text-glow {
+	text-shadow:
+		0 0 7px var(--color-cga-cyan),
+		0 0 15px rgba(85, 255, 255, 0.5),
+		0 0 30px rgba(85, 255, 255, 0.2),
+		0 0 60px rgba(85, 255, 255, 0.1);
+}
+
+.text-glow-subtle {
+	text-shadow:
+		0 0 5px rgba(125, 207, 255, 0.6),
+		0 0 15px rgba(125, 207, 255, 0.2);
+}
+
+.text-glow-purple {
+	text-shadow:
+		0 0 7px var(--color-neon-purple),
+		0 0 15px rgba(187, 154, 247, 0.4),
+		0 0 30px rgba(187, 154, 247, 0.15);
+}
+
+/* Cursor blink */
+@keyframes blink {
+	0%, 50% { opacity: 1; }
+	51%, 100% { opacity: 0; }
+}
+
+.cursor-blink::after {
+	content: "_";
+	animation: blink 1s step-end infinite;
+}
+
+/* Drop zone */
+.drop-zone {
+	border: 2px dashed var(--color-neon-blue);
+	background: var(--color-bg-dark);
+	transition: all 0.2s ease-out;
+}
+
+.drop-zone:hover,
+.drop-zone.drag-over {
+	border-color: var(--color-cga-cyan);
+	background-color: rgba(85, 255, 255, 0.04);
+	box-shadow:
+		inset 0 0 30px rgba(85, 255, 255, 0.03),
+		0 0 15px rgba(85, 255, 255, 0.08);
+}
+
+/* Inputs */
+input[type="text"],
+input[type="password"] {
+	background: var(--color-bg-dark);
+	border: 1px solid var(--color-surface-border);
+	color: var(--color-fg);
+	transition: border-color 0.15s;
+}
+
+input[type="text"]:focus,
+input[type="password"]:focus {
+	border-color: var(--color-neon-blue);
+	outline: none;
+	box-shadow: 0 0 8px rgba(122, 162, 247, 0.15);
+}
+
+input::placeholder {
+	color: var(--color-fg-dark);
+}
+
+/* Buttons */
+button {
+	transition: all 0.15s ease-out;
+}
+
+button:hover {
+	box-shadow: 0 0 10px rgba(125, 207, 255, 0.15);
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+	width: 6px;
+}
+
+::-webkit-scrollbar-track {
+	background: var(--color-bg-dark);
+}
+
+::-webkit-scrollbar-thumb {
+	background: var(--color-surface-border);
+	border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+	background: var(--color-neon-blue);
+}
+
+/* Drop card hover */
+.drop-card {
+	border: 1px solid var(--color-surface-border);
+	background: var(--color-surface);
+	transition: all 0.15s ease-out;
+}
+
+.drop-card:hover {
+	border-color: var(--color-neon-blue);
+	box-shadow: 0 0 12px rgba(125, 207, 255, 0.06);
+}
