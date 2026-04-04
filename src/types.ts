@@ -11,16 +11,32 @@ export interface Env {
 	GOOGLE_CLIENT_ID_PUBLIC: string;
 	R2_ACCESS_KEY_ID: string;
 	R2_SECRET_ACCESS_KEY: string;
-	WEBHOOK_QUEUE: Queue<WebhookMessage>;
+	WEBHOOK_QUEUE: Queue<QueueMessage>;
 }
 
-export interface WebhookMessage {
+export type QueueMessage = WebhookQueueMessage | RelayQueueMessage;
+
+export interface WebhookQueueMessage {
+	type: "webhook";
 	logId: string;
 	dropId: string;
 	ruleId: string;
 	target: string;
 	payload: Record<string, unknown>;
 	headers: Record<string, string>;
+	attempt: number;
+	firstAttemptAt: number;
+}
+
+export interface RelayQueueMessage {
+	type: "relay";
+	logId: string;
+	maskId: string;
+	direction: "inbound" | "reply";
+	rawEmail: string;
+	from: string;
+	to: string;
+	subject: string;
 	attempt: number;
 	firstAttemptAt: number;
 }

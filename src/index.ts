@@ -1,7 +1,8 @@
 import { handleEmail } from "./email-handler";
 import { handleAPI } from "./api/router";
 import { processWebhookBatch } from "./lib/rules";
-import type { Env, WebhookMessage } from "./types";
+import { processRelayMessage } from "./lib/relay";
+import type { Env, QueueMessage } from "./types";
 
 export default {
 	async fetch(
@@ -31,9 +32,16 @@ export default {
 	},
 
 	async queue(
-		batch: MessageBatch<WebhookMessage>,
+		batch: MessageBatch<QueueMessage>,
 		env: Env,
 	): Promise<void> {
-		await processWebhookBatch(batch, env);
+		for (const msg of batch.messages) {
+			if (msg.body.type === "relay") {
+				await processRelayMessage(msg as any, env);
+			} else {
+				// Webhook (default, backwards compat for messages without type field)
+				await processWebhookBatch({ messages: [msg as any] } as any, env);
+			}
+		}
 	},
 };

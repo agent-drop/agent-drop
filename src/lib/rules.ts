@@ -1,4 +1,4 @@
-import type { Env, Drop, WebhookMessage } from "../types";
+import type { Env, Drop, WebhookQueueMessage } from "../types";
 import { generateId } from "./id";
 
 interface Rule {
@@ -179,7 +179,8 @@ async function enqueueWebhook(
 	).bind(logId, drop.id, rule.id, target, Date.now()).run();
 
 	// Push to queue
-	const message: WebhookMessage = {
+	const message: WebhookQueueMessage = {
+		type: "webhook",
 		logId,
 		dropId: drop.id,
 		ruleId: rule.id,
@@ -195,7 +196,7 @@ async function enqueueWebhook(
 
 // Queue consumer: process webhook deliveries
 export async function processWebhookBatch(
-	batch: MessageBatch<WebhookMessage>,
+	batch: MessageBatch<WebhookQueueMessage>,
 	env: Env,
 ): Promise<void> {
 	for (const msg of batch.messages) {

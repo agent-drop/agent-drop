@@ -1,6 +1,7 @@
 import PostalMime from "postal-mime";
 import { generateId } from "./lib/id";
 import { normalizeInbox, slugifyFilename } from "./lib/normalize";
+import { isRelayReply, parseRelayAddress, findRelayRule, buildRelayAddress, enqueueRelay } from "./lib/relay";
 import { fireRules } from "./lib/rules";
 import type { Env, Drop } from "./types";
 
@@ -63,9 +64,70 @@ export async function handleEmail(
 ): Promise<void> {
 	const to = message.to;
 	const from = message.from;
-
-	// Parse local part: a.lice+topic@example.com -> inbox="alice", topic="topic"
 	const localPart = to.split("@")[0];
+
+	// Check if this is a relay reply (someone replying through a mask)
+	if (isRelayReply(localPart)) {
+		const relay = parseRelayAddress(localPart);
+		if (relay) {
+			// Verify mask exists and is active
+			const mask = await env.DB.prepare(
+				"SELECT id FROM email_masks WHERE id = ? AND active = 1",
+			).bind(relay.maskId).first();
+
+			if (mask) {
+				// Parse the reply to get body
+				const rawBytes = await new Response(message.raw).arrayBuffer();
+				const parser = new PostalMime();
+				const parsed = await parser.parse(rawBytes);
+
+				await enqueueRelay(env, {
+					maskId: relay.maskId,
+					direction: "reply",
+					from: `${relay.maskId}@${env.DOMAIN}`,
+					to: relay.sender,
+					subject: parsed.subject || "(no subject)",
+					textBody: parsed.text ? stripQuotedText(parsed.text) : undefined,
+					htmlBody: parsed.html ? stripQuotedHtml(parsed.html) : undefined,
+					inReplyTo: message.headers.get("in-reply-to") || undefined,
+					references: message.headers.get("references") || undefined,
+				});
+				return;
+			}
+		}
+		// If mask not found, fall through to normal drop handling
+	}
+
+	// Check if this is a direct email to a mask (inbound relay)
+	const maskLookup = await env.DB.prepare(
+		"SELECT id FROM email_masks WHERE id = ? AND active = 1",
+	).bind(normalizeInbox(localPart.split("+")[0]) || "").first<{ id: string }>();
+
+	if (maskLookup) {
+		const rule = await findRelayRule(env, maskLookup.id);
+		if (rule) {
+			const rawBytes = await new Response(message.raw).arrayBuffer();
+			const parser = new PostalMime();
+			const parsed = await parser.parse(rawBytes);
+
+			const replyTo = buildRelayAddress(from, maskLookup.id, env.DOMAIN);
+
+			await enqueueRelay(env, {
+				maskId: maskLookup.id,
+				direction: "inbound",
+				from: replyTo,
+				to: rule.target,
+				replyTo,
+				subject: parsed.subject || "(no subject)",
+				textBody: parsed.text ? stripQuotedText(parsed.text) : undefined,
+				htmlBody: parsed.html ? stripQuotedHtml(parsed.html) : undefined,
+				inReplyTo: message.headers.get("message-id") || undefined,
+			});
+			return;
+		}
+	}
+
+	// Normal drop handling
 	const [rawInbox, ...topicParts] = localPart.split("+");
 	const inbox = normalizeInbox(rawInbox) || "unknown";
 	const topic = topicParts.length > 0 ? topicParts.join("+") : null;

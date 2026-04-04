@@ -10,6 +10,7 @@ import { validateGoogleToken } from "../lib/google-auth";
 import { handlePresign, handleMultipartInit, handleMultipartComplete, handleConfirm } from "./upload";
 import { normalizeInbox } from "../lib/normalize";
 import { handleRules } from "./rules";
+import { handleMasks } from "./masks";
 
 export async function handleAPI(
 	request: Request,
@@ -42,7 +43,7 @@ export async function handleAPI(
 	}
 
 	// Admin-only routes
-	if (path.startsWith("/api/keys") || path.startsWith("/api/targets") || path.startsWith("/api/users") || path.startsWith("/api/rules") || path.startsWith("/api/deliveries")) {
+	if (path.startsWith("/api/keys") || path.startsWith("/api/targets") || path.startsWith("/api/users") || path.startsWith("/api/rules") || path.startsWith("/api/deliveries") || path.startsWith("/api/masks")) {
 		if (!isAdmin(request, env)) {
 			return Response.json({ error: "admin required" }, { status: 403, headers: corsHeaders });
 		}
@@ -50,9 +51,11 @@ export async function handleAPI(
 			? handleKeys
 			: path.startsWith("/api/users")
 				? handleUsers
-				: path.startsWith("/api/rules") || path.startsWith("/api/deliveries")
-					? handleRules
-					: handleTargets;
+				: path.startsWith("/api/masks")
+					? handleMasks
+					: path.startsWith("/api/rules") || path.startsWith("/api/deliveries")
+						? handleRules
+						: handleTargets;
 		const res = await handler(request, env, url);
 		addHeaders(res, corsHeaders);
 		return res;

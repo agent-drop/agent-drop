@@ -22,8 +22,8 @@ export async function handleRules(
 		if (!body.pattern || !body.type || !body.target) {
 			return Response.json({ error: "pattern, type, and target required" }, { status: 400 });
 		}
-		if (body.type !== "forward" && body.type !== "webhook") {
-			return Response.json({ error: "type must be 'forward' or 'webhook'" }, { status: 400 });
+		if (body.type !== "forward" && body.type !== "webhook" && body.type !== "relay") {
+			return Response.json({ error: "type must be 'forward', 'webhook', or 'relay'" }, { status: 400 });
 		}
 
 		const id = crypto.randomUUID();
