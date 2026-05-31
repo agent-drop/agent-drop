@@ -7,9 +7,9 @@ import type { Env } from "../types";
 
 interface AttachmentInput {
 	filename?: string;
-	content_type?: string;
-	data_base64?: string; // small inline attachment
-	r2_key?: string; // uploaded to outbound-tmp/, pulled here
+	contentType?: string;
+	dataBase64?: string; // small inline attachment
+	r2Key?: string; // uploaded to outbound/temp/, pulled here
 	url?: string; // remote, fetched here
 	inline?: boolean;
 	cid?: string;
@@ -41,23 +41,23 @@ function asList(v: string | string[] | undefined): string[] {
 async function resolveAttachment(env: Env, a: AttachmentInput): Promise<MimeAttachment> {
 	const inline = !!a.inline || !!a.cid;
 
-	if (a.data_base64) {
+	if (a.dataBase64) {
 		return {
 			filename: a.filename || "attachment",
-			contentType: a.content_type || "application/octet-stream",
-			contentBase64: a.data_base64,
+			contentType: a.contentType || "application/octet-stream",
+			contentBase64: a.dataBase64,
 			inline,
 			cid: a.cid,
 		};
 	}
 
-	if (a.r2_key) {
-		const obj = await env.BUCKET.get(a.r2_key);
-		if (!obj) throw new Error(`attachment not found in R2: ${a.r2_key}`);
+	if (a.r2Key) {
+		const obj = await env.BUCKET.get(a.r2Key);
+		if (!obj) throw new Error(`attachment not found in R2: ${a.r2Key}`);
 		const buf = await obj.arrayBuffer();
 		return {
-			filename: a.filename || obj.customMetadata?.originalFilename || basename(a.r2_key),
-			contentType: a.content_type || obj.httpMetadata?.contentType || "application/octet-stream",
+			filename: a.filename || obj.customMetadata?.originalFilename || basename(a.r2Key),
+			contentType: a.contentType || obj.httpMetadata?.contentType || "application/octet-stream",
 			contentBase64: bufToBase64(buf),
 			inline,
 			cid: a.cid,
@@ -71,14 +71,14 @@ async function resolveAttachment(env: Env, a: AttachmentInput): Promise<MimeAtta
 		return {
 			filename: a.filename || basename(a.url),
 			contentType:
-				a.content_type || r.headers.get("content-type")?.split(";")[0] || "application/octet-stream",
+				a.contentType || r.headers.get("content-type")?.split(";")[0] || "application/octet-stream",
 			contentBase64: bufToBase64(buf),
 			inline,
 			cid: a.cid,
 		};
 	}
 
-	throw new Error("attachment must have one of: data_base64, r2_key, url");
+	throw new Error("attachment must have one of: dataBase64, r2Key, url");
 }
 
 // POST /api/send/:inbox - send an email on behalf of a box (From: {inbox}@DOMAIN)
@@ -87,15 +87,16 @@ export async function handleSend(request: Request, env: Env, inbox: string): Pro
 		to?: string | string[];
 		cc?: string | string[];
 		bcc?: string | string[];
-		reply_to?: string;
-		from_name?: string;
+		replyTo?: string;
+		fromName?: string;
 		subject?: string;
 		text?: string;
 		html?: string;
 		topic?: string;
-		in_reply_to?: string;
+		inReplyTo?: string;
 		attachments?: AttachmentInput[];
-		dry_run?: boolean;
+		dryRun?: boolean;
+		deleteAfterSend?: boolean;
 	};
 
 	const to = asList(body.to);
@@ -117,17 +118,17 @@ export async function handleSend(request: Request, env: Env, inbox: string): Pro
 
 	// From address: optional +topic, optional display name
 	const addr = `${inbox}${body.topic ? `+${body.topic}` : ""}@${env.DOMAIN}`;
-	const from = body.from_name ? `"${body.from_name.replace(/"/g, "")}" <${addr}>` : addr;
+	const from = body.fromName ? `"${body.fromName.replace(/"/g, "")}" <${addr}>` : addr;
 
-	// Threading: resolve in_reply_to (a drop id -> its message-id, or a raw <message-id>)
+	// Threading: resolve inReplyTo (a drop id -> its message-id, or a raw <message-id>)
 	let inReplyTo: string | undefined;
 	let references: string | undefined;
-	if (body.in_reply_to) {
-		if (body.in_reply_to.startsWith("<")) {
-			inReplyTo = body.in_reply_to;
+	if (body.inReplyTo) {
+		if (body.inReplyTo.startsWith("<")) {
+			inReplyTo = body.inReplyTo;
 		} else {
 			const row = await env.DB.prepare("SELECT metadata FROM drops WHERE id = ?")
-				.bind(body.in_reply_to)
+				.bind(body.inReplyTo)
 				.first<{ metadata: string | null }>();
 			if (row?.metadata) {
 				try {
@@ -158,7 +159,7 @@ export async function handleSend(request: Request, env: Env, inbox: string): Pro
 		from,
 		to,
 		cc,
-		replyTo: body.reply_to,
+		replyTo: body.replyTo,
 		subject: body.subject,
 		textBody: body.text,
 		htmlBody: body.html,
@@ -167,9 +168,9 @@ export async function handleSend(request: Request, env: Env, inbox: string): Pro
 		attachments,
 	});
 
-	if (body.dry_run) {
+	if (body.dryRun) {
 		return Response.json({
-			dry_run: true,
+			dryRun: true,
 			from,
 			to,
 			cc,
@@ -182,12 +183,20 @@ export async function handleSend(request: Request, env: Env, inbox: string): Pro
 				cid: a.cid,
 				bytes: Math.floor((a.contentBase64.length * 3) / 4),
 			})),
-			mime_bytes: raw.length,
+			mimeBytes: raw.length,
 			mime: raw,
 		});
 	}
 
 	const messageId = await sendRawEmail(env, raw, { to, cc, bcc });
+
+	// Opt-in cleanup: delete the outbound/temp R2 objects we just consumed
+	if (body.deleteAfterSend) {
+		const keys = (body.attachments || [])
+			.map((a) => a.r2Key)
+			.filter((k): k is string => !!k && k.startsWith("outbound/temp/"));
+		await Promise.all(keys.map((k) => env.BUCKET.delete(k)));
+	}
 
 	// Log outbound
 	const id = generateId();
@@ -215,19 +224,19 @@ export async function handleSendPresign(
 	}
 
 	const slugged = slugifyFilename(body.fileName);
-	const key = `outbound-tmp/${inbox}/${generateId()}/${slugged}`;
+	const r2Key = `outbound/temp/${inbox}/${generateId()}/${slugged}`;
 	const ct = body.contentType || "application/octet-stream";
 
 	const aws = new AwsClient({
 		accessKeyId: env.R2_ACCESS_KEY_ID,
 		secretAccessKey: env.R2_SECRET_ACCESS_KEY,
 	});
-	const url = new URL(`${R2_S3_ENDPOINT}/${R2_BUCKET}/${key}`);
+	const url = new URL(`${R2_S3_ENDPOINT}/${R2_BUCKET}/${r2Key}`);
 	url.searchParams.set("X-Amz-Expires", "3600");
 	const signed = await aws.sign(
 		new Request(url, { method: "PUT", headers: { "Content-Type": ct } }),
 		{ aws: { signQuery: true } },
 	);
 
-	return Response.json({ uploadUrl: signed.url, r2_key: key, fileName: slugged });
+	return Response.json({ uploadUrl: signed.url, r2Key, fileName: slugged });
 }
