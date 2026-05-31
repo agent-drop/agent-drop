@@ -61,58 +61,152 @@ export async function findRelayRule(
 	return null;
 }
 
-// Build a raw MIME email for SES SendRawEmail
+// ---------------------------------------------------------------------------
+// MIME assembly
+// ---------------------------------------------------------------------------
+
+export interface MimeAttachment {
+	filename: string;
+	contentType: string;
+	contentBase64: string; // already base64-encoded bytes
+	inline?: boolean;
+	cid?: string;
+}
+
+// base64-encode a UTF-8 string
+function b64(s: string): string {
+	return btoa(unescape(encodeURIComponent(s)));
+}
+
+// wrap a base64 blob to 76-char lines (RFC 2045)
+function wrap76(s: string): string {
+	return (s.match(/.{1,76}/g) || []).join("\r\n");
+}
+
+// RFC 2047-encode a header value if it contains non-ASCII
+function encodeHeaderWord(s: string): string {
+	return /^[\x20-\x7E]*$/.test(s) ? s : `=?UTF-8?B?${b64(s)}?=`;
+}
+
+interface MimeEntity {
+	ct: string;
+	headers?: string[];
+	body: string;
+}
+
+function renderPart(e: MimeEntity): string {
+	return [`Content-Type: ${e.ct}`, ...(e.headers || []), "", e.body].join("\r\n");
+}
+
+function leafText(mime: string, text: string): MimeEntity {
+	return {
+		ct: `${mime}; charset=UTF-8`,
+		headers: ["Content-Transfer-Encoding: base64"],
+		body: wrap76(b64(text)),
+	};
+}
+
+function leafAttachment(a: MimeAttachment): MimeEntity {
+	const name = a.filename.replace(/"/g, "");
+	const disp = a.inline ? "inline" : "attachment";
+	const headers = [
+		"Content-Transfer-Encoding: base64",
+		`Content-Disposition: ${disp}; filename="${name}"`,
+	];
+	if (a.cid) headers.push(`Content-ID: <${a.cid}>`);
+	return {
+		ct: `${a.contentType}; name="${name}"`,
+		headers,
+		body: wrap76(a.contentBase64),
+	};
+}
+
+function multipart(subtype: string, parts: MimeEntity[]): MimeEntity {
+	const boundary = `----=_Part_${crypto.randomUUID()}`;
+	const body = [
+		...parts.flatMap((p) => [`--${boundary}`, renderPart(p)]),
+		`--${boundary}--`,
+	].join("\r\n");
+	return { ct: `multipart/${subtype}; boundary="${boundary}"`, body };
+}
+
+// Build a raw MIME email for SES SendRawEmail.
+// Nesting: multipart/mixed[ multipart/related[ multipart/alternative, inline... ], attachments... ]
 export function buildRawEmail(opts: {
 	from: string;
-	to: string;
+	to: string | string[];
+	cc?: string | string[];
 	replyTo?: string;
 	subject: string;
 	textBody?: string;
 	htmlBody?: string;
 	inReplyTo?: string;
 	references?: string;
+	attachments?: MimeAttachment[];
 }): string {
+	const toList = (Array.isArray(opts.to) ? opts.to : [opts.to]).filter(Boolean);
+	const ccList = (Array.isArray(opts.cc) ? opts.cc : opts.cc ? [opts.cc] : []).filter(Boolean);
 	const messageId = `<${crypto.randomUUID()}@example.com>`;
-	const boundary = `----=_Part_${crypto.randomUUID()}`;
 	const date = new Date().toUTCString();
 
 	const headers = [
 		`From: ${opts.from}`,
-		`To: ${opts.to}`,
+		`To: ${toList.join(", ")}`,
+		ccList.length ? `Cc: ${ccList.join(", ")}` : null,
 		opts.replyTo ? `Reply-To: ${opts.replyTo}` : null,
-		`Subject: ${opts.subject}`,
+		`Subject: ${encodeHeaderWord(opts.subject)}`,
 		`Date: ${date}`,
 		`Message-ID: ${messageId}`,
 		opts.inReplyTo ? `In-Reply-To: ${opts.inReplyTo}` : null,
 		opts.references ? `References: ${opts.references}` : null,
 		`MIME-Version: 1.0`,
-	].filter(Boolean);
+	].filter(Boolean) as string[];
 
-	if (opts.htmlBody && opts.textBody) {
-		headers.push(`Content-Type: multipart/alternative; boundary="${boundary}"`);
-		return [
-			...headers,
-			"",
-			`--${boundary}`,
-			"Content-Type: text/plain; charset=UTF-8",
-			"Content-Transfer-Encoding: quoted-printable",
-			"",
-			opts.textBody,
-			`--${boundary}`,
-			"Content-Type: text/html; charset=UTF-8",
-			"Content-Transfer-Encoding: quoted-printable",
-			"",
-			opts.htmlBody,
-			`--${boundary}--`,
-		].join("\r\n");
+	// 1. body (alternative if both, else single)
+	let body: MimeEntity;
+	if (opts.textBody && opts.htmlBody) {
+		body = multipart("alternative", [
+			leafText("text/plain", opts.textBody),
+			leafText("text/html", opts.htmlBody),
+		]);
+	} else if (opts.htmlBody) {
+		body = leafText("text/html", opts.htmlBody);
+	} else {
+		body = leafText("text/plain", opts.textBody || "");
 	}
 
-	headers.push("Content-Type: text/plain; charset=UTF-8");
-	return [...headers, "", opts.textBody || ""].join("\r\n");
+	const atts = opts.attachments || [];
+	const inlines = atts.filter((a) => a.inline);
+	const regular = atts.filter((a) => !a.inline);
+
+	// 2. related wrapper for inline (cid) images
+	let related = body;
+	if (inlines.length) {
+		related = multipart("related", [body, ...inlines.map(leafAttachment)]);
+	}
+
+	// 3. mixed wrapper for regular attachments
+	let root = related;
+	if (regular.length) {
+		root = multipart("mixed", [related, ...regular.map(leafAttachment)]);
+	}
+
+	return [
+		...headers,
+		`Content-Type: ${root.ct}`,
+		...(root.headers || []),
+		"",
+		root.body,
+	].join("\r\n");
 }
 
-// Send raw email via SES
-export async function sendRawEmail(env: Env, rawMessage: string): Promise<string> {
+// Send raw email via SES. Optional explicit destination drives the envelope
+// (and keeps Bcc recipients out of the visible headers).
+export async function sendRawEmail(
+	env: Env,
+	rawMessage: string,
+	destination?: { to?: string[]; cc?: string[]; bcc?: string[] },
+): Promise<string> {
 	const ses = new AwsClient({
 		accessKeyId: env.AWS_ACCESS_KEY_ID,
 		secretAccessKey: env.AWS_SECRET_ACCESS_KEY,
@@ -122,16 +216,21 @@ export async function sendRawEmail(env: Env, rawMessage: string): Promise<string
 
 	const encoded = btoa(unescape(encodeURIComponent(rawMessage)));
 
+	const payload: Record<string, unknown> = { Content: { Raw: { Data: encoded } } };
+	if (destination) {
+		const dest: Record<string, string[]> = {};
+		if (destination.to?.length) dest.ToAddresses = destination.to;
+		if (destination.cc?.length) dest.CcAddresses = destination.cc;
+		if (destination.bcc?.length) dest.BccAddresses = destination.bcc;
+		payload.Destination = dest;
+	}
+
 	const res = await ses.fetch(
 		`https://email.${env.SES_REGION}.amazonaws.com/v2/email/outbound-emails`,
 		{
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({
-				Content: {
-					Raw: { Data: encoded },
-				},
-			}),
+			body: JSON.stringify(payload),
 		},
 	);
 
