@@ -1,7 +1,7 @@
 import type { Env } from "../types";
 import { handleInbox } from "./inbox";
 import { handleDrop, type DropContext } from "./drop";
-import { handleSend, handleSendPresign } from "./send";
+import { handleSend, handleSendPresign, handleCompose } from "./send";
 import { handleKeys } from "./keys";
 import { handleTargets, validateDropToken } from "./targets";
 import { handleUsers } from "./users";
@@ -227,6 +227,7 @@ export async function handleAPI(
 	const inboxMatch = path.match(/^\/api\/inbox\/([^/]+)(.*)$/);
 	const sendPresignMatch = path.match(/^\/api\/send\/presign\/([^/]+)$/);
 	const sendMatch = path.match(/^\/api\/send\/([^/]+)$/);
+	const composeMatch = path.match(/^\/api\/compose\/([^/]+)$/);
 
 	if (sendPresignMatch && method === "POST") {
 		const inboxName = requireInbox(sendPresignMatch[1]);
@@ -235,6 +236,17 @@ export async function handleAPI(
 			return Response.json({ error: "write permission required" }, { status: 403, headers: corsHeaders });
 		}
 		const res = await handleSendPresign(request, env, inboxName);
+		addHeaders(res, corsHeaders);
+		return res;
+	}
+
+	if (composeMatch && method === "POST") {
+		const inboxName = requireInbox(composeMatch[1]);
+		if (inboxName instanceof Response) return inboxName;
+		if (auth.permissions !== "write" && auth.permissions !== "admin") {
+			return Response.json({ error: "write permission required" }, { status: 403, headers: corsHeaders });
+		}
+		const res = await handleCompose(request, env, inboxName);
 		addHeaders(res, corsHeaders);
 		return res;
 	}

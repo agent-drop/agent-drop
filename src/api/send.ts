@@ -81,24 +81,38 @@ async function resolveAttachment(env: Env, a: AttachmentInput): Promise<MimeAtta
 	throw new Error("attachment must have one of: dataBase64, r2Key, url");
 }
 
-// POST /api/send/:inbox - send an email on behalf of a box (From: {inbox}@DOMAIN)
-export async function handleSend(request: Request, env: Env, inbox: string): Promise<Response> {
-	const body = (await request.json()) as {
-		to?: string | string[];
-		cc?: string | string[];
-		bcc?: string | string[];
-		replyTo?: string;
-		fromName?: string;
-		subject?: string;
-		text?: string;
-		html?: string;
-		topic?: string;
-		inReplyTo?: string;
-		attachments?: AttachmentInput[];
-		dryRun?: boolean;
-		deleteAfterSend?: boolean;
-	};
+interface EmailBody {
+	to?: string | string[];
+	cc?: string | string[];
+	bcc?: string | string[];
+	replyTo?: string;
+	fromName?: string;
+	subject?: string;
+	text?: string;
+	html?: string;
+	topic?: string;
+	inReplyTo?: string;
+	attachments?: AttachmentInput[];
+	deleteAfterSend?: boolean;
+}
 
+interface PreparedEmail {
+	raw: string;
+	from: string;
+	to: string[];
+	cc: string[];
+	bcc: string[];
+	subject: string;
+	attachments: MimeAttachment[];
+}
+
+// Shared by /api/send and /api/compose: validate, resolve attachments, assemble MIME.
+// Returns a 4xx Response on validation/resolution failure, else the prepared email.
+async function prepareEmail(
+	env: Env,
+	inbox: string,
+	body: EmailBody,
+): Promise<PreparedEmail | Response> {
 	const to = asList(body.to);
 	const cc = asList(body.cc);
 	const bcc = asList(body.bcc);
@@ -168,26 +182,31 @@ export async function handleSend(request: Request, env: Env, inbox: string): Pro
 		attachments,
 	});
 
-	if (body.dryRun) {
-		return Response.json({
-			dryRun: true,
-			from,
-			to,
-			cc,
-			bcc,
-			subject: body.subject,
-			attachments: attachments.map((a) => ({
-				filename: a.filename,
-				contentType: a.contentType,
-				inline: a.inline,
-				cid: a.cid,
-				bytes: Math.floor((a.contentBase64.length * 3) / 4),
-			})),
-			mimeBytes: raw.length,
-			mime: raw,
-		});
-	}
+	return { raw, from, to, cc, bcc, subject: body.subject, attachments };
+}
 
+// POST /api/compose/:inbox - assemble the email exactly as /api/send would,
+// but return the raw RFC822 .eml instead of sending. Same code path, no SES.
+export async function handleCompose(request: Request, env: Env, inbox: string): Promise<Response> {
+	const body = (await request.json()) as EmailBody;
+	const prepared = await prepareEmail(env, inbox, body);
+	if (prepared instanceof Response) return prepared;
+
+	return new Response(prepared.raw, {
+		headers: {
+			"Content-Type": "message/rfc822; charset=utf-8",
+			"Content-Disposition": 'inline; filename="composed.eml"',
+		},
+	});
+}
+
+// POST /api/send/:inbox - send an email on behalf of a box (From: {inbox}@DOMAIN)
+export async function handleSend(request: Request, env: Env, inbox: string): Promise<Response> {
+	const body = (await request.json()) as EmailBody;
+	const prepared = await prepareEmail(env, inbox, body);
+	if (prepared instanceof Response) return prepared;
+
+	const { raw, to, cc, bcc } = prepared;
 	const messageId = await sendRawEmail(env, raw, { to, cc, bcc });
 
 	// Opt-in cleanup: delete the outbound/temp R2 objects we just consumed
