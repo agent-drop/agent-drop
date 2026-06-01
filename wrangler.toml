@@ -23,6 +23,9 @@ database_name = "agent-drop-db"
 database_id = "your-d1-database-id"
 migrations_dir = "migrations"
 
+[[send_email]]
+name = "EMAIL"
+
 [[queues.producers]]
 queue = "agent-drop-webhooks"
 binding = "WEBHOOK_QUEUE"

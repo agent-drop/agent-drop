@@ -5,3 +5,4 @@ bun.lock
 client_secret_*.json
 .log/
 **/.log/
+.wrangler/

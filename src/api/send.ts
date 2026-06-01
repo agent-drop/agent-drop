@@ -1,6 +1,6 @@
 import { AwsClient } from "aws4fetch";
 import { generateId } from "../lib/id";
-import { buildRawEmail, sendRawEmail, type MimeAttachment } from "../lib/relay";
+import { buildRawEmail, sendRawViaBinding, type MimeAttachment } from "../lib/relay";
 import { slugifyFilename } from "../lib/normalize";
 import { R2_BUCKET, R2_S3_ENDPOINT } from "../types";
 import type { Env } from "../types";
@@ -206,8 +206,8 @@ export async function handleSend(request: Request, env: Env, inbox: string): Pro
 	const prepared = await prepareEmail(env, inbox, body);
 	if (prepared instanceof Response) return prepared;
 
-	const { raw, to, cc, bcc } = prepared;
-	const messageId = await sendRawEmail(env, raw, { to, cc, bcc });
+	const { raw, from, to, cc, bcc } = prepared;
+	const messageId = await sendRawViaBinding(env, raw, from, { to, cc, bcc });
 
 	// Opt-in cleanup: delete the outbound/temp R2 objects we just consumed
 	if (body.deleteAfterSend) {

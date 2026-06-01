@@ -1,3 +1,4 @@
+import { EmailMessage } from "cloudflare:email";
 import { AwsClient } from "aws4fetch";
 import type { Env } from "../types";
 import { generateId } from "./id";
@@ -200,8 +201,41 @@ export function buildRawEmail(opts: {
 	].join("\r\n");
 }
 
-// Send raw email via SES. Optional explicit destination drives the envelope
-// (and keeps Bcc recipients out of the visible headers).
+// Strip a "Display Name <addr>" wrapper down to the bare address for the SMTP envelope.
+function bareAddr(s: string): string {
+	const m = s.match(/<([^>]+)>/);
+	return (m ? m[1] : s).trim();
+}
+
+// Send raw MIME via the Cloudflare Email Sending binding (cloudflare:email).
+// The legacy EmailMessage envelope is single-recipient, so we send one message
+// per envelope recipient (to + cc + bcc) sharing the same raw body - this matches
+// SES SendRawEmail's Destination semantics and keeps Bcc out of the visible headers
+// (buildRawEmail never writes a Bcc header). Returns the last platform message id.
+export async function sendRawViaBinding(
+	env: Env,
+	rawMessage: string,
+	envelopeFrom: string,
+	destination: { to?: string[]; cc?: string[]; bcc?: string[] },
+): Promise<string> {
+	const from = bareAddr(envelopeFrom);
+	const recipients = [...(destination.to || []), ...(destination.cc || []), ...(destination.bcc || [])]
+		.map(bareAddr)
+		.filter(Boolean);
+	if (recipients.length === 0) throw new Error("no envelope recipients");
+
+	let lastId = "";
+	for (const rcpt of recipients) {
+		const msg = new EmailMessage(from, rcpt, rawMessage);
+		const res = (await env.EMAIL.send(msg)) as { messageId?: string } | undefined;
+		lastId = res?.messageId ?? lastId;
+	}
+	return lastId;
+}
+
+// LEGACY/FALLBACK: send raw email via AWS SES. Kept available in case we need to
+// revert from the Cloudflare binding. No longer wired into the live send path.
+// Optional explicit destination drives the envelope (and keeps Bcc out of headers).
 export async function sendRawEmail(
 	env: Env,
 	rawMessage: string,
@@ -300,11 +334,11 @@ export async function processRelayMessage(
 	}
 
 	try {
-		const messageId = await sendRawEmail(env, relay.rawEmail);
+		const messageId = await sendRawViaBinding(env, relay.rawEmail, relay.from, { to: [relay.to] });
 
 		await env.DB.prepare(
 			"UPDATE delivery_log SET status = 'success', attempts = ?, completed_at = ?, error = ? WHERE id = ?",
-		).bind(relay.attempt + 1, Date.now(), `ses:${messageId}`, relay.logId).run();
+		).bind(relay.attempt + 1, Date.now(), `cf:${messageId}`, relay.logId).run();
 		msg.ack();
 	} catch (err: any) {
 		await env.DB.prepare(
