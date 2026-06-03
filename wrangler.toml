@@ -7,19 +7,10 @@ account_id = "your-cloudflare-account-id"
 directory = "./web/dist"
 binding = "ASSETS"
 not_found_handling = "single-page-application"
-# Worker runs first for every request. Required so {box}.example.com subdomains
-# (static hosting served from R2) reach the Worker instead of the apex SPA's
-# index.html. Apex static assets fall through to env.ASSETS.fetch() one hop later.
-run_worker_first = true
+run_worker_first = ["/api/*"]
 
 [[routes]]
 pattern = "example.com/*"
-zone_name = "example.com"
-
-# Wildcard subdomain hosting: {box}.example.com/{site}/... (needs a proxied
-# *.example.com DNS record; Universal SSL covers one wildcard level).
-[[routes]]
-pattern = "*.example.com/*"
 zone_name = "example.com"
 
 [[r2_buckets]]
