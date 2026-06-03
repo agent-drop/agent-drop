@@ -1,8 +1,12 @@
 import type { Env } from "../types";
 import { normalizeInbox } from "./normalize";
 
-// Reserved first-level labels that must NOT be treated as a hosting box.
-const RESERVED_LABELS = new Set(["www", "agent", "mail", "mx", "api"]);
+// Top-level reserved path prefix for public static hosting:
+//   example.com/f/{box}/{site}/...  ->  R2  sites/{box}/{site}/...
+// Kept under the apex example.com/* route (NOT a subdomain), so it can never
+// collide with other example.com subdomains. /f/* is added to run_worker_first
+// so these requests reach the Worker instead of the SPA fallback.
+export const HOST_PREFIX = "f";
 
 /**
  * Normalize a site (subfolder) name: lowercase, kebab, a-z0-9 and hyphens.
@@ -58,36 +62,34 @@ function notFound(msg = "Not found"): Response {
 }
 
 /**
- * Serve a hosted site request for {box}.{DOMAIN}/{site}/...
- * Returns null if `host` is not a hosting subdomain (caller falls through to
- * the app / API). Otherwise always returns a Response.
+ * Public URL for a hosted site.
+ */
+export function siteUrl(env: Env, inbox: string, site: string): string {
+	return `https://${env.DOMAIN}/${HOST_PREFIX}/${inbox}/${site}/`;
+}
+
+/**
+ * Serve a hosting request. Called only for paths under /{HOST_PREFIX}/...
+ * Path shape: /f/{box}/{site}/{relpath}. Always returns a Response.
  */
 export async function serveHostedSite(
 	request: Request,
 	env: Env,
 	url: URL,
-): Promise<Response | null> {
-	const host = url.hostname.toLowerCase();
-	const apex = env.DOMAIN.toLowerCase();
+): Promise<Response> {
+	// Strip the leading "/f" prefix, keep the rest of the segments.
+	const segs = url.pathname.split("/").filter(Boolean); // ["f", box, site, ...rest]
+	// segs[0] === HOST_PREFIX (guaranteed by the caller).
 
-	if (host === apex || !host.endsWith(`.${apex}`)) return null;
-	const label = host.slice(0, host.length - apex.length - 1);
-	// Only single-label subdomains (no nested dots) and not reserved infra labels.
-	if (!label || label.includes(".") || RESERVED_LABELS.has(label)) return null;
+	const inbox = segs[1] ? normalizeInbox(decodeURIComponent(segs[1])) : null;
+	const site = segs[2] ? normalizeSite(decodeURIComponent(segs[2])) : null;
 
-	const inbox = normalizeInbox(label);
-	if (!inbox) return notFound();
-
-	const segs = url.pathname.split("/").filter(Boolean);
-	// Root of the subdomain has no site subfolder -> bounce to the app.
-	if (segs.length === 0) {
-		return Response.redirect(`https://${apex}/`, 302);
+	// /f, /f/{box} (no site) -> nothing to serve, bounce to the app.
+	if (!inbox || !site) {
+		return Response.redirect(`https://${env.DOMAIN}/`, 302);
 	}
 
-	const site = normalizeSite(decodeURIComponent(segs[0]));
-	if (!site) return notFound();
-
-	// Look up the site registry: enforce existence + expiry + optional token.
+	// Registry: enforce existence + expiry + optional private token.
 	const row = await env.DB.prepare(
 		"SELECT auth_token, expires_at FROM hosted_sites WHERE inbox = ? AND site = ?",
 	).bind(inbox, site).first<{ auth_token: string | null; expires_at: number | null }>();
@@ -100,14 +102,14 @@ export async function serveHostedSite(
 		return new Response("Unauthorized", { status: 401, headers: { "Content-Type": "text/plain" } });
 	}
 
-	const rest = segs.slice(1).map((s) => decodeURIComponent(s)).filter((s) => s !== "." && s !== "..");
+	const rest = segs.slice(3).map((s) => decodeURIComponent(s)).filter((s) => s !== "." && s !== "..");
 	const prefix = `sites/${inbox}/${site}`;
 
 	let key: string;
 	if (rest.length === 0) {
-		// /{site} -> redirect to /{site}/ so relative links resolve correctly.
+		// /f/{box}/{site} -> redirect to .../ so relative links resolve correctly.
 		if (!url.pathname.endsWith("/")) {
-			return Response.redirect(`https://${host}/${site}/`, 301);
+			return Response.redirect(siteUrl(env, inbox, site), 301);
 		}
 		key = `${prefix}/index.html`;
 	} else {

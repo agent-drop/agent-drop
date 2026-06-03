@@ -2,7 +2,7 @@ import { handleEmail } from "./email-handler";
 import { handleAPI } from "./api/router";
 import { processWebhookBatch } from "./lib/rules";
 import { processRelayMessage } from "./lib/relay";
-import { serveHostedSite } from "./lib/hosting";
+import { serveHostedSite, HOST_PREFIX } from "./lib/hosting";
 import type { Env, QueueMessage } from "./types";
 
 export default {
@@ -13,14 +13,15 @@ export default {
 	): Promise<Response> {
 		const url = new URL(request.url);
 
-		// Public static hosting: {box}.example.com/{site}/... served from R2.
-		// Returns null for the apex domain (and reserved labels) so the app/API
-		// take over below. run_worker_first=true guarantees we see every request.
-		const hosted = await serveHostedSite(request, env, url);
-		if (hosted) return hosted;
-
 		if (url.pathname.startsWith("/api/")) {
 			return handleAPI(request, env, url, ctx);
+		}
+
+		// Public static hosting at example.com/f/{box}/{site}/... served from R2.
+		// Scoped to the /f/ prefix (in run_worker_first) so it never touches the
+		// app's own pages or any other route.
+		if (url.pathname === `/${HOST_PREFIX}` || url.pathname.startsWith(`/${HOST_PREFIX}/`)) {
+			return serveHostedSite(request, env, url);
 		}
 
 		return env.ASSETS.fetch(request);

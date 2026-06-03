@@ -1,6 +1,6 @@
 import { AwsClient } from "aws4fetch";
 import { generateId } from "../lib/id";
-import { normalizeSite, sanitizeSitePath } from "../lib/hosting";
+import { normalizeSite, sanitizeSitePath, siteUrl } from "../lib/hosting";
 import type { Env } from "../types";
 import { R2_BUCKET, R2_S3_ENDPOINT } from "../types";
 
@@ -101,7 +101,7 @@ export async function handleHostFinalize(
 
 	return Response.json({
 		site,
-		url: `https://${inbox}.${env.DOMAIN}/${site}/`,
+		url: siteUrl(env, inbox, site),
 		fileCount,
 		totalBytes,
 		expiresAt,
@@ -118,7 +118,7 @@ export async function handleHostList(env: Env, inbox: string): Promise<Response>
 	const sites = results.map((r: any) => ({
 		inbox: r.inbox,
 		site: r.site,
-		url: `https://${r.inbox}.${env.DOMAIN}/${r.site}/`,
+		url: siteUrl(env, r.inbox, r.site),
 		file_count: r.file_count,
 		total_bytes: r.total_bytes,
 		private: !!r.auth_token,

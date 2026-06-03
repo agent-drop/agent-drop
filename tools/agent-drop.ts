@@ -1660,7 +1660,7 @@ program
 	})
 
 // ============================================================================
-// host - publish static files to {box}.example.com/{site}/
+// host - publish static files to example.com/f/{box}/{site}/
 // ============================================================================
 
 function walkFiles(root: string): string[] {
@@ -1676,7 +1676,7 @@ function walkFiles(root: string): string[] {
 
 program
 	.command("host <box> <site> [paths...]")
-	.description("Publish static files publicly at https://<box>.example.com/<site>/")
+	.description("Publish static files publicly at https://example.com/f/<box>/<site>/")
 	.option("--ttl <dur>", "Auto-expire after a duration (e.g. 24h, 7d)")
 	.option("--base <dir>", "Compute relative paths from this dir (preserves structure)")
 	.option("--auth <token>", "Make the site private: require ?auth=<token> to view")
@@ -1705,7 +1705,7 @@ program
 			}
 			if (files.length === 0) throw new Error("no files found to upload")
 
-			console.log(chalk.bold(`\n  Hosting ${files.length} file(s) -> ${box}.example.com/${site}/\n`))
+			console.log(chalk.bold(`\n  Hosting ${files.length} file(s) -> example.com/f/${box}/${site}/\n`))
 			let totalBytes = 0
 			for (const { abs, rel } of files) {
 				const ct = guessContentType(rel)
