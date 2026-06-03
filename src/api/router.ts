@@ -11,6 +11,7 @@ import { handlePresign, handleMultipartInit, handleMultipartComplete, handleConf
 import { normalizeInbox } from "../lib/normalize";
 import { handleRules } from "./rules";
 import { handleMasks } from "./masks";
+import { handleHostPresign, handleHostFinalize, handleHostList, handleHostDelete } from "./host";
 
 export async function handleAPI(
 	request: Request,
@@ -228,6 +229,61 @@ export async function handleAPI(
 	const sendPresignMatch = path.match(/^\/api\/send\/presign\/([^/]+)$/);
 	const sendMatch = path.match(/^\/api\/send\/([^/]+)$/);
 	const composeMatch = path.match(/^\/api\/compose\/([^/]+)$/);
+	const hostPresignMatch = path.match(/^\/api\/host\/presign\/([^/]+)$/);
+	const hostFinalizeMatch = path.match(/^\/api\/host\/finalize\/([^/]+)$/);
+	const hostSiteMatch = path.match(/^\/api\/host\/sites\/([^/]+)\/([^/]+)$/);
+	const hostListMatch = path.match(/^\/api\/host\/sites\/([^/]+)$/);
+
+	function requireWriteScope(inbox: string): Response | null {
+		if (auth.permissions !== "write" && auth.permissions !== "admin") {
+			return Response.json({ error: "write permission required" }, { status: 403, headers: corsHeaders });
+		}
+		if (auth.inboxScope && auth.inboxScope !== inbox) {
+			return Response.json({ error: "inbox not in scope" }, { status: 403, headers: corsHeaders });
+		}
+		return null;
+	}
+
+	if (hostPresignMatch && method === "POST") {
+		const inbox = requireInbox(hostPresignMatch[1]);
+		if (inbox instanceof Response) return inbox;
+		const denied = requireWriteScope(inbox);
+		if (denied) return denied;
+		const res = await handleHostPresign(request, env, inbox);
+		addHeaders(res, corsHeaders);
+		return res;
+	}
+
+	if (hostFinalizeMatch && method === "POST") {
+		const inbox = requireInbox(hostFinalizeMatch[1]);
+		if (inbox instanceof Response) return inbox;
+		const denied = requireWriteScope(inbox);
+		if (denied) return denied;
+		const res = await handleHostFinalize(request, env, inbox);
+		addHeaders(res, corsHeaders);
+		return res;
+	}
+
+	if (hostSiteMatch && method === "DELETE") {
+		const inbox = requireInbox(hostSiteMatch[1]);
+		if (inbox instanceof Response) return inbox;
+		const denied = requireWriteScope(inbox);
+		if (denied) return denied;
+		const res = await handleHostDelete(env, inbox, hostSiteMatch[2]);
+		addHeaders(res, corsHeaders);
+		return res;
+	}
+
+	if (hostListMatch && method === "GET") {
+		const inbox = requireInbox(hostListMatch[1]);
+		if (inbox instanceof Response) return inbox;
+		if (auth.inboxScope && auth.inboxScope !== inbox) {
+			return Response.json({ error: "inbox not in scope" }, { status: 403, headers: corsHeaders });
+		}
+		const res = await handleHostList(env, inbox);
+		addHeaders(res, corsHeaders);
+		return res;
+	}
 
 	if (sendPresignMatch && method === "POST") {
 		const inboxName = requireInbox(sendPresignMatch[1]);

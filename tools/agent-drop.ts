@@ -474,13 +474,24 @@ const UPLOAD_THRESHOLD = 1_000_000 // 1MB: above this, local files go via R2
 const CONTENT_TYPES: Record<string, string> = {
 	".pdf": "application/pdf", ".png": "image/png", ".jpg": "image/jpeg",
 	".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp",
+	".avif": "image/avif", ".ico": "image/x-icon",
 	".svg": "image/svg+xml", ".txt": "text/plain", ".html": "text/html",
 	".htm": "text/html", ".csv": "text/csv", ".json": "application/json",
+	".css": "text/css", ".js": "text/javascript", ".mjs": "text/javascript",
+	".xml": "application/xml", ".wasm": "application/wasm", ".map": "application/json",
+	".webmanifest": "application/manifest+json",
+	".woff": "font/woff", ".woff2": "font/woff2", ".ttf": "font/ttf", ".otf": "font/otf",
 	".zip": "application/zip", ".md": "text/markdown", ".mp3": "audio/mpeg",
-	".mp4": "video/mp4", ".doc": "application/msword",
+	".mp4": "video/mp4", ".webm": "video/webm", ".doc": "application/msword",
 	".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 	".xls": "application/vnd.ms-excel",
 	".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+}
+
+function fmtBytes(n: number): string {
+	if (n < 1024) return `${n}B`
+	if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)}KB`
+	return `${(n / (1024 * 1024)).toFixed(1)}MB`
 }
 
 function guessContentType(filename: string): string {
@@ -1254,20 +1265,21 @@ program
 program
 	.command("rule-add <pattern>")
 	.description("Add a drop rule. Pattern: 'lisa', '*', 'shop-*'")
-	.option("--forward <email>", "Forward emails to this address (supports {inbox}, {name}, {topic})")
+	.option("--forward <email>", "Forward to this address (repeatable, or comma-separated; supports {inbox}, {name}, {topic})", collectArg, [])
 	.option("--webhook <url>", "POST webhook to this URL on drops")
 	.option("--scope <scopes>", "Comma-separated: email,web,api,all", "all")
 	.option("--header <kv...>", "Webhook headers as Key:Value pairs")
 	.option("--priority <n>", "Priority (higher fires first)", "0")
 	.action(async (pattern, opts) => {
 		try {
-			if (!opts.forward && !opts.webhook) {
-				console.error(chalk.red("Specify --forward <email> or --webhook <url>"))
+			const forwards: string[] = (opts.forward || []).flatMap((f: string) => f.split(",")).map((s: string) => s.trim()).filter(Boolean)
+			if (forwards.length === 0 && !opts.webhook) {
+				console.error(chalk.red("Specify --forward <email> (repeatable) or --webhook <url>"))
 				process.exit(1)
 			}
 
-			const type = opts.forward ? "forward" : "webhook"
-			const target = opts.forward || opts.webhook
+			const type = forwards.length > 0 ? "forward" : "webhook"
+			const target = forwards.length > 0 ? forwards.join(",") : opts.webhook
 
 			let headers: Record<string, string> | undefined
 			if (opts.header) {
@@ -1641,6 +1653,138 @@ program
 		const merged = { ...program.opts(), ...opts }
 		try {
 			await cmdSendEmail(merged)
+		} catch (err: any) {
+			console.error(chalk.red(err.message))
+			process.exit(3)
+		}
+	})
+
+// ============================================================================
+// host - publish static files to {box}.example.com/{site}/
+// ============================================================================
+
+function walkFiles(root: string): string[] {
+	const stat = fs.statSync(root)
+	if (stat.isFile()) return [root]
+	const out: string[] = []
+	for (const entry of fs.readdirSync(root)) {
+		if (entry === ".DS_Store") continue
+		out.push(...walkFiles(path.join(root, entry)))
+	}
+	return out
+}
+
+program
+	.command("host <box> <site> [paths...]")
+	.description("Publish static files publicly at https://<box>.example.com/<site>/")
+	.option("--ttl <dur>", "Auto-expire after a duration (e.g. 24h, 7d)")
+	.option("--base <dir>", "Compute relative paths from this dir (preserves structure)")
+	.option("--auth <token>", "Make the site private: require ?auth=<token> to view")
+	.action(async (box, site, paths, opts) => {
+		try {
+			if (!paths || paths.length === 0) {
+				console.error(chalk.red("Provide at least one file or directory to host"))
+				process.exit(1)
+			}
+
+			// Resolve every input into { abs, rel }. A directory contributes its
+			// tree relative to itself; a file contributes its basename. --base
+			// overrides the relative root for everything.
+			const files: { abs: string; rel: string }[] = []
+			for (const p of paths) {
+				const abs = path.resolve(p)
+				if (!fs.existsSync(abs)) throw new Error(`not found: ${p}`)
+				const stat = fs.statSync(abs)
+				const baseDir = opts.base
+					? path.resolve(opts.base)
+					: stat.isDirectory() ? abs : path.dirname(abs)
+				for (const f of walkFiles(abs)) {
+					const rel = path.relative(baseDir, f).split(path.sep).join("/")
+					files.push({ abs: f, rel })
+				}
+			}
+			if (files.length === 0) throw new Error("no files found to upload")
+
+			console.log(chalk.bold(`\n  Hosting ${files.length} file(s) -> ${box}.example.com/${site}/\n`))
+			let totalBytes = 0
+			for (const { abs, rel } of files) {
+				const ct = guessContentType(rel)
+				const data = fs.readFileSync(abs)
+				const pre = await api(`/api/host/presign/${encodeURIComponent(box)}`, {
+					method: "POST",
+					body: { site, path: rel, contentType: ct },
+				})
+				const put = await fetch(pre.uploadUrl, {
+					method: "PUT",
+					headers: { "Content-Type": ct },
+					body: data,
+				})
+				if (!put.ok) throw new Error(`R2 upload failed (${put.status}) for ${rel}`)
+				totalBytes += data.byteLength
+				console.log(`  ${chalk.green("↑")} ${pre.path} ${chalk.dim(`(${fmtBytes(data.byteLength)})`)}`)
+			}
+
+			const ttlHours = opts.ttl ? parseDuration(opts.ttl) / 3_600_000 : undefined
+			const fin = await api(`/api/host/finalize/${encodeURIComponent(box)}`, {
+				method: "POST",
+				body: { site, ttlHours, authToken: opts.auth || null },
+			})
+
+			console.log(chalk.bold(`\n  Live: ${chalk.green(fin.url)}`))
+			console.log(`  ${fin.fileCount} files, ${fmtBytes(fin.totalBytes)}${fin.private ? chalk.yellow("  [private]") : ""}`)
+			if (fin.expiresAt) console.log(chalk.dim(`  Expires: ${isoDate(fin.expiresAt)}`))
+			if (opts.auth) console.log(chalk.dim(`  View with: ${fin.url}?auth=${opts.auth}`))
+			console.log("")
+		} catch (err: any) {
+			console.error(chalk.red(err.message))
+			process.exit(3)
+		}
+	})
+
+// sites - list hosted sites for a box
+program
+	.command("sites <box>")
+	.description("List hosted sites for a box")
+	.action(async (box) => {
+		const merged = program.opts()
+		try {
+			const data = await api(`/api/host/sites/${encodeURIComponent(box)}`)
+			if (merged.format === "json") {
+				console.log(JSON.stringify(data, null, 2))
+				return
+			}
+			const sites = data.sites || []
+			if (sites.length === 0) {
+				console.log(chalk.dim(`\n  No hosted sites for ${box}\n`))
+				return
+			}
+			console.log(chalk.bold(`\n  Hosted sites for ${box} (${sites.length}):\n`))
+			console.log(chalk.dim("  SITE                FILES   SIZE      EXPIRES        URL"))
+			for (const s of sites) {
+				const site = chalk.cyan(String(s.site).padEnd(18))
+				const files = String(s.file_count).padStart(5)
+				const size = fmtBytes(s.total_bytes).padEnd(8)
+				const expires = (s.expires_at ? isoDate(s.expires_at).slice(0, 10) : "never").padEnd(13)
+				const priv = s.private ? chalk.yellow(" [private]") : ""
+				console.log(`  ${site} ${files}   ${size}  ${chalk.dim(expires)}  ${s.url}${priv}`)
+			}
+			console.log("")
+		} catch (err: any) {
+			console.error(chalk.red(err.message))
+			process.exit(3)
+		}
+	})
+
+// unhost - delete a hosted site
+program
+	.command("unhost <box> <site>")
+	.description("Delete a hosted site (removes all its files from R2 - irreversible)")
+	.action(async (box, site) => {
+		try {
+			const data = await api(`/api/host/sites/${encodeURIComponent(box)}/${encodeURIComponent(site)}`, {
+				method: "DELETE",
+			})
+			console.log(chalk.green(`\n  Deleted site '${data.site}' (${data.deleted} file(s) removed)\n`))
 		} catch (err: any) {
 			console.error(chalk.red(err.message))
 			process.exit(3)

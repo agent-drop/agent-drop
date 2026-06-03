@@ -201,6 +201,62 @@ export function buildRawEmail(opts: {
 	].join("\r\n");
 }
 
+// base64-encode raw bytes (ArrayBuffer / typed array). Strings are UTF-8 encoded.
+function bytesToBase64(data: ArrayBuffer | ArrayBufferView | string): string {
+	if (typeof data === "string") return b64(data);
+	const bytes = data instanceof ArrayBuffer ? new Uint8Array(data) : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+	let binary = "";
+	const chunk = 0x8000;
+	for (let i = 0; i < bytes.length; i += chunk) {
+		binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+	}
+	return btoa(binary);
+}
+
+// Forward a received email to `to` via the Cloudflare Email Sending binding.
+// message.forward() only delivers to CF-verified destinations; re-sending via the
+// binding delivers to any address. The From is rewritten to the box address (so
+// example.com DKIM/SPF apply), with the original sender preserved in Reply-To.
+export async function forwardViaBinding(
+	env: Env,
+	opts: {
+		box: string;
+		to: string;
+		from: string; // original sender address
+		fromName?: string | null;
+		subject?: string | null;
+		textBody?: string;
+		htmlBody?: string;
+		attachments?: { filename?: string; mimeType?: string; content: ArrayBuffer | ArrayBufferView | string; contentId?: string; disposition?: string }[];
+		messageId?: string | null;
+	},
+): Promise<string> {
+	const boxAddr = `${opts.box}@${env.DOMAIN}`;
+	const label = (opts.fromName || opts.from || "").replace(/"/g, "");
+	const fromHeader = `"${label} (via ${boxAddr})" <${boxAddr}>`;
+
+	const attachments: MimeAttachment[] = (opts.attachments || []).map((a) => ({
+		filename: a.filename || "attachment",
+		contentType: a.mimeType || "application/octet-stream",
+		contentBase64: bytesToBase64(a.content),
+		inline: a.disposition === "inline" || !!a.contentId,
+		cid: a.contentId,
+	}));
+
+	const raw = buildRawEmail({
+		from: fromHeader,
+		to: opts.to,
+		replyTo: opts.from || undefined,
+		subject: opts.subject || "(no subject)",
+		textBody: opts.textBody,
+		htmlBody: opts.htmlBody,
+		references: opts.messageId || undefined,
+		attachments,
+	});
+
+	return sendRawViaBinding(env, raw, fromHeader, { to: [opts.to] });
+}
+
 // Strip a "Display Name <addr>" wrapper down to the bare address for the SMTP envelope.
 function bareAddr(s: string): string {
 	const m = s.match(/<([^>]+)>/);

@@ -102,7 +102,12 @@ export async function fireRules(
 		const resolvedTarget = substitute(rule.target, vars);
 
 		if (rule.type === "forward" && channel === "email" && forwardFn) {
-			ctx.waitUntil(executeForward(env, drop, rule, resolvedTarget, forwardFn));
+			// A single forward rule may target a comma-separated list of addresses;
+			// each is delivered (and logged) independently.
+			const targets = resolvedTarget.split(",").map((s) => s.trim()).filter(Boolean);
+			for (const addr of targets) {
+				ctx.waitUntil(executeForward(env, drop, rule, addr, forwardFn));
+			}
 		} else if (rule.type === "webhook") {
 			ctx.waitUntil(enqueueWebhook(env, drop, rule, resolvedTarget, vars));
 		}

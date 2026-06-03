@@ -1,7 +1,7 @@
 import PostalMime from "postal-mime";
 import { generateId } from "./lib/id";
 import { normalizeInbox, slugifyFilename } from "./lib/normalize";
-import { isRelayReply, parseRelayAddress, findRelayRule, buildRelayAddress, enqueueRelay } from "./lib/relay";
+import { isRelayReply, parseRelayAddress, findRelayRule, buildRelayAddress, enqueueRelay, forwardViaBinding } from "./lib/relay";
 import { fireRules } from "./lib/rules";
 import type { Env, Drop } from "./types";
 
@@ -211,7 +211,26 @@ export async function handleEmail(
 		read_at: null,
 	};
 
+	// Forward via the Email Sending binding (not message.forward, which only
+	// delivers to CF-verified destinations). Carries the full unstripped body and
+	// the original attachments; From is rewritten to the box, sender kept in Reply-To.
 	await fireRules(env, ctx, drop, "email", async (to) => {
-		await message.forward(to);
+		await forwardViaBinding(env, {
+			box: inbox,
+			to,
+			from,
+			fromName: parsed.from?.name || null,
+			subject: parsed.subject || null,
+			textBody: parsed.text || undefined,
+			htmlBody: parsed.html || undefined,
+			attachments: parsed.attachments.map((a) => ({
+				filename: a.filename || undefined,
+				mimeType: a.mimeType,
+				content: a.content,
+				contentId: a.contentId || undefined,
+				disposition: a.disposition || undefined,
+			})),
+			messageId: message.headers.get("message-id"),
+		});
 	});
 }
