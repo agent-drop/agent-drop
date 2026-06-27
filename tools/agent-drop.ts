@@ -673,7 +673,9 @@ program
 DESCRIPTION
   CLI for the agent-drop system at example.com. Manage inboxes that receive
   emails, web form submissions, and API drops. List drops, create temporary
-  drop targets, manage API keys, and poll for new messages.
+  drop targets, manage API keys, and poll for new messages. Also compose and
+  send real outbound email on behalf of a box (send-email, with --dry-run /
+  --compose to assemble the raw .eml without sending), and host static sites.
 
 AUTHENTICATION
   Two keys are used (both auto-loaded from context/projects/agent-drop/.env):
