@@ -1,1 +1,1 @@
-/Users/jonas/projects/me/tools/agent-drop.ts
+tools/agent-drop.ts
