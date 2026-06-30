@@ -1,6 +1,6 @@
 import { AwsClient } from "aws4fetch";
 import type { Env, Drop } from "../types";
-import { R2_BUCKET, R2_S3_ENDPOINT } from "../types";
+import { r2ObjectUrl } from "../types";
 
 export async function handleInbox(
 	env: Env,
@@ -124,7 +124,7 @@ export async function handleInbox(
 			secretAccessKey: env.R2_SECRET_ACCESS_KEY,
 		});
 
-		const s3Url = new URL(`${R2_S3_ENDPOINT}/${R2_BUCKET}/${objectKey}`);
+		const s3Url = new URL(r2ObjectUrl(env, objectKey));
 		s3Url.searchParams.set("X-Amz-Expires", String(Math.min(ttl, 86400)));
 
 		const signed = await aws.sign(

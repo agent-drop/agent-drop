@@ -2,7 +2,7 @@
 /**
  * Agent Drop CLI - Manage drop inboxes, targets, and API keys
  *
- * Interacts with the agent-drop system at example.com for receiving
+ * Interacts with an Agent Drop instance (set AGENT_DROP_URL) for receiving
  * emails, web form submissions, and API drops into named inboxes.
  */
 
@@ -55,6 +55,15 @@ function getApiKey(): string {
 
 function getBaseUrl(): string {
 	return process.env.AGENT_DROP_URL || "https://example.com"
+}
+
+// Display domain (host of the base URL) used in help text + addressing hints.
+function getDomain(): string {
+	try {
+		return new URL(getBaseUrl()).host
+	} catch {
+		return "example.com"
+	}
 }
 
 // ============================================================================
@@ -647,7 +656,7 @@ async function cmdSendEmail(opts: any) {
 	}
 
 	console.log(chalk.bold(`\n  Email sent\n`))
-	console.log(`  From:      ${chalk.cyan(`${drop}${topic ? `+${topic}` : ""}@example.com`)}`)
+	console.log(`  From:      ${chalk.cyan(`${drop}${topic ? `+${topic}` : ""}@${getDomain()}`)}`)
 	console.log(`  To:        ${data.recipients.to.join(", ") || chalk.dim("(none)")}`)
 	if (data.recipients.cc?.length) console.log(`  Cc:        ${data.recipients.cc.join(", ")}`)
 	if (data.recipients.bcc?.length) console.log(`  Bcc:       ${data.recipients.bcc.join(", ")}`)
@@ -671,7 +680,7 @@ addCommonOptions(program)
 program
 	.addHelpText("after", `
 DESCRIPTION
-  CLI for the agent-drop system at example.com. Manage inboxes that receive
+  CLI for an Agent Drop instance (set AGENT_DROP_URL). Manage inboxes that receive
   emails, web form submissions, and API drops. List drops, create temporary
   drop targets, manage API keys, and poll for new messages. Also compose and
   send real outbound email on behalf of a box (send-email, with --dry-run /
@@ -687,7 +696,7 @@ AUTHENTICATION
     - AGENT_DROP_API_KEY overrides API_KEY
 
 ENVIRONMENT
-  AGENT_DROP_URL        Override API base URL (default: https://example.com)
+  AGENT_DROP_URL        API base URL of your Agent Drop instance (e.g. https://example.com)
   AGENT_DROP_ADMIN_KEY  Override admin API key
   AGENT_DROP_API_KEY    Override API key (for inbox/send routes)
 
@@ -1632,8 +1641,8 @@ program
 // send-email - send an email on behalf of a drop box
 program
 	.command("send-email")
-	.description("Send an email on behalf of a drop box (From: {drop}@example.com)")
-	.option("-d, --drop <box>", "Sending box (From: {box}@example.com)")
+	.description(`Send an email on behalf of a drop box (From: {drop}@${getDomain()})`)
+	.option("-d, --drop <box>", `Sending box (From: {box}@${getDomain()})`)
 	.option("--to <addr>", `Recipient, repeatable. Accepts '"Name" <a@b.com>'`, collectArg, [])
 	.option("--cc <addr>", "Cc recipient (repeatable)", collectArg, [])
 	.option("--bcc <addr>", "Bcc recipient (repeatable)", collectArg, [])
@@ -1643,7 +1652,7 @@ program
 	.option("--body <text|@file>", "Plain-text body: literal text, or @path to read a file (@- for stdin)")
 	.option("--body-html <html|@file>", "HTML body: literal text, or @path to read a file (@- for stdin)")
 	.option("--attach <spec>", "Attachment: path, URL, or cid:path for inline images (repeatable)", collectArg, [])
-	.option("--topic <topic>", "Send from {box}+{topic}@example.com")
+	.option("--topic <topic>", `Send from {box}+{topic}@${getDomain()}`)
 	.option("--in-reply-to <dropId|msgId>", "Thread as a reply to a received drop")
 	.option("--template <file.yml>", "Load fields from a YAML template (flags override)")
 	.option("--upload", "Force all local attachments through R2 (default: auto above 1MB)")
@@ -1662,7 +1671,7 @@ program
 	})
 
 // ============================================================================
-// host - publish static files to example.com/f/{box}/{site}/
+// host - publish static files to {domain}/f/{box}/{site}/
 // ============================================================================
 
 function walkFiles(root: string): string[] {
@@ -1678,7 +1687,7 @@ function walkFiles(root: string): string[] {
 
 program
 	.command("host <box> <site> [paths...]")
-	.description("Publish static files publicly at https://example.com/f/<box>/<site>/")
+	.description(`Publish static files publicly at https://${getDomain()}/f/<box>/<site>/`)
 	.option("--ttl <dur>", "Auto-expire after a duration (e.g. 24h, 7d)")
 	.option("--base <dir>", "Compute relative paths from this dir (preserves structure)")
 	.option("--auth <token>", "Make the site private: require ?auth=<token> to view")
@@ -1707,7 +1716,7 @@ program
 			}
 			if (files.length === 0) throw new Error("no files found to upload")
 
-			console.log(chalk.bold(`\n  Hosting ${files.length} file(s) -> example.com/f/${box}/${site}/\n`))
+			console.log(chalk.bold(`\n  Hosting ${files.length} file(s) -> ${getDomain()}/f/${box}/${site}/\n`))
 			let totalBytes = 0
 			for (const { abs, rel } of files) {
 				const ct = guessContentType(rel)

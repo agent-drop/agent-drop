@@ -2,7 +2,7 @@ import { AwsClient } from "aws4fetch";
 import { generateId } from "../lib/id";
 import { buildRawEmail, sendRawViaBinding, type MimeAttachment } from "../lib/relay";
 import { slugifyFilename } from "../lib/normalize";
-import { R2_BUCKET, R2_S3_ENDPOINT } from "../types";
+import { r2ObjectUrl } from "../types";
 import type { Env } from "../types";
 
 interface AttachmentInput {
@@ -250,7 +250,7 @@ export async function handleSendPresign(
 		accessKeyId: env.R2_ACCESS_KEY_ID,
 		secretAccessKey: env.R2_SECRET_ACCESS_KEY,
 	});
-	const url = new URL(`${R2_S3_ENDPOINT}/${R2_BUCKET}/${r2Key}`);
+	const url = new URL(r2ObjectUrl(env, r2Key));
 	url.searchParams.set("X-Amz-Expires", "3600");
 	const signed = await aws.sign(
 		new Request(url, { method: "PUT", headers: { "Content-Type": ct } }),

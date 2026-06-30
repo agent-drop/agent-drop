@@ -2,7 +2,7 @@ import { AwsClient } from "aws4fetch";
 import { generateId } from "../lib/id";
 import { normalizeSite, sanitizeSitePath, siteUrl } from "../lib/hosting";
 import type { Env } from "../types";
-import { R2_BUCKET, R2_S3_ENDPOINT } from "../types";
+import { r2ObjectUrl } from "../types";
 
 function s3Client(env: Env) {
 	return new AwsClient({
@@ -34,7 +34,7 @@ export async function handleHostPresign(
 	const ct = body.contentType || "application/octet-stream";
 
 	const aws = s3Client(env);
-	const url = new URL(`${R2_S3_ENDPOINT}/${R2_BUCKET}/${objectKey}`);
+	const url = new URL(r2ObjectUrl(env, objectKey));
 	url.searchParams.set("X-Amz-Expires", "3600");
 
 	const signed = await aws.sign(

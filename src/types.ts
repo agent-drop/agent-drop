@@ -3,6 +3,8 @@ export interface Env {
 	BUCKET: R2Bucket;
 	ASSETS: Fetcher;
 	DOMAIN: string;
+	BRAND: string;
+	R2_ACCOUNT_ID: string;
 	SES_REGION: string;
 	AWS_ACCESS_KEY_ID: string;
 	AWS_SECRET_ACCESS_KEY: string;
@@ -42,9 +44,10 @@ export interface RelayQueueMessage {
 	firstAttemptAt: number;
 }
 
-export const R2_ACCOUNT_ID = "your-cloudflare-account-id";
 export const R2_BUCKET = "agent-drop-storage";
-export const R2_S3_ENDPOINT = `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`;
+// R2 S3-compatible object URL, built from the account id in env (env.R2_ACCOUNT_ID).
+export const r2ObjectUrl = (env: Env, key: string) =>
+	`https://${env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com/${R2_BUCKET}/${key}`;
 
 export interface Drop {
 	id: string;

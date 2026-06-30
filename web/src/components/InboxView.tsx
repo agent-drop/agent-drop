@@ -89,7 +89,7 @@ export function InboxView() {
 			<div className="min-h-dvh flex flex-col items-center justify-center px-4">
 				<div className="text-center mb-10">
 					<Link to="/" className="text-xs" style={{ color: "var(--color-neon-purple)" }}>
-						Agent Drop
+						{__BRAND__}
 					</Link>
 					<h1
 						className="text-5xl font-bold text-glow-subtle mt-2"
@@ -102,7 +102,7 @@ export function InboxView() {
 					</p>
 					<p className="text-sm mt-2" style={{ color: "var(--color-fg-dim)" }}>
 						or email{" "}
-						<span style={{ color: "var(--color-cga-cyan)" }}>{name}@example.com</span>
+						<span style={{ color: "var(--color-cga-cyan)" }}>{name}@{__DOMAIN__}</span>
 					</p>
 				</div>
 
@@ -123,7 +123,7 @@ export function InboxView() {
 			<div className="flex items-baseline justify-between mb-8 pt-4">
 				<div>
 					<Link to="/" className="text-xs" style={{ color: "var(--color-neon-purple)" }}>
-						Agent Drop
+						{__BRAND__}
 					</Link>
 					<h1
 						className="text-2xl font-bold text-glow-subtle mt-1"
@@ -139,7 +139,7 @@ export function InboxView() {
 									? "var(--color-neon-yellow)"
 									: "var(--color-fg-dim)",
 						}}>
-							{googleUser || (dropToken ? "temporary access" : `${name}@example.com`)}
+							{googleUser || (dropToken ? "temporary access" : `${name}@${__DOMAIN__}`)}
 						</span>
 						{googleUser && (
 							<button
@@ -236,8 +236,8 @@ function CurlInstructions({ inbox, dropToken }: { inbox: string; dropToken: stri
 	const authHeader = dropToken ? "" : '\n  -H "Authorization: Bearer KEY" \\';
 
 	const presignUrl = dropToken
-		? `https://example.com/api/upload/presign/${inbox}${authParam}`
-		: `https://example.com/api/upload/presign/${inbox}`;
+		? `https://${__DOMAIN__}/api/upload/presign/${inbox}${authParam}`
+		: `https://${__DOMAIN__}/api/upload/presign/${inbox}`;
 
 	return (
 		<div className="mb-6">
@@ -270,14 +270,14 @@ curl -X PUT "$UPLOAD_URL" \\
   --data-binary @FILE_NAME
 
 ${commentLine("step 3: confirm")}
-curl -X POST "https://example.com/api/upload/confirm" \\
+curl -X POST "https://${__DOMAIN__}/api/upload/confirm" \\
   -H "Content-Type: application/json" \\
   -d '{"dropId":"$DROP_ID"}'`}</pre>
 
 					<div className="my-3" style={{ borderTop: "1px solid var(--color-surface-border)" }} />
 
 					<p className="mb-2" style={{ color: "var(--color-fg-dim)" }}>
-						<span style={{ color: "var(--color-neon-purple)" }}>#</span> or just email: <span style={{ color: "var(--color-neon-teal)" }}>{inbox}@example.com</span>
+						<span style={{ color: "var(--color-neon-purple)" }}>#</span> or just email: <span style={{ color: "var(--color-neon-teal)" }}>{inbox}@{__DOMAIN__}</span>
 					</p>
 				</div>
 			)}

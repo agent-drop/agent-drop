@@ -2,7 +2,7 @@ import { AwsClient } from "aws4fetch";
 import { generateId } from "../lib/id";
 import { slugifyFilename } from "../lib/normalize";
 import type { Env } from "../types";
-import { R2_BUCKET, R2_S3_ENDPOINT } from "../types";
+import { r2ObjectUrl } from "../types";
 import type { DropContext } from "./drop";
 
 function s3Client(env: Env) {
@@ -12,8 +12,8 @@ function s3Client(env: Env) {
 	});
 }
 
-function s3Url(objectKey: string) {
-	return `${R2_S3_ENDPOINT}/${R2_BUCKET}/${objectKey}`;
+function s3Url(env: Env, objectKey: string) {
+	return r2ObjectUrl(env, objectKey);
 }
 
 const DIRECT_LIMIT = 95 * 1024 * 1024; // 95MB
@@ -44,7 +44,7 @@ export async function handlePresign(
 	const ct = body.contentType || "application/octet-stream";
 
 	const aws = s3Client(env);
-	const url = new URL(s3Url(objectKey));
+	const url = new URL(s3Url(env, objectKey));
 	url.searchParams.set("X-Amz-Expires", "3600");
 
 	const signed = await aws.sign(
@@ -111,7 +111,7 @@ export async function handleMultipartInit(
 	const aws = s3Client(env);
 
 	// Create multipart upload via S3 API
-	const initUrl = new URL(s3Url(objectKey));
+	const initUrl = new URL(s3Url(env, objectKey));
 	initUrl.searchParams.set("uploads", "");
 
 	const initRes = await aws.fetch(initUrl, {
@@ -137,7 +137,7 @@ export async function handleMultipartInit(
 	const parts: { partNumber: number; url: string }[] = [];
 
 	for (let partNumber = 1; partNumber <= totalParts; partNumber++) {
-		const partUrl = new URL(s3Url(objectKey));
+		const partUrl = new URL(s3Url(env, objectKey));
 		partUrl.searchParams.set("partNumber", String(partNumber));
 		partUrl.searchParams.set("uploadId", uploadId);
 		partUrl.searchParams.set("X-Amz-Expires", "3600");
@@ -192,7 +192,7 @@ export async function handleMultipartComplete(
 	const aws = s3Client(env);
 
 	// List parts to get ETags (browser can't read them due to CORS)
-	const listUrl = new URL(s3Url(body.objectKey));
+	const listUrl = new URL(s3Url(env, body.objectKey));
 	listUrl.searchParams.set("uploadId", body.uploadId);
 
 	const listRes = await aws.fetch(listUrl, { method: "GET" });
@@ -223,7 +223,7 @@ export async function handleMultipartComplete(
 		"</CompleteMultipartUpload>",
 	].join("");
 
-	const completeUrl = new URL(s3Url(body.objectKey));
+	const completeUrl = new URL(s3Url(env, body.objectKey));
 	completeUrl.searchParams.set("uploadId", body.uploadId);
 
 	const completeRes = await aws.fetch(completeUrl, {

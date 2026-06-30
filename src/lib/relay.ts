@@ -19,7 +19,7 @@ export function decodeEmail(encoded: string): string {
 }
 
 // Build relay reply-to address
-// sender@example.com + mask j-7k9m -> sender_at_example.com+j-7k9m@example.com
+// sender@example.com + mask j-7k9m -> sender_at_example.com+j-7k9m@{domain}
 export function buildRelayAddress(senderEmail: string, maskId: string, domain: string): string {
 	return `${encodeEmail(senderEmail)}+${maskId}@${domain}`;
 }
@@ -147,7 +147,9 @@ export function buildRawEmail(opts: {
 }): string {
 	const toList = (Array.isArray(opts.to) ? opts.to : [opts.to]).filter(Boolean);
 	const ccList = (Array.isArray(opts.cc) ? opts.cc : opts.cc ? [opts.cc] : []).filter(Boolean);
-	const messageId = `<${crypto.randomUUID()}@example.com>`;
+	// Message-ID domain tracks the sending domain (parsed from the From address).
+	const fromDomain = (opts.from.match(/@([^\s>]+)/)?.[1] || "localhost").trim();
+	const messageId = `<${crypto.randomUUID()}@${fromDomain}>`;
 	const date = new Date().toUTCString();
 
 	const headers = [
@@ -216,7 +218,7 @@ function bytesToBase64(data: ArrayBuffer | ArrayBufferView | string): string {
 // Forward a received email to `to` via the Cloudflare Email Sending binding.
 // message.forward() only delivers to CF-verified destinations; re-sending via the
 // binding delivers to any address. The From is rewritten to the box address (so
-// example.com DKIM/SPF apply), with the original sender preserved in Reply-To.
+// the zone's DKIM/SPF apply), with the original sender preserved in Reply-To.
 export async function forwardViaBinding(
 	env: Env,
 	opts: {

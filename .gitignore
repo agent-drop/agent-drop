@@ -6,3 +6,4 @@ client_secret_*.json
 .log/
 **/.log/
 .wrangler/
+.wrangler.deploy.toml

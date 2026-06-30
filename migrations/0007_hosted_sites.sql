@@ -1,4 +1,4 @@
--- Hosted static sites: public file hosting under {box}.example.com/{site}/
+-- Hosted static sites: public file hosting under {domain}/f/{box}/{site}/
 -- R2 objects live under sites/{inbox}/{site}/{relpath}. This table is the
 -- registry (for listing, TTL, and optional private-token gating).
 

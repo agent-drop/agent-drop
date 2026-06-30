@@ -1,3 +1,6 @@
+# Real domain / account / DB id / brand live in `.env` (gitignored) and are
+# injected by `bun run deploy`, which renders these placeholders before calling
+# wrangler. The committed values below are placeholders — see `.env.example`.
 name = "agent-drop"
 main = "src/index.ts"
 compatibility_date = "2026-03-15"
@@ -39,5 +42,7 @@ retry_delay = 2
 
 [vars]
 DOMAIN = "example.com"
+BRAND = "Agent Drop"
+R2_ACCOUNT_ID = "your-cloudflare-account-id"
 SES_REGION = "eu-central-1"
 GOOGLE_CLIENT_ID_PUBLIC = "your-google-client-id"

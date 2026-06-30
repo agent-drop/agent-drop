@@ -9,7 +9,7 @@ export function Landing() {
 						color: "var(--color-neon-cyan)",
 					}}
 				>
-					Agent Drop
+					{__BRAND__}
 				</h1>
 
 				<p

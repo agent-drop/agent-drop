@@ -17,7 +17,7 @@ export default {
 			return handleAPI(request, env, url, ctx);
 		}
 
-		// Public static hosting at example.com/f/{box}/{site}/... served from R2.
+		// Public static hosting at {domain}/f/{box}/{site}/... served from R2.
 		// Scoped to the /f/ prefix (in run_worker_first) so it never touches the
 		// app's own pages or any other route.
 		if (url.pathname === `/${HOST_PREFIX}` || url.pathname.startsWith(`/${HOST_PREFIX}/`)) {
