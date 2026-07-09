@@ -1,71 +1,153 @@
 # Agent Drop
 
-**Dead-drop system for AI agents.** Email, upload, or API-push content into named
-inboxes ("boxes"). Agents retrieve drops via an authenticated API.
+**Give your AI agents an email address, an inbox, and a drop box.**
 
-Self-hosted on Cloudflare — deploy it under your own domain.
+Agent Drop is a dead-drop system for AI agents. Email, drag-drop, or `POST` content
+into named inboxes ("boxes") — your agents pull it back out over an authenticated REST
+API. Spin up `research@your-domain`, `invoices@your-domain`, `scraper@your-domain` on
+a whim; no mailbox provisioning, no IMAP, no cron-polling some third-party inbox.
+
+It runs **entirely on Cloudflare Workers** — inbound email (Email Routing), the web UI
+and API (Workers), blobs (R2), the index (D1), async delivery (Queues), and outbound
+email (Email Sending). No origin server, no egress bill, scales to zero, deploys in
+minutes under your own domain.
 
 ```
 email  ─┐
 upload ─┼─▶  {box}@your-domain  ─▶  [ D1 index + R2 blobs ]  ─▶  agent pulls via API
-api    ─┘                            rules: forward / webhook / relay
+api    ─┘                            rules: forward · webhook · relay
 ```
 
-## What it does
+## Why you'd want this
 
-- **Drop content in** three ways: send email to `{box}@your-domain`, drag-drop at
-  `your-domain/{box}`, or `POST` via the API / CLI.
-- **Retrieve** drops (bodies + attachments) through an authenticated REST API.
-- **React** to drops with a cascading rules engine: email **forwards**, **webhooks**
-  (queue-delivered with backoff), and Apple-style **email relay** (masked bidirectional
-  email).
-- **Send** real email on behalf of a box (`From: {box}@your-domain`) via SES, with
-  attachments, inline images, threading, and templates.
-- **Host** static sites publicly under a box at `your-domain/f/{box}/{site}/`.
+- **Agents can receive email.** Point a signup, a newsletter, a vendor invoice, a
+  2FA code at `{box}@your-domain` and your agent reads it via the API a second later.
+  `+addressing` (`box+topic@…`) sorts it for you.
+- **Agents can send email.** Real mail `From: {box}@your-domain` — attachments, inline
+  images (`cid:`), threading, YAML templates. Your own SPF/DKIM, no SendGrid tax.
+- **Three ways in, one way out.** Email, a drag-drop web page at `your-domain/{box}`,
+  or a one-line `POST`. Everything lands in the same box, readable through one API.
+- **A rules engine that reacts to drops.** Cascading pattern rules (`shop-*`,
+  `*-invoices`) that **forward** email, fire **webhooks** (queue-delivered, exponential
+  backoff, 24h retry), or run an **Apple-style email relay** — masked bidirectional
+  addresses so the other side never sees your real inbox.
+- **Static hosting, because why not.** `drop host lisa report ./dist` publishes a
+  folder to `your-domain/f/lisa/report/`, straight off R2. Optional TTL and auth token.
+- **Yours, on your domain, on the edge.** Self-hosted on Cloudflare's free-ish tier.
+  No SaaS in the loop, no per-seat pricing, no data leaving your account.
 
 ## Stack
+
+Every layer is Cloudflare — one platform, one `wrangler deploy`.
 
 | Layer | Tech |
 |-------|------|
 | Compute | Cloudflare Workers (API + static serving + queue consumer) |
+| Inbound email | Cloudflare Email Routing (catch-all `*@your-domain` → Worker) |
+| Outbound email | Cloudflare Email Sending (`cloudflare:email` binding) — sends, forwards, relay |
 | Database | Cloudflare D1 (SQLite) — inbox index, keys, tokens, rules |
 | Blobs | Cloudflare R2 — attachments, raw emails, uploads, hosted sites |
 | Async | Cloudflare Queues — webhook + relay delivery with backoff |
-| Outbound email | AWS SES (eu-central-1) via `aws4fetch` |
 | Auth | API keys, drop tokens, admin key, Google OAuth (GIS) |
 | Frontend | Vite 8 + React 19 + Tailwind 4 (Tokyo Night theme) |
 
-## Configuration
+> AWS SES support ships as a dormant fallback in `lib/relay.ts` (`sendRawEmail`) — the
+> live path uses the Cloudflare Email Sending binding. No AWS account required.
 
-All deployment identity lives in `.env` (gitignored) — it is the single source of
-truth. Copy the example and fill in your values:
+## 60-second tour
+
+```bash
+# Your agent drops a note into the "research" box…
+curl -X POST -H "Authorization: Bearer ad_..." -H "Content-Type: application/json" \
+  -d '{"subject":"Q3 numbers","text":"see attached model"}' \
+  https://your-domain/api/drop/research
+
+# …a human emails a PDF to research@your-domain…
+#   (Cloudflare Email Routing → Worker → D1 + R2, quote-stripped, attachments extracted)
+
+# …and the agent pulls the latest drop back out, files and all.
+curl -H "Authorization: Bearer ad_..." https://your-domain/api/inbox/research/latest
+```
+
+## Deploy
+
+Everything lives in one Cloudflare account. From zero to live in five steps.
+
+### 0 · What you need
+
+- A **Cloudflare account** with a **domain (zone)** on it — this is where mail arrives
+  and the Worker serves from.
+- [**Bun**](https://bun.sh) and the **Wrangler** CLI, authenticated: `bunx wrangler login`.
+- **Email Routing** enabled on the zone (Cloudflare dashboard → your domain → Email).
+- **Email Sending** onboarded for the domain (public beta) so boxes can send real mail.
+- *(optional)* a **Google OAuth client id** if you want "Sign in with Google" on the
+  web upload UI.
+
+### 1 · Create the Cloudflare resources
+
+```bash
+bunx wrangler d1 create agent-drop-db          # → copy the database_id it prints
+bunx wrangler r2 bucket create agent-drop-storage
+bunx wrangler queues create agent-drop-webhooks
+```
+
+Generate an **R2 API token** (Cloudflare dashboard → R2 → *Manage API tokens*, or
+`wrangler r2`) — the access key + secret power presigned upload/download URLs.
+
+### 2 · Fill in `.env`
+
+`.env` (gitignored) is the single source of truth — no real domain, account, or id is
+ever committed. `bun run deploy` renders the placeholder `wrangler.toml` from it at
+deploy time.
 
 ```bash
 cp .env.example .env
-# set DOMAIN, BRAND, CLOUDFLARE_ACCOUNT_ID, D1_DATABASE_ID, GOOGLE_CLIENT_ID + secrets
 ```
 
-- **`DOMAIN`** — the apex domain the Worker serves and sends mail from. The route
-  becomes `$DOMAIN/*`.
-- **`BRAND`** — display name shown across the web UI and CLI.
+| Var | What |
+|-----|------|
+| `DOMAIN` | apex domain the Worker serves + sends from; route becomes `$DOMAIN/*` |
+| `BRAND` | display name across the web UI + CLI |
+| `CLOUDFLARE_ACCOUNT_ID` | your CF account id |
+| `D1_DATABASE_ID` | the id printed in step 1 |
+| `GOOGLE_CLIENT_ID` | OAuth client id (public) |
 
-The committed `wrangler.toml` carries only placeholders (`example.com`, `your-*-id`);
-`bun run deploy` renders them from `.env` at deploy time, so no real domain or account
-id is ever committed. Remaining secrets (SES creds, admin/API keys, R2 tokens) are also
-set as Wrangler secrets (`wrangler secret put <NAME>`).
+### 3 · Migrate the database + set secrets
 
-## Quick start
+```bash
+bunx wrangler d1 migrations apply agent-drop-db --remote   # 0001 … 0007
+
+# Secrets — set once, stored on the Worker (never in the repo):
+bunx wrangler secret put ADMIN_API_KEY          # full-access admin key you choose
+bunx wrangler secret put R2_ACCESS_KEY_ID       # from the R2 API token
+bunx wrangler secret put R2_SECRET_ACCESS_KEY
+bunx wrangler secret put GOOGLE_CLIENT_ID        # same value as .env (server-side verify)
+```
+
+### 4 · Wire up email (Cloudflare dashboard)
+
+- **Inbound:** Email Routing → **catch-all** → *Send to Worker* → `agent-drop`. Now
+  every `{box}@your-domain` lands in the Worker, no per-address rules.
+- **Outbound:** confirm the domain is verified for Email Sending (SPF + DKIM records
+  Cloudflare gives you). That's what lets a box send `From: {box}@your-domain`.
+
+### 5 · Ship it
 
 ```bash
 bun install
-cp .env.example .env      # then edit
-bun run deploy            # vite build + render config from .env + wrangler deploy
+bun run deploy            # vite build → render wrangler.toml from .env → wrangler deploy
 ```
+
+That's it — `your-domain` is live, boxes accept email/upload/API, and agents can pull.
+
+> **Harden R2 (recommended):** set lifecycle rules (auto-expire old blobs) and CORS
+> (so the SPA can PUT presigned uploads). Exact `wrangler r2 bucket lifecycle` / `cors`
+> commands are in [`CLAUDE.md`](./CLAUDE.md) under *R2 Bucket Configuration*.
 
 ## CLI
 
-The `tools/agent-drop.ts` CLI (Bun) drives everything. Point it at your instance with
-`AGENT_DROP_URL`; aliased as `drop`:
+One TypeScript file (`tools/agent-drop.ts`, Bun) drives the whole system. Point it at
+your instance with `AGENT_DROP_URL`; aliased as `drop`:
 
 ```bash
 drop boxes                          # list all inboxes
