@@ -54,7 +54,12 @@ function getApiKey(): string {
 }
 
 function getBaseUrl(): string {
-	return process.env.AGENT_DROP_URL || "https://example.com"
+	// Precedence: shell env > .env AGENT_DROP_URL > .env DOMAIN (self-configures) > placeholder
+	return (
+		process.env.AGENT_DROP_URL ||
+		envVars.AGENT_DROP_URL ||
+		(envVars.DOMAIN ? `https://${envVars.DOMAIN}` : "https://example.com")
+	)
 }
 
 // Display domain (host of the base URL) used in help text + addressing hints.
@@ -696,7 +701,8 @@ AUTHENTICATION
     - AGENT_DROP_API_KEY overrides API_KEY
 
 ENVIRONMENT
-  AGENT_DROP_URL        API base URL of your Agent Drop instance (e.g. https://example.com)
+  AGENT_DROP_URL        API base URL (default https://frst.dev via DOMAIN in .env).
+                        If unset you get the "Example Domain" 404 page.
   AGENT_DROP_ADMIN_KEY  Override admin API key
   AGENT_DROP_API_KEY    Override API key (for inbox/send routes)
 
