@@ -174,6 +174,22 @@ describe("dispatch quirks that predate the rewrite", () => {
 		expect(res.status).toBe(404);
 	});
 
+	test("a trailing slash where an inbox belongs matches nothing", async () => {
+		// The inbox capture rejects an empty segment, so this falls through to the
+		// 404 instead of reaching the write gate with an empty box name.
+		const env = makeEnv();
+		await seedApiKey(env, "ad_writer", { permissions: "write" });
+		const res = await call(
+			env,
+			new Request(`${BASE}/api/drop/`, {
+				method: "POST",
+				body: new FormData(),
+				headers: { Authorization: "Bearer ad_writer" },
+			}),
+		);
+		expect(res.status).toBe(404);
+	});
+
 	test("GET /api/inbox/:name/ passes the trailing slash through as the sub-path", async () => {
 		const env = makeEnv();
 		await seedApiKey(env, "ad_reader", { permissions: "read" });
