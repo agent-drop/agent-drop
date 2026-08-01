@@ -1,11 +1,20 @@
 import type { Env } from "../types";
 
-async function hashKey(key: string): Promise<string> {
+export async function hashKey(key: string): Promise<string> {
 	const encoded = new TextEncoder().encode(key);
 	const hash = await crypto.subtle.digest("SHA-256", encoded);
 	return Array.from(new Uint8Array(hash))
 		.map((b) => b.toString(16).padStart(2, "0"))
 		.join("");
+}
+
+// Compare without an early exit, so the loop runs the same number of iterations
+// whatever the inputs are.
+function constantTimeEqual(a: string, b: string): boolean {
+	if (a.length !== b.length) return false;
+	let diff = 0;
+	for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+	return diff === 0;
 }
 
 export async function validateApiKey(
@@ -45,9 +54,23 @@ export async function validateApiKey(
 	};
 }
 
-export function isAdmin(request: Request, env: Env): boolean {
+export async function isAdmin(request: Request, env: Env): Promise<boolean> {
 	const auth = request.headers.get("Authorization");
-	return auth === `Bearer ${env.ADMIN_API_KEY}`;
+	if (!auth?.startsWith("Bearer ")) return false;
+
+	// An unset secret must authenticate nothing. The old check was
+	// `auth === \`Bearer ${env.ADMIN_API_KEY}\``, which with the secret missing
+	// interpolates to exactly "Bearer " -- so a half-deployed worker handed admin
+	// to anyone who sent an empty bearer token.
+	const expected = env.ADMIN_API_KEY;
+	if (!expected) return false;
+
+	// Compare digests, not the raw credential. `===` on strings bails at the first
+	// differing byte, so its runtime leaks how long a prefix of the master key the
+	// caller guessed right, one byte at a time. A SHA-256 digest is fixed-length
+	// and uncorrelated with the secret's bytes, so the compare says nothing.
+	const [got, want] = await Promise.all([hashKey(auth.slice(7)), hashKey(expected)]);
+	return constantTimeEqual(got, want);
 }
 
 export async function generateApiKey(

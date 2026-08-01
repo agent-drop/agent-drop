@@ -19,6 +19,40 @@ function s3Url(env: Env, objectKey: string) {
 const DIRECT_LIMIT = 95 * 1024 * 1024; // 95MB
 const CHUNK_SIZE = 50 * 1024 * 1024; // 50MB
 
+// The columns the finalize endpoints need. The router loads this row to decide
+// who is allowed to finalize the drop, then hands it to the handler so the key
+// and the inbox both come from the same authenticated row.
+export interface FinalizeDrop {
+	id: string;
+	inbox: string;
+	r2_prefix: string | null;
+	object_key: string | null;
+	subject: string | null;
+	status: string;
+}
+
+/**
+ * The R2 key this drop's upload was signed against, derived from server-side
+ * state only.
+ *
+ * `/api/upload/complete` used to take `dropId` and `objectKey` as independent
+ * body fields and never check they belonged to the same row, so a caller
+ * holding any valid drop id could complete a multipart upload against an
+ * arbitrary key -- another box's object included -- and flip that drop to
+ * `completed`. The key is now recorded at presign time (migration 0008) and
+ * read back here; the request body is not consulted.
+ */
+export function resolveObjectKey(drop: FinalizeDrop): string | null {
+	if (drop.object_key) return drop.object_key;
+	// Rows written before migration 0008 -- an upload already in flight across the
+	// deploy -- carry no key. Rebuild it the way presign built it, still without
+	// touching the request: `subject` holds the original filename.
+	if (drop.r2_prefix && drop.subject) {
+		return `${drop.r2_prefix}/uploads/${slugifyFilename(drop.subject)}`;
+	}
+	return null;
+}
+
 // POST /api/upload/presign - get presigned PUT URL for direct upload
 export async function handlePresign(
 	request: Request,
@@ -67,12 +101,12 @@ export async function handlePresign(
 	// Pre-create the drop record (status: pending upload)
 	await env.DB.prepare(
 		`INSERT INTO drops (id, inbox, topic, channel, subject,
-			has_attachments, attachment_count, r2_prefix, metadata, status, created_at)
-		VALUES (?, ?, ?, 'web', ?, 1, 1, ?, ?, 'pending', ?)`,
+			has_attachments, attachment_count, r2_prefix, object_key, metadata, status, created_at)
+		VALUES (?, ?, ?, 'web', ?, 1, 1, ?, ?, ?, 'pending', ?)`,
 	)
 		.bind(
 			dropId, inbox, body.topic || null,
-			body.fileName, r2Prefix, metadata, Date.now(),
+			body.fileName, r2Prefix, objectKey, metadata, Date.now(),
 		)
 		.run();
 
@@ -162,37 +196,39 @@ export async function handleMultipartInit(
 	// Pre-create drop record
 	await env.DB.prepare(
 		`INSERT INTO drops (id, inbox, topic, channel, subject,
-			has_attachments, attachment_count, r2_prefix, metadata, status, created_at)
-		VALUES (?, ?, ?, 'web', ?, 1, 1, ?, ?, 'pending', ?)`,
+			has_attachments, attachment_count, r2_prefix, object_key, metadata, status, created_at)
+		VALUES (?, ?, ?, 'web', ?, 1, 1, ?, ?, ?, 'pending', ?)`,
 	)
 		.bind(
 			dropId, inbox, body.topic || null,
-			body.fileName, r2Prefix, metadata, Date.now(),
+			body.fileName, r2Prefix, objectKey, metadata, Date.now(),
 		)
 		.run();
 
 	return Response.json({ dropId, uploadId, objectKey, parts });
 }
 
-// POST /api/upload/complete - finalize multipart upload
+// POST /api/upload/complete - finalize multipart upload.
+// The router has already loaded `drop` and checked the caller may write to its
+// inbox; `objectKey` is derived from that row, never from the request body.
 export async function handleMultipartComplete(
-	request: Request,
 	env: Env,
+	drop: FinalizeDrop,
+	body: { uploadId?: string },
 ): Promise<Response> {
-	const body = (await request.json()) as {
-		dropId: string;
-		uploadId: string;
-		objectKey: string;
-	};
+	if (!body.uploadId) {
+		return Response.json({ error: "uploadId required" }, { status: 400 });
+	}
 
-	if (!body.dropId || !body.uploadId || !body.objectKey) {
-		return Response.json({ error: "dropId, uploadId, objectKey required" }, { status: 400 });
+	const objectKey = resolveObjectKey(drop);
+	if (!objectKey) {
+		return Response.json({ error: "drop has no recorded upload key" }, { status: 409 });
 	}
 
 	const aws = s3Client(env);
 
 	// List parts to get ETags (browser can't read them due to CORS)
-	const listUrl = new URL(s3Url(env, body.objectKey));
+	const listUrl = new URL(s3Url(env, objectKey));
 	listUrl.searchParams.set("uploadId", body.uploadId);
 
 	const listRes = await aws.fetch(listUrl, { method: "GET" });
@@ -223,7 +259,7 @@ export async function handleMultipartComplete(
 		"</CompleteMultipartUpload>",
 	].join("");
 
-	const completeUrl = new URL(s3Url(env, body.objectKey));
+	const completeUrl = new URL(s3Url(env, objectKey));
 	completeUrl.searchParams.set("uploadId", body.uploadId);
 
 	const completeRes = await aws.fetch(completeUrl, {
@@ -238,31 +274,24 @@ export async function handleMultipartComplete(
 
 	await env.DB.prepare(
 		"UPDATE drops SET status = 'completed' WHERE id = ?",
-	).bind(body.dropId).run();
+	).bind(drop.id).run();
 
-	return Response.json({ completed: true, dropId: body.dropId });
+	return Response.json({ completed: true, dropId: drop.id });
 }
 
-// POST /api/upload/confirm - confirm a direct upload completed
-export async function handleConfirm(
-	request: Request,
-	env: Env,
-): Promise<Response> {
-	const body = (await request.json()) as { dropId: string };
-
-	if (!body.dropId) {
-		return Response.json({ error: "dropId required" }, { status: 400 });
-	}
-
+// POST /api/upload/confirm - confirm a direct upload completed.
+// Same contract as complete: the router has already authenticated the caller
+// against `drop.inbox`.
+export async function handleConfirm(env: Env, drop: FinalizeDrop): Promise<Response> {
 	const result = await env.DB.prepare(
 		"UPDATE drops SET status = 'completed' WHERE id = ? AND status = 'pending'",
 	)
-		.bind(body.dropId)
+		.bind(drop.id)
 		.run();
 
 	if (!result.meta.changes) {
 		return Response.json({ error: "drop not found or already confirmed" }, { status: 404 });
 	}
 
-	return Response.json({ confirmed: true, dropId: body.dropId });
+	return Response.json({ confirmed: true, dropId: drop.id });
 }

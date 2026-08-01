@@ -117,10 +117,11 @@ export function DropZone({ inbox, apiKey, dropToken, googleToken, onDropped }: D
 		await Promise.all(workers);
 
 		setProgress(`finalizing ${file.name}...`);
+		// No objectKey: the worker derives it from the drop row. Sending one used
+		// to let any caller complete an upload against an arbitrary R2 key.
 		await apiFetch("/api/upload/complete", {
 			dropId: data.dropId,
 			uploadId: data.uploadId,
-			objectKey: data.objectKey,
 		});
 
 		return { filename: file.name, dropId: data.dropId, ts: Date.now(), size: file.size };

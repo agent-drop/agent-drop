@@ -15,6 +15,11 @@ export interface Env {
 	R2_SECRET_ACCESS_KEY: string;
 	WEBHOOK_QUEUE: Queue<QueueMessage>;
 	EMAIL: SendEmail;
+	// Optional on purpose: the bindings do not exist in a `wrangler dev` session
+	// that has no `[[ratelimits]]` configured, and src/lib/ratelimit.ts fails open
+	// rather than letting a throttle become an outage.
+	AUTH_RATE_LIMIT?: RateLimit;
+	UPLOAD_RATE_LIMIT?: RateLimit;
 }
 
 export type QueueMessage = WebhookQueueMessage | RelayQueueMessage;
