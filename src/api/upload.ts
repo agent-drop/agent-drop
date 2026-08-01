@@ -290,16 +290,32 @@ export async function handleMultipartComplete(
 // POST /api/upload/confirm - confirm a direct upload completed.
 // Same contract as complete: the router has already authenticated the caller
 // against `drop.inbox`.
+//
+// Since phase 5 this endpoint is no longer the only thing that completes a drop
+// -- R2 event notifications do it too (src/lib/r2-events.ts), and whichever
+// arrives first wins. So "already completed" is now the NORMAL outcome of a
+// perfectly healthy upload, not an error. It used to 404 here, which would have
+// turned the R2 consumer winning the race into a failed upload in the SPA.
 export async function handleConfirm(env: Env, drop: FinalizeDrop): Promise<Response> {
+	const done = (alreadyCompleted: boolean) =>
+		Response.json({ confirmed: true, dropId: drop.id, alreadyCompleted });
+
+	if (drop.status === "completed") return done(true);
+
 	const result = await env.DB.prepare(
 		"UPDATE drops SET status = 'completed' WHERE id = ? AND status = 'pending'",
 	)
 		.bind(drop.id)
 		.run();
 
-	if (!result.meta.changes) {
-		return Response.json({ error: "drop not found or already confirmed" }, { status: 404 });
-	}
+	if (result.meta.changes) return done(false);
 
-	return Response.json({ confirmed: true, dropId: drop.id });
+	// The row was `pending` when the router read it and is not now: the R2
+	// notification landed in between. Re-read rather than guess.
+	const current = await env.DB.prepare("SELECT status FROM drops WHERE id = ?")
+		.bind(drop.id)
+		.first<{ status: string }>();
+	if (current?.status === "completed") return done(true);
+
+	return Response.json({ error: "drop is not in a confirmable state" }, { status: 409 });
 }

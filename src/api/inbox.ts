@@ -8,11 +8,26 @@ export async function handleInbox(
 	subPath: string,
 	url: URL,
 ): Promise<Response> {
+	// One D1 session for the whole request. `first-unconstrained` lets the first
+	// query answer from whichever replica is nearest instead of round-tripping to
+	// the primary in Europe; every later query in the same session is pinned to a
+	// replica at least as fresh, so the mark-as-read writes below cannot be
+	// stepped on by a stale follow-up read.
+	//
+	// The trade, stated plainly: a listing may miss a drop written microseconds
+	// earlier by a DIFFERENT request, bounded by replica lag. Reads here are
+	// polling loops, and D1's cross-request read-your-writes guarantee needs a
+	// bookmark the client would have to carry -- which would change the public
+	// API. Not worth it for an inbox poll.
+	//
+	// Until read replication is enabled on the database, this routes everything to
+	// the primary exactly as before, so it is free to adopt now.
+	const db = env.DB.withSession("first-unconstrained");
+
 	// GET /api/inbox/:name/latest
 	if (subPath === "/latest") {
-		const drop = await env.DB.prepare(
-			"SELECT * FROM drops WHERE inbox = ? ORDER BY created_at DESC LIMIT 1",
-		)
+		const drop = await db
+			.prepare("SELECT * FROM drops WHERE inbox = ? ORDER BY created_at DESC LIMIT 1")
 			.bind(inbox)
 			.first<Drop>();
 
@@ -22,9 +37,7 @@ export async function handleInbox(
 
 		// Mark as read
 		if (!drop.read_at) {
-			await env.DB.prepare("UPDATE drops SET read_at = ? WHERE id = ?")
-				.bind(Date.now(), drop.id)
-				.run();
+			await db.prepare("UPDATE drops SET read_at = ? WHERE id = ?").bind(Date.now(), drop.id).run();
 		}
 
 		return Response.json(drop);
@@ -34,7 +47,8 @@ export async function handleInbox(
 	const attMatch = subPath.match(/^\/([^/]+)\/attachments$/);
 	if (attMatch) {
 		const dropId = attMatch[1];
-		const drop = await env.DB.prepare("SELECT r2_prefix FROM drops WHERE id = ? AND inbox = ?")
+		const drop = await db
+			.prepare("SELECT r2_prefix FROM drops WHERE id = ? AND inbox = ?")
 			.bind(dropId, inbox)
 			.first<{ r2_prefix: string }>();
 
@@ -64,7 +78,8 @@ export async function handleInbox(
 	if (fileMatch) {
 		const [, dropId, rawFilename] = fileMatch;
 		const filename = decodeURIComponent(rawFilename);
-		const drop = await env.DB.prepare("SELECT r2_prefix FROM drops WHERE id = ? AND inbox = ?")
+		const drop = await db
+			.prepare("SELECT r2_prefix FROM drops WHERE id = ? AND inbox = ?")
 			.bind(dropId, inbox)
 			.first<{ r2_prefix: string }>();
 
@@ -93,7 +108,8 @@ export async function handleInbox(
 		const [, dropId, rawFilename] = urlMatch;
 		const filename = decodeURIComponent(rawFilename);
 		const ttl = parseInt(url.searchParams.get("ttl") || "3600", 10);
-		const drop = await env.DB.prepare("SELECT r2_prefix FROM drops WHERE id = ? AND inbox = ?")
+		const drop = await db
+			.prepare("SELECT r2_prefix FROM drops WHERE id = ? AND inbox = ?")
 			.bind(dropId, inbox)
 			.first<{ r2_prefix: string }>();
 
@@ -137,7 +153,8 @@ export async function handleInbox(
 	const idMatch = subPath.match(/^\/([^/]+)$/);
 	if (idMatch) {
 		const dropId = idMatch[1];
-		const drop = await env.DB.prepare("SELECT * FROM drops WHERE id = ? AND inbox = ?")
+		const drop = await db
+			.prepare("SELECT * FROM drops WHERE id = ? AND inbox = ?")
 			.bind(dropId, inbox)
 			.first<Drop>();
 
@@ -147,9 +164,7 @@ export async function handleInbox(
 
 		// Mark as read
 		if (!drop.read_at) {
-			await env.DB.prepare("UPDATE drops SET read_at = ? WHERE id = ?")
-				.bind(Date.now(), drop.id)
-				.run();
+			await db.prepare("UPDATE drops SET read_at = ? WHERE id = ?").bind(Date.now(), drop.id).run();
 		}
 
 		return Response.json(drop);
@@ -179,7 +194,8 @@ export async function handleInbox(
 	query += " ORDER BY created_at DESC LIMIT ?";
 	params.push(limit);
 
-	const { results } = await env.DB.prepare(query)
+	const { results } = await db
+		.prepare(query)
 		.bind(...params)
 		.all<Drop>();
 

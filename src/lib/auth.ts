@@ -20,6 +20,7 @@ function constantTimeEqual(a: string, b: string): boolean {
 export async function validateApiKey(
 	env: Env,
 	request: Request,
+	ctx?: ExecutionContext,
 ): Promise<{
 	valid: boolean;
 	inboxScope: string | null;
@@ -44,10 +45,26 @@ export async function validateApiKey(
 		return { valid: false, inboxScope: null, permissions: "", keyName: null };
 	}
 
-	// Update last_used_at
-	await env.DB.prepare("UPDATE api_keys SET last_used_at = ? WHERE key_hash = ?")
+	// `last_used_at` is bookkeeping: nothing in the request's answer depends on
+	// it, but awaiting it put a serialized D1 write in the critical path of EVERY
+	// authenticated request, read paths included. Defer it -- the Worker stays
+	// alive until it settles, the caller does not wait for it.
+	//
+	// It is also swallowed on failure on purpose. A transient D1 error on a
+	// bookkeeping write must not turn an otherwise-valid request into an error,
+	// and an unhandled rejection inside waitUntil is noise in Workers Logs. The
+	// cost of losing one is a stale timestamp.
+	const touch = env.DB.prepare("UPDATE api_keys SET last_used_at = ? WHERE key_hash = ?")
 		.bind(Date.now(), keyHash)
-		.run();
+		.run()
+		.then(
+			() => {},
+			(err: unknown) => {
+				console.error("last_used_at update failed:", err);
+			},
+		);
+	if (ctx) ctx.waitUntil(touch);
+	else await touch;
 
 	return {
 		valid: true,

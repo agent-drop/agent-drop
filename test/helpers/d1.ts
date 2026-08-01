@@ -64,8 +64,22 @@ class FakeStatement {
 	}
 }
 
+export interface FakeSession {
+	prepare(sql: string): FakeStatement;
+	getBookmark(): string | null;
+}
+
 export interface FakeD1 {
 	prepare(sql: string): FakeStatement;
+	/**
+	 * D1 Sessions. A single SQLite file has one copy of the data, so sequential
+	 * consistency is free and a session is just this database again -- but the
+	 * constraint each caller asked for is recorded so tests can assert that read
+	 * paths take `first-unconstrained` and writes do not.
+	 */
+	withSession(constraintOrBookmark?: string): FakeSession;
+	/** Every constraint `withSession` was called with, in call order. */
+	sessions: string[];
 	/** Escape hatch for arranging fixtures without going through prepare/bind. */
 	raw: Database;
 }
@@ -77,8 +91,18 @@ export function makeD1(): FakeD1 {
 		.sort()) {
 		db.exec(readFileSync(join(MIGRATIONS_DIR, file), "utf8"));
 	}
-	return {
+	const sessions: string[] = [];
+	const fake: FakeD1 = {
 		prepare: (sql: string) => new FakeStatement(db, sql),
+		withSession(constraintOrBookmark = "first-primary") {
+			sessions.push(constraintOrBookmark);
+			return {
+				prepare: (sql: string) => fake.prepare(sql),
+				getBookmark: () => null,
+			};
+		},
+		sessions,
 		raw: db,
 	};
+	return fake;
 }
