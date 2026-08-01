@@ -30,7 +30,6 @@ import {
 	denyCredential,
 	type KeyedRoute,
 	keyedReader,
-	keyedSender,
 	keyedWriter,
 	type OpenRoute,
 	type RequestScope,
@@ -164,23 +163,23 @@ const KEYED_ROUTES: Route<KeyedRoute>[] = [
 		run: keyedReader((s, inbox) => handleHostList(s.env, inbox)),
 	},
 
-	// Outbound mail checks write PERMISSION but not inbox SCOPE, which is how it
-	// shipped. `keyedSender` names that difference instead of letting it hide in
-	// a copy-pasted block.
+	// Outbound mail. `:inbox` becomes the From address, so the same write gate
+	// applies here as everywhere else -- see test/send-scope.test.ts for what
+	// happened while these three had a copy of it that stopped one line early.
 	{
 		method: "POST",
 		match: segments("/api/send/presign/:inbox"),
-		run: keyedSender((s, inbox) => handleSendPresign(s.request, s.env, inbox)),
+		run: keyedWriter((s, inbox) => handleSendPresign(s.request, s.env, inbox)),
 	},
 	{
 		method: "POST",
 		match: segments("/api/compose/:inbox"),
-		run: keyedSender((s, inbox) => handleCompose(s.request, s.env, inbox)),
+		run: keyedWriter((s, inbox) => handleCompose(s.request, s.env, inbox)),
 	},
 	{
 		method: "POST",
 		match: segments("/api/send/:inbox"),
-		run: keyedSender((s, inbox) => handleSend(s.request, s.env, inbox)),
+		run: keyedWriter((s, inbox) => handleSend(s.request, s.env, inbox)),
 	},
 
 	{

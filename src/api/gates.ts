@@ -244,22 +244,3 @@ export function keyedReader(
 		return handle(scope, inbox, params);
 	};
 }
-
-/**
- * Second tier: normalize `:inbox` and require write PERMISSION but not scope.
- *
- * This is the outbound-mail gate, and the missing scope check is not an
- * oversight in this file -- see the note on the mail routes in `router.ts`.
- */
-export function keyedSender(
-	handle: (scope: RequestScope, inbox: string, params: Params) => Promise<Response>,
-): KeyedRoute {
-	return async (scope, params, auth) => {
-		const inbox = requireInbox(scope, params.inbox);
-		if (inbox instanceof Response) return inbox;
-		if (auth.permissions !== "write" && auth.permissions !== "admin") {
-			return reject(scope, 403, { error: "write permission required" });
-		}
-		return handle(scope, inbox, params);
-	};
-}

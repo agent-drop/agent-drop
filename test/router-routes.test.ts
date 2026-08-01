@@ -875,12 +875,10 @@ describe("outbound mail routes", () => {
 		expect(res.status).toBe(403);
 	});
 
-	test("the mail routes check write permission but NOT inbox scope", async () => {
-		// Pinning what shipped, not what is right: a key issued "write, scoped to
-		// bob" can send as any box, because these three routes never consult
-		// `inbox_scope` the way every other write path does. Fixed in the very next
-		// commit, with this expectation inverted -- kept here so the rewrite and the
-		// fix are two separately reviewable changes.
+	test("the mail routes enforce inbox scope like every other write path", async () => {
+		// This assertion was inverted in the commit before the fix: it pinned the
+		// shipped behavior, where a key scoped to `bob` could send as any box.
+		// Full coverage lives in test/send-scope.test.ts.
 		const env = await mailEnv();
 		await seedApiKey(env, "ad_bob", { permissions: "write", inboxScope: "bob" });
 		const auth = { Authorization: "Bearer ad_bob" };
@@ -893,10 +891,10 @@ describe("outbound mail routes", () => {
 					text: "Hello",
 				})
 			).status,
-		).toBe(200);
+		).toBe(403);
 		expect(
 			(await send(env, "POST", "/api/send/presign/lisa", auth, { fileName: "a.zip" })).status,
-		).toBe(200);
+		).toBe(403);
 		expect(
 			(
 				await send(env, "POST", "/api/compose/lisa", auth, {
@@ -905,7 +903,7 @@ describe("outbound mail routes", () => {
 					text: "Hello",
 				})
 			).status,
-		).toBe(200);
+		).toBe(403);
 	});
 
 	test("GET /api/send/:name is not a route", async () => {
