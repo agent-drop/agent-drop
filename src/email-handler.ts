@@ -1,7 +1,14 @@
 import PostalMime from "postal-mime";
 import { generateId } from "./lib/id";
 import { normalizeInbox, slugifyFilename } from "./lib/normalize";
-import { isRelayReply, parseRelayAddress, findRelayRule, buildRelayAddress, enqueueRelay, forwardViaBinding } from "./lib/relay";
+import {
+	isRelayReply,
+	parseRelayAddress,
+	findRelayRule,
+	buildRelayAddress,
+	enqueueRelay,
+	forwardViaBinding,
+} from "./lib/relay";
 import { fireRules } from "./lib/rules";
 import type { Env, Drop } from "./types";
 
@@ -71,9 +78,9 @@ export async function handleEmail(
 		const relay = parseRelayAddress(localPart);
 		if (relay) {
 			// Verify mask exists and is active
-			const mask = await env.DB.prepare(
-				"SELECT id FROM email_masks WHERE id = ? AND active = 1",
-			).bind(relay.maskId).first();
+			const mask = await env.DB.prepare("SELECT id FROM email_masks WHERE id = ? AND active = 1")
+				.bind(relay.maskId)
+				.first();
 
 			if (mask) {
 				// Parse the reply to get body
@@ -99,9 +106,9 @@ export async function handleEmail(
 	}
 
 	// Check if this is a direct email to a mask (inbound relay)
-	const maskLookup = await env.DB.prepare(
-		"SELECT id FROM email_masks WHERE id = ? AND active = 1",
-	).bind(normalizeInbox(localPart.split("+")[0]) || "").first<{ id: string }>();
+	const maskLookup = await env.DB.prepare("SELECT id FROM email_masks WHERE id = ? AND active = 1")
+		.bind(normalizeInbox(localPart.split("+")[0]) || "")
+		.first<{ id: string }>();
 
 	if (maskLookup) {
 		const rule = await findRelayRule(env, maskLookup.id);

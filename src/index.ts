@@ -6,11 +6,7 @@ import { serveHostedSite, HOST_PREFIX } from "./lib/hosting";
 import type { Env, QueueMessage } from "./types";
 
 export default {
-	async fetch(
-		request: Request,
-		env: Env,
-		ctx: ExecutionContext,
-	): Promise<Response> {
+	async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
 		const url = new URL(request.url);
 
 		if (url.pathname.startsWith("/api/")) {
@@ -27,11 +23,7 @@ export default {
 		return env.ASSETS.fetch(request);
 	},
 
-	async email(
-		message: ForwardableEmailMessage,
-		env: Env,
-		ctx: ExecutionContext,
-	): Promise<void> {
+	async email(message: ForwardableEmailMessage, env: Env, ctx: ExecutionContext): Promise<void> {
 		try {
 			await handleEmail(message, env, ctx);
 		} catch (err) {
@@ -39,10 +31,7 @@ export default {
 		}
 	},
 
-	async queue(
-		batch: MessageBatch<QueueMessage>,
-		env: Env,
-	): Promise<void> {
+	async queue(batch: MessageBatch<QueueMessage>, env: Env): Promise<void> {
 		for (const msg of batch.messages) {
 			if (msg.body.type === "relay") {
 				await processRelayMessage(msg as any, env);

@@ -83,6 +83,7 @@ export function GoogleSignIn({ onAuth }: GoogleSignInProps) {
 
 	return (
 		<button
+			type="button"
 			onClick={handleClick}
 			disabled={!ready}
 			className="px-8 py-3 text-sm font-medium tracking-wider uppercase cursor-pointer disabled:opacity-30"

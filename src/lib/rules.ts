@@ -29,13 +29,13 @@ function matchPattern(
 	}
 	if (pattern.endsWith("-*")) {
 		const prefix = pattern.slice(0, -2);
-		if (inbox.startsWith(prefix + "-")) {
+		if (inbox.startsWith(`${prefix}-`)) {
 			return { match: true, captures: { name: inbox.slice(prefix.length + 1) } };
 		}
 	}
 	if (pattern.startsWith("*-")) {
 		const suffix = pattern.slice(2);
-		if (inbox.endsWith("-" + suffix)) {
+		if (inbox.endsWith(`-${suffix}`)) {
 			return { match: true, captures: { name: inbox.slice(0, -(suffix.length + 1)) } };
 		}
 	}
@@ -104,7 +104,10 @@ export async function fireRules(
 		if (rule.type === "forward" && channel === "email" && forwardFn) {
 			// A single forward rule may target a comma-separated list of addresses;
 			// each is delivered (and logged) independently.
-			const targets = resolvedTarget.split(",").map((s) => s.trim()).filter(Boolean);
+			const targets = resolvedTarget
+				.split(",")
+				.map((s) => s.trim())
+				.filter(Boolean);
 			for (const addr of targets) {
 				ctx.waitUntil(executeForward(env, drop, rule, addr, forwardFn));
 			}
@@ -127,17 +130,23 @@ async function executeForward(
 	await env.DB.prepare(
 		`INSERT INTO delivery_log (id, drop_id, rule_id, type, target, status, attempts, created_at)
 		VALUES (?, ?, ?, 'forward', ?, 'pending', 1, ?)`,
-	).bind(logId, drop.id, rule.id, target, Date.now()).run();
+	)
+		.bind(logId, drop.id, rule.id, target, Date.now())
+		.run();
 
 	try {
 		await forwardFn(target);
 		await env.DB.prepare(
 			"UPDATE delivery_log SET status = 'success', completed_at = ? WHERE id = ?",
-		).bind(Date.now(), logId).run();
+		)
+			.bind(Date.now(), logId)
+			.run();
 	} catch (err: any) {
 		await env.DB.prepare(
 			"UPDATE delivery_log SET status = 'failed', error = ?, completed_at = ? WHERE id = ?",
-		).bind(err.message || "unknown error", Date.now(), logId).run();
+		)
+			.bind(err.message || "unknown error", Date.now(), logId)
+			.run();
 	}
 }
 
@@ -170,9 +179,7 @@ async function enqueueWebhook(
 		captures: vars,
 	};
 
-	const customHeaders: Record<string, string> = rule.headers
-		? JSON.parse(rule.headers)
-		: {};
+	const customHeaders: Record<string, string> = rule.headers ? JSON.parse(rule.headers) : {};
 	for (const [k, v] of Object.entries(customHeaders)) {
 		customHeaders[k] = substitute(v, vars);
 	}
@@ -181,7 +188,9 @@ async function enqueueWebhook(
 	await env.DB.prepare(
 		`INSERT INTO delivery_log (id, drop_id, rule_id, type, target, status, attempts, created_at)
 		VALUES (?, ?, ?, 'webhook', ?, 'queued', 0, ?)`,
-	).bind(logId, drop.id, rule.id, target, Date.now()).run();
+	)
+		.bind(logId, drop.id, rule.id, target, Date.now())
+		.run();
 
 	// Push to queue
 	const message: WebhookQueueMessage = {
@@ -212,7 +221,9 @@ export async function processWebhookBatch(
 		if (Date.now() - wh.firstAttemptAt > MAX_AGE_MS) {
 			await env.DB.prepare(
 				"UPDATE delivery_log SET status = 'failed', error = 'exceeded 24h retry window', completed_at = ? WHERE id = ?",
-			).bind(Date.now(), wh.logId).run();
+			)
+				.bind(Date.now(), wh.logId)
+				.run();
 			msg.ack();
 			continue;
 		}
@@ -233,13 +244,22 @@ export async function processWebhookBatch(
 			if (res.ok) {
 				await env.DB.prepare(
 					"UPDATE delivery_log SET status = 'success', status_code = ?, attempts = ?, completed_at = ? WHERE id = ?",
-				).bind(res.status, wh.attempt + 1, Date.now(), wh.logId).run();
+				)
+					.bind(res.status, wh.attempt + 1, Date.now(), wh.logId)
+					.run();
 				msg.ack();
 			} else {
 				const errBody = await res.text().catch(() => "");
 				await env.DB.prepare(
 					"UPDATE delivery_log SET status = 'retrying', status_code = ?, error = ?, attempts = ? WHERE id = ?",
-				).bind(res.status, `HTTP ${res.status}: ${errBody.slice(0, 500)}`, wh.attempt + 1, wh.logId).run();
+				)
+					.bind(
+						res.status,
+						`HTTP ${res.status}: ${errBody.slice(0, 500)}`,
+						wh.attempt + 1,
+						wh.logId,
+					)
+					.run();
 
 				// Exponential backoff: 2s, 4s, 8s, 16s, 32s, 64s, 128s, 256s, 512s, 1024s (cap at 1200s = 20min)
 				const delaySec = Math.min(2 ** (wh.attempt + 1), 1200);
@@ -248,7 +268,9 @@ export async function processWebhookBatch(
 		} catch (err: any) {
 			await env.DB.prepare(
 				"UPDATE delivery_log SET status = 'retrying', error = ?, attempts = ? WHERE id = ?",
-			).bind(err.message || "network error", wh.attempt + 1, wh.logId).run();
+			)
+				.bind(err.message || "network error", wh.attempt + 1, wh.logId)
+				.run();
 
 			const delaySec = Math.min(2 ** (wh.attempt + 1), 1200);
 			msg.retry({ delaySeconds: delaySec });

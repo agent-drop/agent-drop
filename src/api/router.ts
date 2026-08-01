@@ -80,13 +80,23 @@ export async function handleAPI(
 
 	// Public config (Google client ID for sign-in)
 	if (path === "/api/config") {
-		return Response.json({
-			google_client_id: env.GOOGLE_CLIENT_ID_PUBLIC || env.GOOGLE_CLIENT_ID || null,
-		}, { headers: corsHeaders });
+		return Response.json(
+			{
+				google_client_id: env.GOOGLE_CLIENT_ID_PUBLIC || env.GOOGLE_CLIENT_ID || null,
+			},
+			{ headers: corsHeaders },
+		);
 	}
 
 	// Admin-only routes
-	if (path.startsWith("/api/keys") || path.startsWith("/api/targets") || path.startsWith("/api/users") || path.startsWith("/api/rules") || path.startsWith("/api/deliveries") || path.startsWith("/api/masks")) {
+	if (
+		path.startsWith("/api/keys") ||
+		path.startsWith("/api/targets") ||
+		path.startsWith("/api/users") ||
+		path.startsWith("/api/rules") ||
+		path.startsWith("/api/deliveries") ||
+		path.startsWith("/api/masks")
+	) {
 		if (!(await isAdmin(request, env))) {
 			return denyCredential(403, { error: "admin required" });
 		}
@@ -113,20 +123,28 @@ export async function handleAPI(
 				return denyCredential(403, { error: "admin required" });
 			}
 		}
-		const limit = Math.min(parseInt(url.searchParams.get("limit") || "50"), 200);
+		const limit = Math.min(parseInt(url.searchParams.get("limit") || "50", 10), 200);
 		const since = url.searchParams.get("since");
 		const channel = url.searchParams.get("channel");
 
 		let query = "SELECT * FROM drops WHERE 1=1";
 		const params: (string | number)[] = [];
 
-		if (since) { query += " AND created_at > ?"; params.push(parseInt(since)); }
-		if (channel) { query += " AND channel = ?"; params.push(channel); }
+		if (since) {
+			query += " AND created_at > ?";
+			params.push(parseInt(since, 10));
+		}
+		if (channel) {
+			query += " AND channel = ?";
+			params.push(channel);
+		}
 
 		query += " ORDER BY created_at DESC LIMIT ?";
 		params.push(limit);
 
-		const { results } = await env.DB.prepare(query).bind(...params).all();
+		const { results } = await env.DB.prepare(query)
+			.bind(...params)
+			.all();
 		const res = Response.json({ count: results.length, drops: results });
 		addHeaders(res, corsHeaders);
 		return res;
@@ -157,7 +175,9 @@ export async function handleAPI(
 		// Also get active drop tokens per inbox
 		const { results: tokens } = await env.DB.prepare(
 			"SELECT inbox, COUNT(*) as active_tokens FROM drop_tokens WHERE expires_at > ? GROUP BY inbox",
-		).bind(Date.now()).all();
+		)
+			.bind(Date.now())
+			.all();
 
 		const tokenMap = new Map(tokens.map((t: any) => [t.inbox, t.active_tokens]));
 		const boxes = results.map((r: any) => ({
@@ -172,10 +192,11 @@ export async function handleAPI(
 
 	function requireInbox(raw: string): string | Response {
 		const name = normalizeInbox(raw);
-		if (!name) return Response.json(
-			{ error: "invalid inbox name (a-z, 0-9, hyphens, must start with letter)" },
-			{ status: 400, headers: corsHeaders },
-		);
+		if (!name)
+			return Response.json(
+				{ error: "invalid inbox name (a-z, 0-9, hyphens, must start with letter)" },
+				{ status: 400, headers: corsHeaders },
+			);
 		return name;
 	}
 
@@ -209,7 +230,10 @@ export async function handleAPI(
 			if (googleAuth.denied) {
 				// A real Google identity that is not on the allowlist: authenticated,
 				// just not authorized. Not a guess, so it does not burn a token.
-				return Response.json({ error: "not authorized", email: googleAuth.email }, { status: 403, headers: corsHeaders });
+				return Response.json(
+					{ error: "not authorized", email: googleAuth.email },
+					{ status: 403, headers: corsHeaders },
+				);
 			}
 			return denyCredential(401, { error: "invalid google token" });
 		}
@@ -219,7 +243,10 @@ export async function handleAPI(
 			return denyCredential(401, { error: "invalid api key" });
 		}
 		if (auth.permissions !== "write" && auth.permissions !== "admin") {
-			return Response.json({ error: "write permission required" }, { status: 403, headers: corsHeaders });
+			return Response.json(
+				{ error: "write permission required" },
+				{ status: 403, headers: corsHeaders },
+			);
 		}
 		if (auth.inboxScope && auth.inboxScope !== inboxName) {
 			return Response.json({ error: "inbox not in scope" }, { status: 403, headers: corsHeaders });
@@ -233,7 +260,10 @@ export async function handleAPI(
 		const inbox = requireInbox(dropMatch[1]);
 		if (inbox instanceof Response) return inbox;
 		const authResult = await authenticateWrite(inbox);
-		if (authResult instanceof Response) { addHeaders(authResult, corsHeaders); return authResult; }
+		if (authResult instanceof Response) {
+			addHeaders(authResult, corsHeaders);
+			return authResult;
+		}
 		const res = await handleDrop(request, env, inbox, url, authResult.ctx, ctx);
 		addHeaders(res, corsHeaders);
 		return res;
@@ -245,7 +275,10 @@ export async function handleAPI(
 		const inbox = requireInbox(presignMatch[1]);
 		if (inbox instanceof Response) return inbox;
 		const authResult = await authenticateWrite(inbox);
-		if (authResult instanceof Response) { addHeaders(authResult, corsHeaders); return authResult; }
+		if (authResult instanceof Response) {
+			addHeaders(authResult, corsHeaders);
+			return authResult;
+		}
 		const res = await handlePresign(request, env, inbox, authResult.ctx);
 		addHeaders(res, corsHeaders);
 		return res;
@@ -256,7 +289,10 @@ export async function handleAPI(
 		const inbox = requireInbox(multipartMatch[1]);
 		if (inbox instanceof Response) return inbox;
 		const authResult = await authenticateWrite(inbox);
-		if (authResult instanceof Response) { addHeaders(authResult, corsHeaders); return authResult; }
+		if (authResult instanceof Response) {
+			addHeaders(authResult, corsHeaders);
+			return authResult;
+		}
 		const res = await handleMultipartInit(request, env, inbox, authResult.ctx);
 		addHeaders(res, corsHeaders);
 		return res;
@@ -297,10 +333,14 @@ export async function handleAPI(
 
 	if ((path === "/api/upload/complete" || path === "/api/upload/confirm") && method === "POST") {
 		const finalize = await authenticateFinalize();
-		if (finalize instanceof Response) { addHeaders(finalize, corsHeaders); return finalize; }
-		const res = path === "/api/upload/complete"
-			? await handleMultipartComplete(env, finalize.drop, finalize.body)
-			: await handleConfirm(env, finalize.drop);
+		if (finalize instanceof Response) {
+			addHeaders(finalize, corsHeaders);
+			return finalize;
+		}
+		const res =
+			path === "/api/upload/complete"
+				? await handleMultipartComplete(env, finalize.drop, finalize.body)
+				: await handleConfirm(env, finalize.drop);
 		addHeaders(res, corsHeaders);
 		return res;
 	}
@@ -322,7 +362,10 @@ export async function handleAPI(
 
 	function requireWriteScope(inbox: string): Response | null {
 		if (auth.permissions !== "write" && auth.permissions !== "admin") {
-			return Response.json({ error: "write permission required" }, { status: 403, headers: corsHeaders });
+			return Response.json(
+				{ error: "write permission required" },
+				{ status: 403, headers: corsHeaders },
+			);
 		}
 		if (auth.inboxScope && auth.inboxScope !== inbox) {
 			return Response.json({ error: "inbox not in scope" }, { status: 403, headers: corsHeaders });
@@ -375,7 +418,10 @@ export async function handleAPI(
 		const inboxName = requireInbox(sendPresignMatch[1]);
 		if (inboxName instanceof Response) return inboxName;
 		if (auth.permissions !== "write" && auth.permissions !== "admin") {
-			return Response.json({ error: "write permission required" }, { status: 403, headers: corsHeaders });
+			return Response.json(
+				{ error: "write permission required" },
+				{ status: 403, headers: corsHeaders },
+			);
 		}
 		const res = await handleSendPresign(request, env, inboxName);
 		addHeaders(res, corsHeaders);
@@ -386,7 +432,10 @@ export async function handleAPI(
 		const inboxName = requireInbox(composeMatch[1]);
 		if (inboxName instanceof Response) return inboxName;
 		if (auth.permissions !== "write" && auth.permissions !== "admin") {
-			return Response.json({ error: "write permission required" }, { status: 403, headers: corsHeaders });
+			return Response.json(
+				{ error: "write permission required" },
+				{ status: 403, headers: corsHeaders },
+			);
 		}
 		const res = await handleCompose(request, env, inboxName);
 		addHeaders(res, corsHeaders);
@@ -409,7 +458,10 @@ export async function handleAPI(
 		const inboxName = requireInbox(sendMatch[1]);
 		if (inboxName instanceof Response) return inboxName;
 		if (auth.permissions !== "write" && auth.permissions !== "admin") {
-			return Response.json({ error: "write permission required" }, { status: 403, headers: corsHeaders });
+			return Response.json(
+				{ error: "write permission required" },
+				{ status: 403, headers: corsHeaders },
+			);
 		}
 		const res = await handleSend(request, env, inboxName);
 		addHeaders(res, corsHeaders);

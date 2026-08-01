@@ -20,7 +20,12 @@ function constantTimeEqual(a: string, b: string): boolean {
 export async function validateApiKey(
 	env: Env,
 	request: Request,
-): Promise<{ valid: boolean; inboxScope: string | null; permissions: string; keyName: string | null }> {
+): Promise<{
+	valid: boolean;
+	inboxScope: string | null;
+	permissions: string;
+	keyName: string | null;
+}> {
 	const auth = request.headers.get("Authorization");
 	if (!auth?.startsWith("Bearer ")) {
 		return { valid: false, inboxScope: null, permissions: "", keyName: null };
@@ -40,9 +45,7 @@ export async function validateApiKey(
 	}
 
 	// Update last_used_at
-	await env.DB.prepare(
-		"UPDATE api_keys SET last_used_at = ? WHERE key_hash = ?",
-	)
+	await env.DB.prepare("UPDATE api_keys SET last_used_at = ? WHERE key_hash = ?")
 		.bind(Date.now(), keyHash)
 		.run();
 

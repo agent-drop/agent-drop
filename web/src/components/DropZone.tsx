@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from "react";
+import { useRef, useState } from "react";
 
 interface DropZoneProps {
 	inbox: string;
@@ -59,11 +59,11 @@ export function DropZone({ inbox, apiKey, dropToken, googleToken, onDropped }: D
 	async function uploadDirect(file: File): Promise<DroppedFile> {
 		setProgress(`signing ${file.name}...`);
 
-		const data = await apiFetch(`/api/upload/presign/${inbox}`, {
+		const data = (await apiFetch(`/api/upload/presign/${inbox}`, {
 			fileName: file.name,
 			contentType: file.type || "application/octet-stream",
 			fileSize: file.size,
-		}) as { dropId: string; uploadUrl: string };
+		})) as { dropId: string; uploadUrl: string };
 
 		setProgress(`uploading ${file.name} (${formatSize(file.size)})...`);
 
@@ -83,11 +83,16 @@ export function DropZone({ inbox, apiKey, dropToken, googleToken, onDropped }: D
 	async function uploadMultipart(file: File): Promise<DroppedFile> {
 		setProgress(`initiating multipart for ${file.name}...`);
 
-		const data = await apiFetch(`/api/upload/multipart/${inbox}`, {
+		const data = (await apiFetch(`/api/upload/multipart/${inbox}`, {
 			fileName: file.name,
 			contentType: file.type || "application/octet-stream",
 			fileSize: file.size,
-		}) as { dropId: string; uploadId: string; objectKey: string; parts: { partNumber: number; url: string }[] };
+		})) as {
+			dropId: string;
+			uploadId: string;
+			objectKey: string;
+			parts: { partNumber: number; url: string }[];
+		};
 
 		// Upload chunks in parallel
 		const totalParts = data.parts.length;
@@ -127,34 +132,33 @@ export function DropZone({ inbox, apiKey, dropToken, googleToken, onDropped }: D
 		return { filename: file.name, dropId: data.dropId, ts: Date.now(), size: file.size };
 	}
 
-	const handleDrop = useCallback(
-		async (files: FileList) => {
-			setUploading(true);
-			setError(null);
+	// Not memoized: uploadDirect/uploadMultipart are redefined every render, so a
+	// useCallback here would either change identity anyway or capture a stale
+	// closure. Nothing consuming handleDrop is memoized, so there is nothing to win.
+	async function handleDrop(files: FileList) {
+		setUploading(true);
+		setError(null);
 
-			try {
-				const results: DroppedFile[] = [];
+		try {
+			const results: DroppedFile[] = [];
 
-				for (let i = 0; i < files.length; i++) {
-					const file = files[i];
-					const result = file.size > DIRECT_LIMIT
-						? await uploadMultipart(file)
-						: await uploadDirect(file);
-					results.push(result);
-				}
-
-				setDropped((prev) => [...results, ...prev]);
-				setProgress("");
-				onDropped?.();
-			} catch (err: any) {
-				setError(err.message || "upload failed");
-				setProgress("");
-			} finally {
-				setUploading(false);
+			for (let i = 0; i < files.length; i++) {
+				const file = files[i];
+				const result =
+					file.size > DIRECT_LIMIT ? await uploadMultipart(file) : await uploadDirect(file);
+				results.push(result);
 			}
-		},
-		[inbox, apiKey, dropToken, googleToken, onDropped],
-	);
+
+			setDropped((prev) => [...results, ...prev]);
+			setProgress("");
+			onDropped?.();
+		} catch (err: any) {
+			setError(err.message || "upload failed");
+			setProgress("");
+		} finally {
+			setUploading(false);
+		}
+	}
 
 	function handleCopy() {
 		const text = dropped.map((f) => `${f.filename}: ${f.dropId}`).join("\n");
@@ -165,8 +169,13 @@ export function DropZone({ inbox, apiKey, dropToken, googleToken, onDropped }: D
 
 	return (
 		<div className="space-y-3">
+			{/* biome-ignore lint/a11y/useSemanticElements: a native <button> cannot
+			    wrap the file input and drop target without breaking the drag styling;
+			    role + tabIndex + key handler give it the same keyboard affordance. */}
 			<div
 				className={`drop-zone p-8 text-center cursor-pointer ${dragOver ? "drag-over" : ""}`}
+				role="button"
+				tabIndex={0}
 				onDragOver={(e) => {
 					e.preventDefault();
 					setDragOver(true);
@@ -178,6 +187,12 @@ export function DropZone({ inbox, apiKey, dropToken, googleToken, onDropped }: D
 					if (e.dataTransfer.files.length) handleDrop(e.dataTransfer.files);
 				}}
 				onClick={() => fileRef.current?.click()}
+				onKeyDown={(e) => {
+					if (e.key === "Enter" || e.key === " ") {
+						e.preventDefault();
+						fileRef.current?.click();
+					}
+				}}
 			>
 				<input
 					ref={fileRef}
@@ -196,7 +211,9 @@ export function DropZone({ inbox, apiKey, dropToken, googleToken, onDropped }: D
 				) : (
 					<div className="text-sm">
 						<p style={{ color: "var(--color-neon-cyan)" }}>drop files here</p>
-						<p className="text-xs mt-1" style={{ color: "var(--color-fg-dim)" }}>or click to browse</p>
+						<p className="text-xs mt-1" style={{ color: "var(--color-fg-dim)" }}>
+							or click to browse
+						</p>
 					</div>
 				)}
 			</div>
@@ -208,13 +225,20 @@ export function DropZone({ inbox, apiKey, dropToken, googleToken, onDropped }: D
 			)}
 
 			{dropped.length > 0 && (
-				<div style={{ background: "var(--color-bg-dark)", border: "1px solid var(--color-surface-border)" }} className="p-3">
+				<div
+					style={{
+						background: "var(--color-bg-dark)",
+						border: "1px solid var(--color-surface-border)",
+					}}
+					className="p-3"
+				>
 					<div className="flex items-center justify-between mb-2">
 						<span className="text-xs">
 							<span style={{ color: "var(--color-neon-yellow)" }}>{dropped.length}</span>
 							<span style={{ color: "var(--color-fg-dim)" }}> dropped</span>
 						</span>
 						<button
+							type="button"
 							onClick={handleCopy}
 							className="text-xs px-2 py-1 cursor-pointer"
 							style={{
@@ -227,8 +251,8 @@ export function DropZone({ inbox, apiKey, dropToken, googleToken, onDropped }: D
 						</button>
 					</div>
 					<div className="space-y-0.5 font-mono text-xs">
-						{dropped.map((f, i) => (
-							<div key={`${f.dropId}-${i}`} className="flex gap-2">
+						{dropped.map((f) => (
+							<div key={f.dropId} className="flex gap-2">
 								<span style={{ color: "var(--color-neon-purple)" }}>&gt;</span>
 								<span style={{ color: "var(--color-fg)" }}>{f.filename}</span>
 								<span style={{ color: "var(--color-fg-dark)" }}>({formatSize(f.size)})</span>

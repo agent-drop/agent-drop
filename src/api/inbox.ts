@@ -34,9 +34,7 @@ export async function handleInbox(
 	const attMatch = subPath.match(/^\/([^/]+)\/attachments$/);
 	if (attMatch) {
 		const dropId = attMatch[1];
-		const drop = await env.DB.prepare(
-			"SELECT r2_prefix FROM drops WHERE id = ? AND inbox = ?",
-		)
+		const drop = await env.DB.prepare("SELECT r2_prefix FROM drops WHERE id = ? AND inbox = ?")
 			.bind(dropId, inbox)
 			.first<{ r2_prefix: string }>();
 
@@ -66,9 +64,7 @@ export async function handleInbox(
 	if (fileMatch) {
 		const [, dropId, rawFilename] = fileMatch;
 		const filename = decodeURIComponent(rawFilename);
-		const drop = await env.DB.prepare(
-			"SELECT r2_prefix FROM drops WHERE id = ? AND inbox = ?",
-		)
+		const drop = await env.DB.prepare("SELECT r2_prefix FROM drops WHERE id = ? AND inbox = ?")
 			.bind(dropId, inbox)
 			.first<{ r2_prefix: string }>();
 
@@ -85,8 +81,7 @@ export async function handleInbox(
 
 		return new Response(obj.body, {
 			headers: {
-				"Content-Type":
-					obj.httpMetadata?.contentType || "application/octet-stream",
+				"Content-Type": obj.httpMetadata?.contentType || "application/octet-stream",
 				"Content-Disposition": `attachment; filename="${filename}"`,
 			},
 		});
@@ -97,10 +92,8 @@ export async function handleInbox(
 	if (urlMatch) {
 		const [, dropId, rawFilename] = urlMatch;
 		const filename = decodeURIComponent(rawFilename);
-		const ttl = parseInt(url.searchParams.get("ttl") || "3600");
-		const drop = await env.DB.prepare(
-			"SELECT r2_prefix FROM drops WHERE id = ? AND inbox = ?",
-		)
+		const ttl = parseInt(url.searchParams.get("ttl") || "3600", 10);
+		const drop = await env.DB.prepare("SELECT r2_prefix FROM drops WHERE id = ? AND inbox = ?")
 			.bind(dropId, inbox)
 			.first<{ r2_prefix: string }>();
 
@@ -127,10 +120,9 @@ export async function handleInbox(
 		const s3Url = new URL(r2ObjectUrl(env, objectKey));
 		s3Url.searchParams.set("X-Amz-Expires", String(Math.min(ttl, 86400)));
 
-		const signed = await aws.sign(
-			new Request(s3Url, { method: "GET" }),
-			{ aws: { signQuery: true } },
-		);
+		const signed = await aws.sign(new Request(s3Url, { method: "GET" }), {
+			aws: { signQuery: true },
+		});
 
 		return Response.json({
 			url: signed.url,
@@ -145,9 +137,7 @@ export async function handleInbox(
 	const idMatch = subPath.match(/^\/([^/]+)$/);
 	if (idMatch) {
 		const dropId = idMatch[1];
-		const drop = await env.DB.prepare(
-			"SELECT * FROM drops WHERE id = ? AND inbox = ?",
-		)
+		const drop = await env.DB.prepare("SELECT * FROM drops WHERE id = ? AND inbox = ?")
 			.bind(dropId, inbox)
 			.first<Drop>();
 
@@ -168,7 +158,7 @@ export async function handleInbox(
 	// GET /api/inbox/:name (list drops)
 	const topic = url.searchParams.get("topic");
 	const unread = url.searchParams.get("unread");
-	const limit = Math.min(parseInt(url.searchParams.get("limit") || "50"), 100);
+	const limit = Math.min(parseInt(url.searchParams.get("limit") || "50", 10), 100);
 	const since = url.searchParams.get("since");
 
 	let query = "SELECT * FROM drops WHERE inbox = ? AND (status = 'completed' OR status IS NULL)";
@@ -183,7 +173,7 @@ export async function handleInbox(
 	}
 	if (since) {
 		query += " AND created_at > ?";
-		params.push(parseInt(since));
+		params.push(parseInt(since, 10));
 	}
 
 	query += " ORDER BY created_at DESC LIMIT ?";

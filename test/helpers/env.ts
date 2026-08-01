@@ -98,14 +98,7 @@ export async function seedDropToken(
 	await env.DB.prepare(
 		"INSERT INTO drop_tokens (id, inbox, token_hash, expires_at, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?)",
 	)
-		.bind(
-			crypto.randomUUID(),
-			inbox,
-			await sha256Hex(token),
-			Date.now() + ttlMs,
-			null,
-			Date.now(),
-		)
+		.bind(crypto.randomUUID(), inbox, await sha256Hex(token), Date.now() + ttlMs, null, Date.now())
 		.run();
 }
 

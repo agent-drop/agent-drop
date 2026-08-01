@@ -35,10 +35,7 @@ function base64UrlDecode(str: string): Uint8Array {
 	return Uint8Array.from(binary, (c) => c.charCodeAt(0));
 }
 
-async function verifyJWT(
-	token: string,
-	clientId: string,
-): Promise<GoogleJWTPayload | null> {
+async function verifyJWT(token: string, clientId: string): Promise<GoogleJWTPayload | null> {
 	const parts = token.split(".");
 	if (parts.length !== 3) return null;
 
@@ -102,9 +99,7 @@ export async function validateGoogleToken(
 	if (!payload) return { valid: false, email: null, name: null };
 
 	// Check allowlist
-	const allowed = await env.DB.prepare(
-		"SELECT email FROM allowed_users WHERE email = ?",
-	)
+	const allowed = await env.DB.prepare("SELECT email FROM allowed_users WHERE email = ?")
 		.bind(payload.email)
 		.first();
 

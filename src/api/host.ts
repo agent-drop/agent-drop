@@ -82,21 +82,25 @@ export async function handleHostFinalize(
 	const expiresAt = body.ttlHours ? now + body.ttlHours * 3_600_000 : null;
 	const authToken = body.authToken || null;
 
-	const existing = await env.DB.prepare(
-		"SELECT id FROM hosted_sites WHERE inbox = ? AND site = ?",
-	).bind(inbox, site).first<{ id: string }>();
+	const existing = await env.DB.prepare("SELECT id FROM hosted_sites WHERE inbox = ? AND site = ?")
+		.bind(inbox, site)
+		.first<{ id: string }>();
 
 	if (existing) {
 		await env.DB.prepare(
 			`UPDATE hosted_sites SET file_count = ?, total_bytes = ?, auth_token = ?,
 				expires_at = ?, updated_at = ? WHERE id = ?`,
-		).bind(fileCount, totalBytes, authToken, expiresAt, now, existing.id).run();
+		)
+			.bind(fileCount, totalBytes, authToken, expiresAt, now, existing.id)
+			.run();
 	} else {
 		await env.DB.prepare(
 			`INSERT INTO hosted_sites (id, inbox, site, file_count, total_bytes,
 				auth_token, created_at, updated_at, expires_at)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		).bind(generateId(), inbox, site, fileCount, totalBytes, authToken, now, now, expiresAt).run();
+		)
+			.bind(generateId(), inbox, site, fileCount, totalBytes, authToken, now, now, expiresAt)
+			.run();
 	}
 
 	return Response.json({
@@ -113,7 +117,9 @@ export async function handleHostFinalize(
 export async function handleHostList(env: Env, inbox: string): Promise<Response> {
 	const { results } = await env.DB.prepare(
 		"SELECT inbox, site, file_count, total_bytes, auth_token, created_at, updated_at, expires_at FROM hosted_sites WHERE inbox = ? ORDER BY updated_at DESC",
-	).bind(inbox).all();
+	)
+		.bind(inbox)
+		.all();
 
 	const sites = results.map((r: any) => ({
 		inbox: r.inbox,
@@ -131,7 +137,11 @@ export async function handleHostList(env: Env, inbox: string): Promise<Response>
 }
 
 // DELETE /api/host/sites/:box/:site
-export async function handleHostDelete(env: Env, inbox: string, rawSite: string): Promise<Response> {
+export async function handleHostDelete(
+	env: Env,
+	inbox: string,
+	rawSite: string,
+): Promise<Response> {
 	const site = normalizeSite(rawSite);
 	if (!site) return Response.json({ error: "invalid site name" }, { status: 400 });
 
@@ -149,7 +159,8 @@ export async function handleHostDelete(env: Env, inbox: string, rawSite: string)
 	} while (cursor);
 
 	await env.DB.prepare("DELETE FROM hosted_sites WHERE inbox = ? AND site = ?")
-		.bind(inbox, site).run();
+		.bind(inbox, site)
+		.run();
 
 	return Response.json({ deleted, site });
 }
