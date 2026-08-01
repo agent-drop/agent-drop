@@ -134,7 +134,10 @@ export async function serveHostedSite(request: Request, env: Env, url: URL): Pro
 		key = `${prefix}/index.html`;
 	} else {
 		key = `${prefix}/${rest.join("/")}`;
-		if (url.pathname.endsWith("/")) key += "index.html";
+		// split("/").filter(Boolean) already dropped the trailing slash, so the
+		// separator has to be re-added here -- without it "/docs/" resolved to
+		// "…/docsindex.html" and 404'd, while "/docs" worked.
+		if (url.pathname.endsWith("/")) key += "/index.html";
 	}
 
 	let obj = await env.BUCKET.get(key);

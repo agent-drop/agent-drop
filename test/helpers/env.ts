@@ -63,11 +63,52 @@ export function makeEnv(overrides: Partial<Env> = {}): TestEnv {
 	} as unknown as TestEnv;
 }
 
-export function makeCtx(): ExecutionContext {
+export interface TestCtx extends ExecutionContext {
+	/** Everything handed to waitUntil, in call order. */
+	waits: Promise<unknown>[];
+	/** Await every deferred task, including ones queued while draining. */
+	settle(): Promise<void>;
+}
+
+/**
+ * fireRules() does its real work inside ctx.waitUntil, so a no-op waitUntil
+ * makes every assertion about forwards and webhooks vacuously pass. This one
+ * keeps the promises and settle() drains them.
+ */
+export function makeCtx(): TestCtx {
+	const waits: Promise<unknown>[] = [];
 	return {
-		waitUntil: () => {},
+		waits,
+		waitUntil: (p: Promise<unknown>) => {
+			waits.push(p);
+		},
 		passThroughOnException: () => {},
-	} as unknown as ExecutionContext;
+		async settle() {
+			// A deferred task may itself defer; keep draining until nothing new lands.
+			for (let seen = 0; seen < waits.length; ) {
+				const pending = waits.slice(seen);
+				seen = waits.length;
+				await Promise.allSettled(pending);
+			}
+		},
+	} as unknown as TestCtx;
+}
+
+/** An R2Bucket over a plain map of key -> body, enough for read paths. */
+export function makeBucket(objects: Record<string, string> = {}): R2Bucket {
+	return {
+		get: async (key: string) => {
+			if (!(key in objects)) return null;
+			const body = objects[key];
+			return {
+				key,
+				body: new Response(body).body,
+				httpEtag: `"etag-${key}"`,
+				writeHttpMetadata: (_headers: Headers) => {},
+				text: async () => body,
+			};
+		},
+	} as unknown as R2Bucket;
 }
 
 export async function seedApiKey(

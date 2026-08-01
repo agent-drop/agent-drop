@@ -140,7 +140,18 @@ export function slugifyFilename(raw: string): string {
 	const lastDot = raw.lastIndexOf(".");
 	const hasExt = lastDot > 0;
 	const name = hasExt ? raw.slice(0, lastDot) : raw;
-	const ext = hasExt ? raw.slice(lastDot).toLowerCase() : "";
+
+	// The extension is attacker-controlled too (inbound MIME part names, upload
+	// form fields), and every caller concatenates the result straight into an R2
+	// key. Copying it verbatim let "../../etc/passwd" through as
+	// "file./etc/passwd" -- separators and all. Strip it like the name.
+	const extChars = hasExt
+		? raw
+				.slice(lastDot + 1)
+				.toLowerCase()
+				.replace(/[^a-z0-9]/g, "")
+		: "";
+	const ext = extChars ? `.${extChars}` : "";
 
 	const slug =
 		romanize(name.toLowerCase())
