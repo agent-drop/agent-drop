@@ -53,7 +53,9 @@ export async function handleDrop(
 		let attachmentCount = 0;
 		const filenames: string[] = [];
 		for (const [, value] of formData.entries()) {
-			if (value instanceof File) {
+			// FormDataEntryValue is `File | string`; narrowing off the primitive is the
+			// only form TS accepts here (`instanceof` rejects a union with a primitive).
+			if (typeof value !== "string") {
 				const slugged = slugifyFilename(value.name);
 				await env.BUCKET.put(
 					`${r2Prefix}/uploads/${slugged}`,

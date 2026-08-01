@@ -1,7 +1,6 @@
 node_modules/
 web/dist/
 .env
-bun.lock
 client_secret_*.json
 .log/
 **/.log/
