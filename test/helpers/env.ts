@@ -95,8 +95,12 @@ export function makeCtx(): TestCtx {
 }
 
 /** An R2Bucket over a plain map of key -> body, enough for read paths. */
-export function makeBucket(objects: Record<string, string> = {}): R2Bucket {
+export function makeBucket(objects: Record<string, string> = {}): R2Bucket & {
+	heads: string[];
+} {
+	const heads: string[] = [];
 	return {
+		heads,
 		get: async (key: string) => {
 			if (!(key in objects)) return null;
 			const body = objects[key];
@@ -108,7 +112,45 @@ export function makeBucket(objects: Record<string, string> = {}): R2Bucket {
 				text: async () => body,
 			};
 		},
-	} as unknown as R2Bucket;
+		head: async (key: string) => {
+			heads.push(key);
+			if (!(key in objects)) return null;
+			return { key, size: objects[key].length, httpEtag: `"etag-${key}"` };
+		},
+	} as unknown as R2Bucket & { heads: string[] };
+}
+
+/**
+ * Hold every statement whose SQL starts with `sqlPrefix` until `release()` is
+ * called; then it runs for real.
+ *
+ * The FakeD1 executes SQLite synchronously inside an `async` method, so its
+ * writes land before the returned promise ever yields. Real D1 is a network
+ * round trip. Without this gate, "the response came back before the write
+ * landed" is untestable -- the fake would make an inline `await` look deferred.
+ */
+export function gateStatement(env: TestEnv, sqlPrefix: string): { release: () => void } {
+	let open!: () => void;
+	const gate = new Promise<void>((resolve) => {
+		open = resolve;
+	});
+	const realPrepare = env.DB.prepare.bind(env.DB);
+	env.DB.prepare = ((sql: string) => {
+		const stmt = realPrepare(sql);
+		if (!sql.startsWith(sqlPrefix)) return stmt;
+		const wrap = (bound: typeof stmt) =>
+			({
+				bind: (...args: unknown[]) => wrap(bound.bind(...args)),
+				run: async () => {
+					await gate;
+					return bound.run();
+				},
+				first: bound.first.bind(bound),
+				all: bound.all.bind(bound),
+			}) as unknown as typeof stmt;
+		return wrap(stmt);
+	}) as typeof env.DB.prepare;
+	return { release: open };
 }
 
 export async function seedApiKey(
@@ -151,6 +193,7 @@ export async function seedPendingDrop(
 		fileName?: string;
 		objectKey?: string | null;
 		status?: string;
+		createdAt?: number;
 	},
 ): Promise<void> {
 	const fileName = opts.fileName ?? "report.pdf";
@@ -167,7 +210,7 @@ export async function seedPendingDrop(
 			r2Prefix,
 			opts.objectKey === undefined ? `${r2Prefix}/uploads/${fileName}` : opts.objectKey,
 			opts.status ?? "pending",
-			Date.now(),
+			opts.createdAt ?? Date.now(),
 		)
 		.run();
 }

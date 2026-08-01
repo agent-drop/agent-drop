@@ -3,6 +3,8 @@ import { handleAPI } from "./api/router";
 import { processWebhookBatch } from "./lib/rules";
 import { processRelayMessage } from "./lib/relay";
 import { serveHostedSite, HOST_PREFIX } from "./lib/hosting";
+import { processR2EventBatch, R2_EVENT_QUEUE, type R2EventNotification } from "./lib/r2-events";
+import { runScheduled } from "./lib/reaper";
 import type { Env, QueueMessage } from "./types";
 
 export default {
@@ -31,8 +33,31 @@ export default {
 		}
 	},
 
-	async queue(batch: MessageBatch<QueueMessage>, env: Env): Promise<void> {
-		for (const msg of batch.messages) {
+	// Hourly sweep for drops stuck in `pending` -- presigns that were never
+	// spent, and uploads whose R2 notification was lost. See src/lib/reaper.ts.
+	async scheduled(
+		_controller: ScheduledController,
+		env: Env,
+		ctx: ExecutionContext,
+	): Promise<void> {
+		ctx.waitUntil(
+			runScheduled(env).then(
+				() => {},
+				(err: unknown) => {
+					console.error("Reaper error:", err);
+				},
+			),
+		);
+	},
+
+	async queue(batch: MessageBatch<QueueMessage | R2EventNotification>, env: Env): Promise<void> {
+		// Two queues land here. R2's notification bodies are R2's shape -- no `type`
+		// discriminator to switch on -- so the queue name is what separates them.
+		if (batch.queue === R2_EVENT_QUEUE) {
+			return processR2EventBatch(batch as MessageBatch<R2EventNotification>, env);
+		}
+
+		for (const msg of batch.messages as Message<QueueMessage>[]) {
 			if (msg.body.type === "relay") {
 				await processRelayMessage(msg as any, env);
 			} else {

@@ -49,6 +49,18 @@ max_batch_size = 5
 max_batch_timeout = 10
 retry_delay = 2
 
+# R2 event notifications. There is NO matching producer binding on purpose: the
+# bucket is the producer, wired up out-of-band with
+# `wrangler r2 bucket notification create` (see CLAUDE.md). This consumer flips a
+# drop from `pending` to `completed` when its bytes actually land, so an upload
+# no longer depends on the client coming back to confirm.
+[[queues.consumers]]
+queue = "agent-drop-r2-events"
+max_retries = 10
+max_batch_size = 10
+max_batch_timeout = 5
+retry_delay = 5
+
 # Rate limiting. These counters are PER COLOCATION, not global -- each Cloudflare
 # location keeps its own, so the effective ceiling is roughly
 # (limit x colos reached). They throttle brute force and leaked-link abuse; they
@@ -63,6 +75,11 @@ simple = { limit = 20, period = 60 }
 name = "UPLOAD_RATE_LIMIT"
 namespace_id = "1002"
 simple = { limit = 60, period = 60 }
+
+# Hourly reaper for drops stuck in `pending` (src/lib/reaper.ts). Offset off the
+# hour so it does not queue behind everyone else's :00 cron.
+[triggers]
+crons = ["17 * * * *"]
 
 [vars]
 DOMAIN = "example.com"

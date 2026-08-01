@@ -105,9 +105,11 @@ export async function serveHostedSite(request: Request, env: Env, url: URL): Pro
 	}
 
 	// Registry: enforce existence + expiry + optional private token.
-	const row = await env.DB.prepare(
-		"SELECT auth_token, expires_at FROM hosted_sites WHERE inbox = ? AND site = ?",
-	)
+	// Read-only and on the hot path of every hosted page view, so it takes the
+	// nearest consistent replica rather than the primary. See the note in
+	// src/api/inbox.ts for what `first-unconstrained` costs.
+	const row = await env.DB.withSession("first-unconstrained")
+		.prepare("SELECT auth_token, expires_at FROM hosted_sites WHERE inbox = ? AND site = ?")
 		.bind(inbox, site)
 		.first<{ auth_token: string | null; expires_at: number | null }>();
 

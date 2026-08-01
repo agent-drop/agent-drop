@@ -118,7 +118,7 @@ export async function handleAPI(
 	if (path === "/api/drops" && method === "GET") {
 		if (!(await isAdmin(request, env))) {
 			// Also allow with API key that has admin permissions
-			const auth = await validateApiKey(env, request);
+			const auth = await validateApiKey(env, request, ctx);
 			if (!auth.valid || auth.permissions !== "admin") {
 				return denyCredential(403, { error: "admin required" });
 			}
@@ -142,7 +142,10 @@ export async function handleAPI(
 		query += " ORDER BY created_at DESC LIMIT ?";
 		params.push(limit);
 
-		const { results } = await env.DB.prepare(query)
+		// Read-only listing: nearest consistent replica, not the primary. See the
+		// note in src/api/inbox.ts for what `first-unconstrained` trades away.
+		const { results } = await env.DB.withSession("first-unconstrained")
+			.prepare(query)
 			.bind(...params)
 			.all();
 		const res = Response.json({ count: results.length, drops: results });
@@ -153,13 +156,17 @@ export async function handleAPI(
 	// GET /api/boxes - list all unique inboxes with stats
 	if (path === "/api/boxes" && method === "GET") {
 		if (!(await isAdmin(request, env))) {
-			const auth = await validateApiKey(env, request);
+			const auth = await validateApiKey(env, request, ctx);
 			if (!auth.valid || auth.permissions !== "admin") {
 				return denyCredential(403, { error: "admin required" });
 			}
 		}
 
-		const { results } = await env.DB.prepare(`
+		// Both queries share ONE session, so the token counts cannot come from a
+		// replica older than the one the box list came from.
+		const boxDb = env.DB.withSession("first-unconstrained");
+		const { results } = await boxDb
+			.prepare(`
 			SELECT
 				inbox,
 				COUNT(*) as total_drops,
@@ -170,12 +177,14 @@ export async function handleAPI(
 			FROM drops
 			GROUP BY inbox
 			ORDER BY last_drop_at DESC
-		`).all();
+		`)
+			.all();
 
 		// Also get active drop tokens per inbox
-		const { results: tokens } = await env.DB.prepare(
-			"SELECT inbox, COUNT(*) as active_tokens FROM drop_tokens WHERE expires_at > ? GROUP BY inbox",
-		)
+		const { results: tokens } = await boxDb
+			.prepare(
+				"SELECT inbox, COUNT(*) as active_tokens FROM drop_tokens WHERE expires_at > ? GROUP BY inbox",
+			)
 			.bind(Date.now())
 			.all();
 
@@ -238,7 +247,7 @@ export async function handleAPI(
 			return denyCredential(401, { error: "invalid google token" });
 		}
 
-		const auth = await validateApiKey(env, request);
+		const auth = await validateApiKey(env, request, ctx);
 		if (!auth.valid) {
 			return denyCredential(401, { error: "invalid api key" });
 		}
@@ -346,7 +355,7 @@ export async function handleAPI(
 	}
 
 	// All other routes require API key
-	const auth = await validateApiKey(env, request);
+	const auth = await validateApiKey(env, request, ctx);
 	if (!auth.valid) {
 		return denyCredential(401, { error: "invalid api key" });
 	}
