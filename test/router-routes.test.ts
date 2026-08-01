@@ -126,6 +126,66 @@ describe("unauthenticated routes", () => {
 	});
 });
 
+describe("dispatch quirks that predate the rewrite", () => {
+	// These are not endorsements. They are the behavior that shipped, pinned so a
+	// dispatch rewrite changes it deliberately or not at all.
+
+	test("/api/health and /api/config ignore the method", async () => {
+		// Neither route checks `method`, so a POST answers exactly like a GET.
+		const res = await send(makeEnv(), "POST", "/api/health");
+		expect(res.status).toBe(200);
+		expect(await json(res)).toHaveProperty("ok", true);
+	});
+
+	test("admin routes match by PREFIX, not by path segment", async () => {
+		// `path.startsWith("/api/keys")` also matches `/api/keysfoo`, which then
+		// falls through handleKeys' own sub-routing to the list. Segment-exact
+		// matching would be a small improvement; it is deliberately NOT taken here,
+		// because this phase's contract is behavior-identical dispatch.
+		const res = await get(makeEnv(), "/api/keysfoo", ADMIN);
+		expect(res.status).toBe(200);
+		expect(await json(res)).toHaveProperty("keys");
+	});
+
+	test("OPTIONS short-circuits every path, known or not", async () => {
+		const res = await send(makeEnv(), "OPTIONS", "/api/does-not-exist");
+		expect(res.status).toBe(200);
+	});
+
+	test("an unmatched path with NO credential is a 401, not a 404", async () => {
+		// The API-key gate runs before the second tier of routes, so an anonymous
+		// caller cannot tell a real path from a fake one. That is the intended
+		// ordering, and it is easy to lose in a flat route table.
+		const res = await get(makeEnv(), "/api/nope");
+		expect(res.status).toBe(401);
+		expect(await json(res)).toEqual({ error: "invalid api key" });
+	});
+
+	test("a nested path under a tier-1 route falls through to the key gate", async () => {
+		const env = makeEnv();
+		await seedApiKey(env, "ad_writer", { permissions: "write" });
+		const res = await send(
+			env,
+			"POST",
+			"/api/upload/presign/lisa/extra",
+			{ Authorization: "Bearer ad_writer" },
+			{ fileName: "a" },
+		);
+		expect(res.status).toBe(404);
+	});
+
+	test("GET /api/inbox/:name/ passes the trailing slash through as the sub-path", async () => {
+		const env = makeEnv();
+		await seedApiKey(env, "ad_reader", { permissions: "read" });
+		await seedPendingDrop(env, { id: "d1", inbox: "lisa", status: "completed" });
+		// The router hands the sub-path through verbatim, trailing slash included;
+		// handleInbox's own matching is what decides this lands on the listing.
+		const res = await get(env, "/api/inbox/lisa/", { Authorization: "Bearer ad_reader" });
+		expect(res.status).toBe(200);
+		expect(await json(res)).toMatchObject({ count: 1 });
+	});
+});
+
 describe("admin-only routes", () => {
 	const adminRoutes = [
 		["/api/keys", "keys"],
