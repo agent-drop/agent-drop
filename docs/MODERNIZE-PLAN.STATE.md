@@ -29,7 +29,7 @@ link_count: 3
   - [x] 2e. BONUS (found in-phase): `slugifyFilename` extension left unsanitized
   - [x] 2f. BONUS (found in-phase): hosted subdir + trailing slash always 404'd
 - [x] 3. Migrate outbound mail to `EmailMessageBuilder` (link 3, local `main`
-  `PENDING`)
+  `3619269`)
   - [x] 3a. `api/send.ts` compose + send path -> builder, one send for the list
   - [x] 3b. `forwardViaBinding` -> builder; attachment re-encoding VERIFIED to
     survive (and improve: no base64 round-trip)
@@ -340,7 +340,7 @@ link_count: 3
   **Nothing pushed to `origin`** -- local `main` is 12 commits ahead. Spawning
   link 3 for phase 3.
 - 2026-08-01T14:05:00Z [link 3] phase 3 complete. Branch
-  `chain/p3-email-builder`, merged to **local `main` as `MERGE_SHA`**.
+  `chain/p3-email-builder`, merged to **local `main` as `3619269`**.
   Tests 139 -> **202 pass, 0 fail**. `bun run verify` exits 0.
 
   **What migrated, and what deliberately did not.**
