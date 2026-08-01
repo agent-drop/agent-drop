@@ -1,20 +1,25 @@
+// ULID-shaped id: 10 chars of base32 millisecond timestamp (lexicographically
+// sortable) followed by 16 chars of randomness. Crockford alphabet minus i/l/o/u.
 const ENCODING = "0123456789abcdefghjkmnpqrstvwxyz";
+const TS_LEN = 10;
+const RAND_LEN = 16;
 
 export function generateId(): string {
-	const now = Date.now();
-	const chars: string[] = new Array(26);
+	const chars: string[] = new Array(TS_LEN + RAND_LEN);
 
-	// Timestamp (10 chars, 48-bit ms since epoch)
-	let ts = now;
-	for (let i = 9; i >= 0; i--) {
+	// Timestamp (10 chars, 50 bits of base32 -- covers ms since epoch with room to spare)
+	let ts = Date.now();
+	for (let i = TS_LEN - 1; i >= 0; i--) {
 		chars[i] = ENCODING[ts % 32];
 		ts = Math.floor(ts / 32);
 	}
 
-	// Randomness (16 chars)
-	const rand = crypto.getRandomValues(new Uint8Array(10));
-	for (let i = 0; i < 16; i++) {
-		chars[10 + i] = ENCODING[rand[i % 10] % 32];
+	// Randomness: one fresh byte per char. 256 is a multiple of 32, so masking the
+	// low 5 bits is unbiased. (Drawing fewer bytes than chars and wrapping the index
+	// silently duplicates positions -- that was a real bug here.)
+	const rand = crypto.getRandomValues(new Uint8Array(RAND_LEN));
+	for (let i = 0; i < RAND_LEN; i++) {
+		chars[TS_LEN + i] = ENCODING[rand[i] & 31];
 	}
 
 	return chars.join("");

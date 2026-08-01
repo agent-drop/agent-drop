@@ -3,8 +3,14 @@
 # wrangler. The committed values below are placeholders — see `.env.example`.
 name = "agent-drop"
 main = "src/index.ts"
-compatibility_date = "2026-03-15"
+compatibility_date = "2026-07-30"
 account_id = "your-cloudflare-account-id"
+
+# Workers Logs. Without this block nothing is retained, so a failed webhook or a
+# thrown email handler leaves no trace once the tail disconnects.
+[observability]
+enabled = true
+head_sampling_rate = 1
 
 [assets]
 directory = "./web/dist"

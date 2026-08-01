@@ -12,8 +12,10 @@
     "resolveJsonModule": true,
     "isolatedModules": true,
     "noEmit": true,
-    "types": ["@cloudflare/workers-types"]
+    "types": []
   },
-  "include": ["src/**/*"],
+  // Runtime types come from `bun run types` (wrangler types), which pins them to
+  // the compatibility_date in wrangler.toml instead of a hand-picked package version.
+  "include": ["src/**/*", "worker-configuration.d.ts"],
   "exclude": ["node_modules", "web"]
 }
