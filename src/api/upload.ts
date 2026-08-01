@@ -16,7 +16,6 @@ function s3Url(env: Env, objectKey: string) {
 	return r2ObjectUrl(env, objectKey);
 }
 
-const DIRECT_LIMIT = 95 * 1024 * 1024; // 95MB
 const CHUNK_SIZE = 50 * 1024 * 1024; // 50MB
 
 // The columns the finalize endpoints need. The router loads this row to decide
@@ -105,8 +104,14 @@ export async function handlePresign(
 		VALUES (?, ?, ?, 'web', ?, 1, 1, ?, ?, ?, 'pending', ?)`,
 	)
 		.bind(
-			dropId, inbox, body.topic || null,
-			body.fileName, r2Prefix, objectKey, metadata, Date.now(),
+			dropId,
+			inbox,
+			body.topic || null,
+			body.fileName,
+			r2Prefix,
+			objectKey,
+			metadata,
+			Date.now(),
 		)
 		.run();
 
@@ -176,10 +181,9 @@ export async function handleMultipartInit(
 		partUrl.searchParams.set("uploadId", uploadId);
 		partUrl.searchParams.set("X-Amz-Expires", "3600");
 
-		const signed = await aws.sign(
-			new Request(partUrl, { method: "PUT" }),
-			{ aws: { signQuery: true } },
-		);
+		const signed = await aws.sign(new Request(partUrl, { method: "PUT" }), {
+			aws: { signQuery: true },
+		});
 		parts.push({ partNumber, url: signed.url });
 	}
 
@@ -200,8 +204,14 @@ export async function handleMultipartInit(
 		VALUES (?, ?, ?, 'web', ?, 1, 1, ?, ?, ?, 'pending', ?)`,
 	)
 		.bind(
-			dropId, inbox, body.topic || null,
-			body.fileName, r2Prefix, objectKey, metadata, Date.now(),
+			dropId,
+			inbox,
+			body.topic || null,
+			body.fileName,
+			r2Prefix,
+			objectKey,
+			metadata,
+			Date.now(),
 		)
 		.run();
 
@@ -272,9 +282,7 @@ export async function handleMultipartComplete(
 		return Response.json({ error: "failed to complete multipart" }, { status: 500 });
 	}
 
-	await env.DB.prepare(
-		"UPDATE drops SET status = 'completed' WHERE id = ?",
-	).bind(drop.id).run();
+	await env.DB.prepare("UPDATE drops SET status = 'completed' WHERE id = ?").bind(drop.id).run();
 
 	return Response.json({ completed: true, dropId: drop.id });
 }

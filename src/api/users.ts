@@ -1,10 +1,6 @@
 import type { Env } from "../types";
 
-export async function handleUsers(
-	request: Request,
-	env: Env,
-	url: URL,
-): Promise<Response> {
+export async function handleUsers(request: Request, env: Env, url: URL): Promise<Response> {
 	const method = request.method;
 
 	// POST /api/users - add user
@@ -28,9 +24,7 @@ export async function handleUsers(
 	const deleteMatch = url.pathname.match(/^\/api\/users\/(.+)$/);
 	if (method === "DELETE" && deleteMatch) {
 		const email = decodeURIComponent(deleteMatch[1]).toLowerCase();
-		await env.DB.prepare("DELETE FROM allowed_users WHERE email = ?")
-			.bind(email)
-			.run();
+		await env.DB.prepare("DELETE FROM allowed_users WHERE email = ?").bind(email).run();
 		return Response.json({ deleted: email });
 	}
 

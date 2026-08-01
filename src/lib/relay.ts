@@ -15,7 +15,7 @@ export function decodeEmail(encoded: string): string {
 	// Find last occurrence of _at_ (in case local part contains it somehow)
 	const idx = encoded.lastIndexOf("_at_");
 	if (idx < 0) return encoded;
-	return encoded.slice(0, idx) + "@" + encoded.slice(idx + 4);
+	return `${encoded.slice(0, idx)}@${encoded.slice(idx + 4)}`;
 }
 
 // Build relay reply-to address
@@ -56,7 +56,7 @@ export async function findRelayRule(
 		if (rule.pattern === maskId) return rule;
 		if (rule.pattern.endsWith("-*")) {
 			const prefix = rule.pattern.slice(0, -2);
-			if (maskId.startsWith(prefix + "-")) return rule;
+			if (maskId.startsWith(`${prefix}-`)) return rule;
 		}
 	}
 	return null;
@@ -124,10 +124,9 @@ function leafAttachment(a: MimeAttachment): MimeEntity {
 
 function multipart(subtype: string, parts: MimeEntity[]): MimeEntity {
 	const boundary = `----=_Part_${crypto.randomUUID()}`;
-	const body = [
-		...parts.flatMap((p) => [`--${boundary}`, renderPart(p)]),
-		`--${boundary}--`,
-	].join("\r\n");
+	const body = [...parts.flatMap((p) => [`--${boundary}`, renderPart(p)]), `--${boundary}--`].join(
+		"\r\n",
+	);
 	return { ct: `multipart/${subtype}; boundary="${boundary}"`, body };
 }
 
@@ -194,19 +193,18 @@ export function buildRawEmail(opts: {
 		root = multipart("mixed", [related, ...regular.map(leafAttachment)]);
 	}
 
-	return [
-		...headers,
-		`Content-Type: ${root.ct}`,
-		...(root.headers || []),
-		"",
-		root.body,
-	].join("\r\n");
+	return [...headers, `Content-Type: ${root.ct}`, ...(root.headers || []), "", root.body].join(
+		"\r\n",
+	);
 }
 
 // base64-encode raw bytes (ArrayBuffer / typed array). Strings are UTF-8 encoded.
 function bytesToBase64(data: ArrayBuffer | ArrayBufferView | string): string {
 	if (typeof data === "string") return b64(data);
-	const bytes = data instanceof ArrayBuffer ? new Uint8Array(data) : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+	const bytes =
+		data instanceof ArrayBuffer
+			? new Uint8Array(data)
+			: new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
 	let binary = "";
 	const chunk = 0x8000;
 	for (let i = 0; i < bytes.length; i += chunk) {
@@ -229,7 +227,13 @@ export async function forwardViaBinding(
 		subject?: string | null;
 		textBody?: string;
 		htmlBody?: string;
-		attachments?: { filename?: string; mimeType?: string; content: ArrayBuffer | ArrayBufferView | string; contentId?: string; disposition?: string }[];
+		attachments?: {
+			filename?: string;
+			mimeType?: string;
+			content: ArrayBuffer | ArrayBufferView | string;
+			contentId?: string;
+			disposition?: string;
+		}[];
 		messageId?: string | null;
 	},
 ): Promise<string> {
@@ -277,7 +281,11 @@ export async function sendRawViaBinding(
 	destination: { to?: string[]; cc?: string[]; bcc?: string[] },
 ): Promise<string> {
 	const from = bareAddr(envelopeFrom);
-	const recipients = [...(destination.to || []), ...(destination.cc || []), ...(destination.bcc || [])]
+	const recipients = [
+		...(destination.to || []),
+		...(destination.cc || []),
+		...(destination.bcc || []),
+	]
 		.map(bareAddr)
 		.filter(Boolean);
 	if (recipients.length === 0) throw new Error("no envelope recipients");
@@ -357,7 +365,9 @@ export async function enqueueRelay(
 	await env.DB.prepare(
 		`INSERT INTO delivery_log (id, drop_id, rule_id, type, target, status, attempts, created_at)
 		VALUES (?, ?, ?, 'relay', ?, 'queued', 0, ?)`,
-	).bind(logId, opts.maskId, `relay:${opts.direction}`, opts.to, Date.now()).run();
+	)
+		.bind(logId, opts.maskId, `relay:${opts.direction}`, opts.to, Date.now())
+		.run();
 
 	await env.WEBHOOK_QUEUE.send({
 		type: "relay",
@@ -376,17 +386,16 @@ export async function enqueueRelay(
 }
 
 // Process a relay message from the queue
-export async function processRelayMessage(
-	msg: Message<any>,
-	env: Env,
-): Promise<void> {
+export async function processRelayMessage(msg: Message<any>, env: Env): Promise<void> {
 	const relay = msg.body;
 	const MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 	if (Date.now() - relay.firstAttemptAt > MAX_AGE_MS) {
 		await env.DB.prepare(
 			"UPDATE delivery_log SET status = 'failed', error = 'exceeded 24h retry window', completed_at = ? WHERE id = ?",
-		).bind(Date.now(), relay.logId).run();
+		)
+			.bind(Date.now(), relay.logId)
+			.run();
 		msg.ack();
 		return;
 	}
@@ -396,12 +405,16 @@ export async function processRelayMessage(
 
 		await env.DB.prepare(
 			"UPDATE delivery_log SET status = 'success', attempts = ?, completed_at = ?, error = ? WHERE id = ?",
-		).bind(relay.attempt + 1, Date.now(), `cf:${messageId}`, relay.logId).run();
+		)
+			.bind(relay.attempt + 1, Date.now(), `cf:${messageId}`, relay.logId)
+			.run();
 		msg.ack();
 	} catch (err: any) {
 		await env.DB.prepare(
 			"UPDATE delivery_log SET status = 'retrying', error = ?, attempts = ? WHERE id = ?",
-		).bind(err.message || "SES error", relay.attempt + 1, relay.logId).run();
+		)
+			.bind(err.message || "SES error", relay.attempt + 1, relay.logId)
+			.run();
 
 		const delaySec = Math.min(2 ** (relay.attempt + 1), 1200);
 		msg.retry({ delaySeconds: delaySec });

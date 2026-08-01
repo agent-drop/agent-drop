@@ -159,9 +159,7 @@ async function prepareEmail(
 	// Resolve attachment sources into bytes
 	let attachments: MimeAttachment[];
 	try {
-		attachments = await Promise.all(
-			(body.attachments || []).map((a) => resolveAttachment(env, a)),
-		);
+		attachments = await Promise.all((body.attachments || []).map((a) => resolveAttachment(env, a)));
 	} catch (err) {
 		return Response.json(
 			{ error: err instanceof Error ? err.message : "attachment resolution failed" },

@@ -9,11 +9,7 @@ async function hashToken(token: string): Promise<string> {
 		.join("");
 }
 
-export async function handleTargets(
-	request: Request,
-	env: Env,
-	url: URL,
-): Promise<Response> {
+export async function handleTargets(request: Request, env: Env, url: URL): Promise<Response> {
 	const method = request.method;
 
 	// POST /api/targets - create temporary drop target
@@ -81,9 +77,7 @@ export async function handleTargets(
 	// DELETE /api/targets/:id - revoke target
 	const deleteMatch = url.pathname.match(/^\/api\/targets\/(.+)$/);
 	if (method === "DELETE" && deleteMatch) {
-		await env.DB.prepare("DELETE FROM drop_tokens WHERE id = ?")
-			.bind(deleteMatch[1])
-			.run();
+		await env.DB.prepare("DELETE FROM drop_tokens WHERE id = ?").bind(deleteMatch[1]).run();
 		return Response.json({ deleted: true });
 	}
 
@@ -97,9 +91,7 @@ export async function validateDropToken(
 ): Promise<{ valid: boolean; inbox: string | null }> {
 	const tokenHash = await hashToken(token);
 
-	const row = await env.DB.prepare(
-		"SELECT inbox, expires_at FROM drop_tokens WHERE token_hash = ?",
-	)
+	const row = await env.DB.prepare("SELECT inbox, expires_at FROM drop_tokens WHERE token_hash = ?")
 		.bind(tokenHash)
 		.first<{ inbox: string; expires_at: number }>();
 

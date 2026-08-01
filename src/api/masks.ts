@@ -10,11 +10,7 @@ function generateMaskId(prefix: string): string {
 	return `${prefix}-${suffix}`;
 }
 
-export async function handleMasks(
-	request: Request,
-	env: Env,
-	url: URL,
-): Promise<Response> {
+export async function handleMasks(request: Request, env: Env, url: URL): Promise<Response> {
 	const method = request.method;
 	const path = url.pathname;
 
@@ -37,9 +33,9 @@ export async function handleMasks(
 			maskId = normalized;
 
 			// Check uniqueness
-			const existing = await env.DB.prepare(
-				"SELECT id FROM email_masks WHERE id = ?",
-			).bind(maskId).first();
+			const existing = await env.DB.prepare("SELECT id FROM email_masks WHERE id = ?")
+				.bind(maskId)
+				.first();
 			if (existing) {
 				return Response.json({ error: "mask ID already exists" }, { status: 409 });
 			}
@@ -52,9 +48,9 @@ export async function handleMasks(
 			// Generate unique ID
 			for (let i = 0; i < 10; i++) {
 				maskId = generateMaskId(prefix);
-				const existing = await env.DB.prepare(
-					"SELECT id FROM email_masks WHERE id = ?",
-				).bind(maskId).first();
+				const existing = await env.DB.prepare("SELECT id FROM email_masks WHERE id = ?")
+					.bind(maskId)
+					.first();
 				if (!existing) break;
 			}
 			maskId = maskId!;
@@ -63,22 +59,27 @@ export async function handleMasks(
 		}
 
 		// Also check it doesn't collide with a real inbox
-		const inboxCollision = await env.DB.prepare(
-			"SELECT inbox FROM drops WHERE inbox = ? LIMIT 1",
-		).bind(maskId).first();
+		const inboxCollision = await env.DB.prepare("SELECT inbox FROM drops WHERE inbox = ? LIMIT 1")
+			.bind(maskId)
+			.first();
 		if (inboxCollision) {
 			return Response.json({ error: "collides with existing inbox" }, { status: 409 });
 		}
 
 		await env.DB.prepare(
 			"INSERT INTO email_masks (id, label, active, created_at) VALUES (?, ?, 1, ?)",
-		).bind(maskId, body.label || null, Date.now()).run();
+		)
+			.bind(maskId, body.label || null, Date.now())
+			.run();
 
-		return Response.json({
-			id: maskId,
-			email: `${maskId}@${env.DOMAIN}`,
-			label: body.label || null,
-		}, { status: 201 });
+		return Response.json(
+			{
+				id: maskId,
+				email: `${maskId}@${env.DOMAIN}`,
+				label: body.label || null,
+			},
+			{ status: 201 },
+		);
 	}
 
 	// PATCH /api/masks/:id - enable/disable
@@ -89,8 +90,14 @@ export async function handleMasks(
 		const updates: string[] = [];
 		const params: (string | number)[] = [];
 
-		if (body.active !== undefined) { updates.push("active = ?"); params.push(body.active ? 1 : 0); }
-		if (body.label !== undefined) { updates.push("label = ?"); params.push(body.label); }
+		if (body.active !== undefined) {
+			updates.push("active = ?");
+			params.push(body.active ? 1 : 0);
+		}
+		if (body.label !== undefined) {
+			updates.push("label = ?");
+			params.push(body.label);
+		}
 
 		if (updates.length === 0) {
 			return Response.json({ error: "nothing to update" }, { status: 400 });
@@ -98,7 +105,8 @@ export async function handleMasks(
 
 		params.push(id);
 		await env.DB.prepare(`UPDATE email_masks SET ${updates.join(", ")} WHERE id = ?`)
-			.bind(...params).run();
+			.bind(...params)
+			.run();
 
 		return Response.json({ updated: id });
 	}
@@ -106,8 +114,7 @@ export async function handleMasks(
 	// DELETE /api/masks/:id
 	const deleteMatch = path.match(/^\/api\/masks\/([^/]+)$/);
 	if (method === "DELETE" && deleteMatch) {
-		await env.DB.prepare("DELETE FROM email_masks WHERE id = ?")
-			.bind(deleteMatch[1]).run();
+		await env.DB.prepare("DELETE FROM email_masks WHERE id = ?").bind(deleteMatch[1]).run();
 		return Response.json({ deleted: deleteMatch[1] });
 	}
 

@@ -28,10 +28,12 @@ function stubS3() {
 	globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 		const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
 		s3Urls.push(url);
-		const method = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
+		const method = (
+			init?.method ?? (input instanceof Request ? input.method : "GET")
+		).toUpperCase();
 		if (method === "GET") {
 			return new Response(
-				"<ListPartsResult><Part><PartNumber>1</PartNumber><ETag>\"abc\"</ETag></Part></ListPartsResult>",
+				'<ListPartsResult><Part><PartNumber>1</PartNumber><ETag>"abc"</ETag></Part></ListPartsResult>',
 				{ status: 200 },
 			);
 		}
@@ -53,7 +55,10 @@ describe("POST /api/upload/confirm requires write auth on the drop's inbox", () 
 		const env = makeEnv();
 		await seedPendingDrop(env, { id: "drop-confirm-1", inbox: "lisa" });
 
-		const res = await call(env, jsonRequest(`${BASE}/api/upload/confirm`, { dropId: "drop-confirm-1" }));
+		const res = await call(
+			env,
+			jsonRequest(`${BASE}/api/upload/confirm`, { dropId: "drop-confirm-1" }),
+		);
 
 		expect(res.status).toBe(401);
 		expect(dropStatus(env, "drop-confirm-1")).toBe("pending");

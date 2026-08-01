@@ -102,7 +102,9 @@ export function InboxView() {
 					</p>
 					<p className="text-sm mt-2" style={{ color: "var(--color-fg-dim)" }}>
 						or email{" "}
-						<span style={{ color: "var(--color-cga-cyan)" }}>{name}@{__DOMAIN__}</span>
+						<span style={{ color: "var(--color-cga-cyan)" }}>
+							{name}@{__DOMAIN__}
+						</span>
 					</p>
 				</div>
 
@@ -132,17 +134,20 @@ export function InboxView() {
 						/{name}
 					</h1>
 					<p className="text-xs mt-1 flex items-center gap-2">
-						<span style={{
-							color: googleUser
-								? "var(--color-neon-teal)"
-								: dropToken
-									? "var(--color-neon-yellow)"
-									: "var(--color-fg-dim)",
-						}}>
+						<span
+							style={{
+								color: googleUser
+									? "var(--color-neon-teal)"
+									: dropToken
+										? "var(--color-neon-yellow)"
+										: "var(--color-fg-dim)",
+							}}
+						>
 							{googleUser || (dropToken ? "temporary access" : `${name}@${__DOMAIN__}`)}
 						</span>
 						{googleUser && (
 							<button
+								type="button"
 								onClick={handleSignOut}
 								className="cursor-pointer"
 								style={{ color: "var(--color-fg-dark)", fontSize: "0.65rem" }}
@@ -160,7 +165,13 @@ export function InboxView() {
 			</div>
 
 			<div className="mb-8">
-				<DropZone inbox={name!} apiKey={apiKey} dropToken={dropToken} googleToken={googleToken} onDropped={fetchDrops} />
+				<DropZone
+					inbox={name!}
+					apiKey={apiKey}
+					dropToken={dropToken}
+					googleToken={googleToken}
+					onDropped={fetchDrops}
+				/>
 			</div>
 
 			{/* Agent instructions */}
@@ -169,7 +180,9 @@ export function InboxView() {
 			{apiKey && (
 				<div className="space-y-1">
 					{loading ? (
-						<p className="text-sm cursor-blink" style={{ color: "var(--color-neon-cyan)" }}>loading</p>
+						<p className="text-sm cursor-blink" style={{ color: "var(--color-neon-cyan)" }}>
+							loading
+						</p>
 					) : drops.length === 0 ? (
 						<div className="text-sm py-8 text-center" style={{ color: "var(--color-fg-dim)" }}>
 							<p>no drops yet</p>
@@ -186,13 +199,19 @@ export function InboxView() {
 											{drop.topic && (
 												<span
 													className="px-1.5 py-0.5 text-[10px]"
-													style={{ color: "var(--color-neon-teal)", background: "rgba(115, 218, 202, 0.12)" }}
+													style={{
+														color: "var(--color-neon-teal)",
+														background: "rgba(115, 218, 202, 0.12)",
+													}}
 												>
 													{drop.topic}
 												</span>
 											)}
 											{!drop.read_at && (
-												<span className="text-[10px] font-bold" style={{ color: "var(--color-cga-yellow)" }}>
+												<span
+													className="text-[10px] font-bold"
+													style={{ color: "var(--color-cga-yellow)" }}
+												>
 													NEW
 												</span>
 											)}
@@ -201,7 +220,10 @@ export function InboxView() {
 											{drop.subject || drop.body_text?.slice(0, 80) || "(empty)"}
 										</p>
 										{drop.from_addr && (
-											<p className="text-xs mt-0.5 truncate" style={{ color: "var(--color-neon-orange)" }}>
+											<p
+												className="text-xs mt-0.5 truncate"
+												style={{ color: "var(--color-neon-orange)" }}
+											>
 												from {drop.from_addr}
 											</p>
 										)}
@@ -211,7 +233,10 @@ export function InboxView() {
 											{formatTime(drop.created_at)}
 										</p>
 										{drop.has_attachments > 0 && (
-											<p className="text-[10px] mt-0.5" style={{ color: "var(--color-neon-yellow)" }}>
+											<p
+												className="text-[10px] mt-0.5"
+												style={{ color: "var(--color-neon-yellow)" }}
+											>
 												{drop.attachment_count} file{drop.attachment_count !== 1 ? "s" : ""}
 											</p>
 										)}
@@ -232,7 +257,7 @@ function CurlInstructions({ inbox, dropToken }: { inbox: string; dropToken: stri
 	const authParam = dropToken ? `?auth=${dropToken}` : "";
 	const authNote = dropToken
 		? "# auth token is embedded in the URL"
-		: '# replace KEY with your API key (Bearer token)';
+		: "# replace KEY with your API key (Bearer token)";
 	const authHeader = dropToken ? "" : '\n  -H "Authorization: Bearer KEY" \\';
 
 	const presignUrl = dropToken
@@ -242,18 +267,22 @@ function CurlInstructions({ inbox, dropToken }: { inbox: string; dropToken: stri
 	return (
 		<div className="mb-6">
 			<button
+				type="button"
 				onClick={() => setOpen(!open)}
 				className="text-[10px] cursor-pointer flex items-center gap-1"
 				style={{ color: "var(--color-fg-dark)", background: "none", border: "none", padding: 0 }}
 			>
-				<span style={{ color: "var(--color-neon-purple)" }}>{open ? "v" : ">"}</span>
-				{" "}agent instructions (curl)
+				<span style={{ color: "var(--color-neon-purple)" }}>{open ? "v" : ">"}</span> agent
+				instructions (curl)
 			</button>
 
 			{open && (
 				<div
 					className="mt-2 p-3 text-[11px] leading-relaxed overflow-x-auto"
-					style={{ background: "var(--color-bg-dark)", border: "1px solid var(--color-surface-border)" }}
+					style={{
+						background: "var(--color-bg-dark)",
+						border: "1px solid var(--color-surface-border)",
+					}}
 				>
 					<pre style={{ color: "var(--color-fg)" }}>{`${authNote}
 
@@ -262,7 +291,7 @@ curl -X POST "${presignUrl}" \\${authHeader}
   -H "Content-Type: application/json" \\
   -d '{"fileName":"FILE_NAME","contentType":"MIME_TYPE"}'
 
-${commentLine("returns: {\"dropId\":\"...\",\"uploadUrl\":\"https://...\"}")}
+${commentLine('returns: {"dropId":"...","uploadUrl":"https://..."}')}
 
 ${commentLine("step 2: upload the file")}
 curl -X PUT "$UPLOAD_URL" \\
@@ -277,7 +306,10 @@ curl -X POST "https://${__DOMAIN__}/api/upload/confirm" \\
 					<div className="my-3" style={{ borderTop: "1px solid var(--color-surface-border)" }} />
 
 					<p className="mb-2" style={{ color: "var(--color-fg-dim)" }}>
-						<span style={{ color: "var(--color-neon-purple)" }}>#</span> or just email: <span style={{ color: "var(--color-neon-teal)" }}>{inbox}@{__DOMAIN__}</span>
+						<span style={{ color: "var(--color-neon-purple)" }}>#</span> or just email:{" "}
+						<span style={{ color: "var(--color-neon-teal)" }}>
+							{inbox}@{__DOMAIN__}
+						</span>
 					</p>
 				</div>
 			)}

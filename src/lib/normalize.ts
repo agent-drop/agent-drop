@@ -45,16 +45,71 @@ export function normalizeInbox(raw: string): string | null {
 
 // Romanize unicode characters (umlauts, accents, etc)
 const CHAR_MAP: Record<string, string> = {
-	"à": "a", "á": "a", "â": "a", "ã": "a", "ä": "a", "å": "a", "æ": "ae",
-	"ç": "c", "è": "e", "é": "e", "ê": "e", "ë": "e",
-	"ì": "i", "í": "i", "î": "i", "ï": "i",
-	"ð": "d", "ñ": "n", "ò": "o", "ó": "o", "ô": "o", "õ": "o", "ö": "o", "ø": "o",
-	"ù": "u", "ú": "u", "û": "u", "ü": "u", "ý": "y", "ÿ": "y", "þ": "th",
-	"ß": "ss", "đ": "d", "ł": "l", "ŋ": "ng", "ő": "o", "ű": "u",
-	"ą": "a", "ć": "c", "ę": "e", "ń": "n", "ś": "s", "ź": "z", "ż": "z",
-	"č": "c", "ď": "d", "ě": "e", "ň": "n", "ř": "r", "š": "s", "ť": "t", "ů": "u", "ž": "z",
-	"ā": "a", "ē": "e", "ī": "i", "ō": "o", "ū": "u",
-	"ก": "k", "ข": "kh", "ค": "kh", "ง": "ng", "จ": "ch", "ช": "ch", "ซ": "s",
+	à: "a",
+	á: "a",
+	â: "a",
+	ã: "a",
+	ä: "a",
+	å: "a",
+	æ: "ae",
+	ç: "c",
+	è: "e",
+	é: "e",
+	ê: "e",
+	ë: "e",
+	ì: "i",
+	í: "i",
+	î: "i",
+	ï: "i",
+	ð: "d",
+	ñ: "n",
+	ò: "o",
+	ó: "o",
+	ô: "o",
+	õ: "o",
+	ö: "o",
+	ø: "o",
+	ù: "u",
+	ú: "u",
+	û: "u",
+	ü: "u",
+	ý: "y",
+	ÿ: "y",
+	þ: "th",
+	ß: "ss",
+	đ: "d",
+	ł: "l",
+	ŋ: "ng",
+	ő: "o",
+	ű: "u",
+	ą: "a",
+	ć: "c",
+	ę: "e",
+	ń: "n",
+	ś: "s",
+	ź: "z",
+	ż: "z",
+	č: "c",
+	ď: "d",
+	ě: "e",
+	ň: "n",
+	ř: "r",
+	š: "s",
+	ť: "t",
+	ů: "u",
+	ž: "z",
+	ā: "a",
+	ē: "e",
+	ī: "i",
+	ō: "o",
+	ū: "u",
+	ก: "k",
+	ข: "kh",
+	ค: "kh",
+	ง: "ng",
+	จ: "ch",
+	ช: "ch",
+	ซ: "s",
 };
 
 function romanize(str: string): string {
@@ -62,6 +117,7 @@ function romanize(str: string): string {
 	// This handles most accented chars: é -> e + combining accent -> e
 	const decomposed = str.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 	// Then apply char map for special cases (ß->ss, æ->ae, ø->o, etc)
+	// biome-ignore lint/suspicious/noControlCharactersInRegex: \x00 is a range bound, not a literal match -- [^\x00-\x7F] means "any non-ASCII character".
 	return decomposed.replace(/[^\x00-\x7F]/g, (ch) => CHAR_MAP[ch] || "");
 }
 
@@ -84,14 +140,25 @@ export function slugifyFilename(raw: string): string {
 	const lastDot = raw.lastIndexOf(".");
 	const hasExt = lastDot > 0;
 	const name = hasExt ? raw.slice(0, lastDot) : raw;
-	const ext = hasExt ? raw.slice(lastDot).toLowerCase() : "";
 
-	const slug = romanize(name.toLowerCase())
-		.replace(/[\s_]+/g, "-")
-		.replace(/[^a-z0-9-]/g, "")
-		.replace(/-{2,}/g, "-")
-		.replace(/^-+|-+$/g, "")
-		|| "file";
+	// The extension is attacker-controlled too (inbound MIME part names, upload
+	// form fields), and every caller concatenates the result straight into an R2
+	// key. Copying it verbatim let "../../etc/passwd" through as
+	// "file./etc/passwd" -- separators and all. Strip it like the name.
+	const extChars = hasExt
+		? raw
+				.slice(lastDot + 1)
+				.toLowerCase()
+				.replace(/[^a-z0-9]/g, "")
+		: "";
+	const ext = extChars ? `.${extChars}` : "";
+
+	const slug =
+		romanize(name.toLowerCase())
+			.replace(/[\s_]+/g, "-")
+			.replace(/[^a-z0-9-]/g, "")
+			.replace(/-{2,}/g, "-")
+			.replace(/^-+|-+$/g, "") || "file";
 
 	return slug + ext;
 }

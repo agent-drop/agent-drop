@@ -14,7 +14,8 @@ export interface DropContext {
 
 function extractContext(request: Request): Partial<DropContext> {
 	return {
-		remoteIp: request.headers.get("CF-Connecting-IP") || request.headers.get("X-Real-IP") || undefined,
+		remoteIp:
+			request.headers.get("CF-Connecting-IP") || request.headers.get("X-Real-IP") || undefined,
 		userAgent: request.headers.get("User-Agent") || undefined,
 		country: request.headers.get("CF-IPCountry") || undefined,
 		city: (request as any).cf?.city || undefined,
@@ -57,14 +58,10 @@ export async function handleDrop(
 			// only form TS accepts here (`instanceof` rejects a union with a primitive).
 			if (typeof value !== "string") {
 				const slugged = slugifyFilename(value.name);
-				await env.BUCKET.put(
-					`${r2Prefix}/uploads/${slugged}`,
-					await value.arrayBuffer(),
-					{
-						httpMetadata: { contentType: value.type },
-						customMetadata: { originalFilename: value.name },
-					},
-				);
+				await env.BUCKET.put(`${r2Prefix}/uploads/${slugged}`, await value.arrayBuffer(), {
+					httpMetadata: { contentType: value.type },
+					customMetadata: { originalFilename: value.name },
+				});
 				filenames.push(slugged);
 				attachmentCount++;
 			}
@@ -76,19 +73,46 @@ export async function handleDrop(
 			VALUES (?, ?, ?, 'web', ?, ?, ?, ?, ?, ?, ?)`,
 		)
 			.bind(
-				dropId, inbox, topic, subject, bodyText,
-				attachmentCount > 0 ? 1 : 0, attachmentCount,
-				r2Prefix, metadata, Date.now(),
+				dropId,
+				inbox,
+				topic,
+				subject,
+				bodyText,
+				attachmentCount > 0 ? 1 : 0,
+				attachmentCount,
+				r2Prefix,
+				metadata,
+				Date.now(),
 			)
 			.run();
 
 		// Fire rules
 		if (execCtx) {
-			const drop: Drop = { id: dropId, inbox, topic, channel: "web", from_addr: null, from_user: null, subject, body_text: bodyText, body_html: null, has_attachments: attachmentCount > 0 ? 1 : 0, attachment_count: attachmentCount, r2_prefix: r2Prefix, raw_r2_key: null, metadata, created_at: Date.now(), read_at: null };
+			const drop: Drop = {
+				id: dropId,
+				inbox,
+				topic,
+				channel: "web",
+				from_addr: null,
+				from_user: null,
+				subject,
+				body_text: bodyText,
+				body_html: null,
+				has_attachments: attachmentCount > 0 ? 1 : 0,
+				attachment_count: attachmentCount,
+				r2_prefix: r2Prefix,
+				raw_r2_key: null,
+				metadata,
+				created_at: Date.now(),
+				read_at: null,
+			};
 			await fireRules(env, execCtx, drop, "web");
 		}
 
-		return Response.json({ id: dropId, inbox, attachments: attachmentCount, files: filenames }, { status: 201 });
+		return Response.json(
+			{ id: dropId, inbox, attachments: attachmentCount, files: filenames },
+			{ status: 201 },
+		);
 	}
 
 	// JSON body
@@ -105,15 +129,38 @@ export async function handleDrop(
 		VALUES (?, ?, ?, 'api', ?, ?, ?, 0, 0, ?, ?, ?)`,
 	)
 		.bind(
-			dropId, inbox, body.topic || topic,
-			body.subject || null, body.text || null, body.html || null,
-			r2Prefix, metadata, Date.now(),
+			dropId,
+			inbox,
+			body.topic || topic,
+			body.subject || null,
+			body.text || null,
+			body.html || null,
+			r2Prefix,
+			metadata,
+			Date.now(),
 		)
 		.run();
 
 	// Fire rules
 	if (execCtx) {
-		const drop: Drop = { id: dropId, inbox, topic: body.topic || topic, channel: "api", from_addr: null, from_user: null, subject: body.subject || null, body_text: body.text || null, body_html: body.html || null, has_attachments: 0, attachment_count: 0, r2_prefix: r2Prefix, raw_r2_key: null, metadata, created_at: Date.now(), read_at: null };
+		const drop: Drop = {
+			id: dropId,
+			inbox,
+			topic: body.topic || topic,
+			channel: "api",
+			from_addr: null,
+			from_user: null,
+			subject: body.subject || null,
+			body_text: body.text || null,
+			body_html: body.html || null,
+			has_attachments: 0,
+			attachment_count: 0,
+			r2_prefix: r2Prefix,
+			raw_r2_key: null,
+			metadata,
+			created_at: Date.now(),
+			read_at: null,
+		};
 		await fireRules(env, execCtx, drop, "api");
 	}
 

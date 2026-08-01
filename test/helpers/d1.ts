@@ -72,7 +72,9 @@ export interface FakeD1 {
 
 export function makeD1(): FakeD1 {
 	const db = new Database(":memory:");
-	for (const file of readdirSync(MIGRATIONS_DIR).filter((f) => f.endsWith(".sql")).sort()) {
+	for (const file of readdirSync(MIGRATIONS_DIR)
+		.filter((f) => f.endsWith(".sql"))
+		.sort()) {
 		db.exec(readFileSync(join(MIGRATIONS_DIR, file), "utf8"));
 	}
 	return {

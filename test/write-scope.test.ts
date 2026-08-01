@@ -16,11 +16,7 @@ function call(env: TestEnv, request: Request) {
 // which makes a scoped key an unscoped one for writes and silently defeats the
 // point of ever issuing one.
 describe("a scoped write key cannot write outside its scope", () => {
-	const paths = [
-		"/api/drop/lisa",
-		"/api/upload/presign/lisa",
-		"/api/upload/multipart/lisa",
-	];
+	const paths = ["/api/drop/lisa", "/api/upload/presign/lisa", "/api/upload/multipart/lisa"];
 
 	for (const path of paths) {
 		test(`${path} rejects a key scoped to another box`, async () => {
@@ -29,7 +25,11 @@ describe("a scoped write key cannot write outside its scope", () => {
 
 			const res = await call(
 				env,
-				jsonRequest(BASE + path, { fileName: "x.pdf", fileSize: 10 }, { Authorization: "Bearer ad_bob" }),
+				jsonRequest(
+					BASE + path,
+					{ fileName: "x.pdf", fileSize: 10 },
+					{ Authorization: "Bearer ad_bob" },
+				),
 			);
 
 			expect(res.status).toBe(403);

@@ -1,11 +1,7 @@
 import { generateApiKey } from "../lib/auth";
 import type { Env, ApiKey } from "../types";
 
-export async function handleKeys(
-	request: Request,
-	env: Env,
-	url: URL,
-): Promise<Response> {
+export async function handleKeys(request: Request, env: Env, url: URL): Promise<Response> {
 	const method = request.method;
 
 	// POST /api/keys - create key
@@ -33,9 +29,7 @@ export async function handleKeys(
 	// DELETE /api/keys/:id
 	const deleteMatch = url.pathname.match(/^\/api\/keys\/(.+)$/);
 	if (method === "DELETE" && deleteMatch) {
-		await env.DB.prepare("DELETE FROM api_keys WHERE id = ?")
-			.bind(deleteMatch[1])
-			.run();
+		await env.DB.prepare("DELETE FROM api_keys WHERE id = ?").bind(deleteMatch[1]).run();
 		return Response.json({ deleted: true });
 	}
 

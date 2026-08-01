@@ -1,21 +1,21 @@
 {
-  "compilerOptions": {
-    "target": "ES2022",
-    "module": "ES2022",
-    "moduleResolution": "bundler",
-    "lib": ["ES2022"],
-    "jsx": "react-jsx",
-    "strict": true,
-    "esModuleInterop": true,
-    "skipLibCheck": true,
-    "forceConsistentCasingInFileNames": true,
-    "resolveJsonModule": true,
-    "isolatedModules": true,
-    "noEmit": true,
-    "types": []
-  },
-  // Runtime types come from `bun run types` (wrangler types), which pins them to
-  // the compatibility_date in wrangler.toml instead of a hand-picked package version.
-  "include": ["src/**/*", "worker-configuration.d.ts"],
-  "exclude": ["node_modules", "web"]
+	"compilerOptions": {
+		"target": "ES2022",
+		"module": "ES2022",
+		"moduleResolution": "bundler",
+		"lib": ["ES2022"],
+		"jsx": "react-jsx",
+		"strict": true,
+		"esModuleInterop": true,
+		"skipLibCheck": true,
+		"forceConsistentCasingInFileNames": true,
+		"resolveJsonModule": true,
+		"isolatedModules": true,
+		"noEmit": true,
+		"types": []
+	},
+	// Runtime types come from `bun run types` (wrangler types), which pins them to
+	// the compatibility_date in wrangler.toml instead of a hand-picked package version.
+	"include": ["src/**/*", "worker-configuration.d.ts"],
+	"exclude": ["node_modules", "web"]
 }
