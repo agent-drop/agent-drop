@@ -97,10 +97,30 @@ export function makeCtx(): TestCtx {
 /** An R2Bucket over a plain map of key -> body, enough for read paths. */
 export function makeBucket(objects: Record<string, string> = {}): R2Bucket & {
 	heads: string[];
+	deletes: string[];
 } {
 	const heads: string[] = [];
+	const deletes: string[] = [];
 	return {
 		heads,
+		deletes,
+		list: async ({ prefix = "" }: { prefix?: string } = {}) => ({
+			objects: Object.entries(objects)
+				.filter(([key]) => key.startsWith(prefix))
+				.map(([key, body]) => ({ key, size: body.length })),
+			truncated: false as const,
+			delimitedPrefixes: [],
+		}),
+		delete: async (keys: string | string[]) => {
+			for (const key of Array.isArray(keys) ? keys : [keys]) {
+				deletes.push(key);
+				delete objects[key];
+			}
+		},
+		put: async (key: string, body: string) => {
+			objects[key] = String(body);
+			return { key };
+		},
 		get: async (key: string) => {
 			if (!(key in objects)) return null;
 			const body = objects[key];
@@ -117,7 +137,7 @@ export function makeBucket(objects: Record<string, string> = {}): R2Bucket & {
 			if (!(key in objects)) return null;
 			return { key, size: objects[key].length, httpEtag: `"etag-${key}"` };
 		},
-	} as unknown as R2Bucket & { heads: string[] };
+	} as unknown as R2Bucket & { heads: string[]; deletes: string[] };
 }
 
 /**

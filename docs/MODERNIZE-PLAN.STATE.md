@@ -61,12 +61,23 @@ link_count: 5
     the R2-notification queue consumer could NOT be (see log)
   - [x] 5f. `wrangler r2 bucket notification` + `queues create` documented in
     `CLAUDE.md` (LOCAL ONLY -- the file is untracked)
-- [ ] 6. Structural cleanup + final docs
-  - [ ] 6a. Router rewrite (tests FIRST, behavior-identical)
-  - [ ] 6b. Real XML parse in upload.ts
-  - [ ] 6c. Move `client_secret_*.json` to `~/.secrets`
-  - [ ] 6d. Surface SES-fallback decision in review ticket
-  - [ ] 6e. Update `CLAUDE.md`
+- [x] 6. Structural cleanup + final docs (link 6, local `main` `PENDING`)
+  - [x] 6a. Router rewrite (tests FIRST, behavior-identical)
+    - [x] 6a-i. Route-level tests GREEN against the CURRENT router
+      (`test/router-routes.test.ts`, 78 + 6 quirk pins, commits `43519ab`,
+      `5040634`)
+    - [x] 6a-ii. Rewrite, made to pass them unchanged (`71f315c`)
+    - [x] 6a-iii. Mutation-checked; the one surviving mutation got a test
+      (`a34c500`)
+    - [x] 6a-iv. BONUS (found in-phase): the mail routes never checked
+      `inbox_scope` -- RED first, fixed (`00db531`)
+  - [x] 6b. Real XML parse in upload.ts (`src/lib/xml.ts` + `s3-xml.ts`,
+    commit `ee83fe9`)
+  - [x] 6c. `client_secret_*.json` moved to `~/.secrets.d/agent-drop/`
+    (`73aa5b6`)
+  - [x] 6d. SES-fallback decision surfaced in the review ticket (not answered)
+  - [x] 6e. `CLAUDE.md` updated (LOCAL ONLY -- the file is untracked)
+  - [x] 6f. (adjacent) `resolveObjectKey` + `FinalizeDrop` -> `src/lib/drops.ts`
 
 ## Artifacts produced
 
@@ -159,6 +170,38 @@ link_count: 5
 - `CLAUDE.md` -- Drop Lifecycle rewritten (three completion paths), R2 event
   notification + `queues create` + cron reproduction commands, `lib/` listing
   (phase 5, LOCAL ONLY -- the file is untracked)
+- `test/router-routes.test.ts` -- new; the API's dispatch contract route by
+  route, written GREEN against the OLD router before the rewrite (phase 6)
+- `src/api/router.ts` -- two ordered route tables + dispatch; 487 -> 237 lines
+  (phase 6)
+- `src/api/match.ts` -- new; `exact` / `prefix` / `segments` /
+  `segmentsThenRest` path matchers (phase 6)
+- `src/api/gates.ts` -- new; the credential and scope gates plus the route
+  wrappers the tables compose from (phase 6)
+- `src/api/cors.ts` -- new; `isBrowserRoute` + the scoped CORS headers, lifted
+  out of the dispatcher (phase 6)
+- `src/api/admin-lists.ts` -- new; `GET /api/drops` and `GET /api/boxes`, whose
+  SQL had been living inside the router (phase 6)
+- `src/lib/drops.ts` -- new; `FinalizeDrop` + `resolveObjectKey`, so `lib/` no
+  longer imports from `api/` (phase 6)
+- `test/match.test.ts` -- new; matcher unit tests, written because a mutation
+  survived the route suite (phase 6)
+- `src/lib/xml.ts` -- new; small strict XML reader, rejects malformed input
+  (phase 6)
+- `src/lib/s3-xml.ts` -- new; `readUploadId`, `readListedParts`,
+  `renderCompleteBody` (phase 6)
+- `test/xml.test.ts` -- new; 45 tests over both (phase 6)
+- `src/api/upload.ts` -- regex XML scraping replaced by the parser (phase 6)
+- `test/send-scope.test.ts` -- new; the outbound-mail `inbox_scope` regression
+  (phase 6)
+- `src/lib/mime.ts` -- a `biome-ignore` that no longer suppressed anything
+  (phase 6)
+- `test/helpers/env.ts` -- `makeBucket()` gained `list`/`put`/`delete` and a
+  `deletes` log (phase 6)
+- `.env.example` -- notes where the OAuth client secret now lives (phase 6)
+- `CLAUDE.md` -- auth model (permissions vs scope, rate limits, CORS), router
+  dispatch, testing, the corrected upload endpoints, the out-of-band deploy
+  steps (phase 6, LOCAL ONLY -- the file is untracked)
 
 ## Decisions
 
@@ -301,6 +344,39 @@ link_count: 5
   request, and an unhandled rejection inside `waitUntil` is just noise. Cost of a
   lost one is a stale timestamp. Pinned by a test.
 
+- 2026-08-01 [link 6]: **The router is TWO route tables, not one, and that is
+  behavior rather than taste.** The old dispatcher validated an API key partway
+  down its sequence of regex checks, so an anonymous caller got 401 on an
+  unknown path while a credentialled one got 404. Flattening everything into a
+  single table with per-route auth would have turned the first case into a 404
+  and handed an anonymous prober a map of the API. Tier 1 (no key required, each
+  route gated individually) -> mandatory key gate -> tier 2 reproduces it
+  exactly, and says out loud why the order matters.
+- 2026-08-01 [link 6]: **Not `URLPattern`, despite the PLAN offering it.** Two of
+  the three shapes this API uses are not expressible in it: the admin routes
+  match by `startsWith` (so `/api/keysfoo` reaches the keys handler -- a wart,
+  preserved deliberately and pinned by a test, because this phase's contract is
+  behavior-identical dispatch), and `/api/inbox/:inbox` needs the remainder of
+  the path captured verbatim and possibly empty. Both need several URLPattern
+  patterns plus a fallback, which is more code than the 75-line matcher and
+  reads worse.
+- 2026-08-01 [link 6]: **A hand-written XML reader rather than a dependency.**
+  There is no `DOMParser` in workerd. `src/lib/xml.ts` is ~180 lines covering
+  elements, attributes, text, CDATA, comments, PIs and entities -- enough for
+  four fields across two flat S3 documents, and not worth a supply-chain
+  addition. It REJECTS malformed input instead of guessing, and `s3-xml.ts`
+  turns that into the same 500s the endpoints already returned, so a truncated
+  or hostile response now fails closed.
+- 2026-08-01 [link 6]: **ETags go back to R2 with literal quotes, not `&quot;`.**
+  R2 sends them escaped; the reader decodes and the writer re-escapes only
+  `& < >`, which is the required set for element content. Both forms parse to
+  the same string, so this is a byte-level difference with no semantic one,
+  pinned by a round-trip test rather than left to chance.
+- 2026-08-01 [link 6]: **`~/.secrets` is a shell env file, not a directory**, so
+  6c's literal instruction was impossible. The OAuth client JSON went to
+  `~/.secrets.d/agent-drop/` (dir 700, file 600), copied and byte-compared
+  before the original was removed. `client_secret_*.json` stays in `.gitignore`.
+
 ## Open questions / blockers
 
 - **DEPLOY GATE (phase 1):** migration `0008_drop_object_key.sql` MUST be applied
@@ -379,12 +455,28 @@ link_count: 5
   every inbound email's `raw.eml` and `attachments/` writes. They are filtered
   out in code, not at the bucket, so the queue's message volume is higher than
   the upload rate. Harmless, but it is what the invoice will show.
-- **`src/lib/reaper.ts` imports `resolveObjectKey` from `src/api/upload.ts`** --
-  `lib/` reaching into `api/`, the wrong direction. No cycle (nothing in `api/`
-  imports the reaper) and the function is pure, so it works, but it is a
-  candidate for phase 6's structural cleanup: `resolveObjectKey` + `FinalizeDrop`
-  belong in a `lib/drops.ts`.
-- Phase 6d: deleting the SES fallback is a user decision, not the chain's.
+- **RESOLVED (phase 6):** `src/lib/reaper.ts` no longer imports from `api/`.
+  `resolveObjectKey` + `FinalizeDrop` moved to `src/lib/drops.ts`; three import
+  sites updated.
+- **NEW (phase 6), a security fix, not a refactor:** `POST /api/send/:inbox`,
+  `/api/compose/:inbox` and `/api/send/presign/:inbox` checked the API key's
+  write PERMISSION but never its `inbox_scope`. `:inbox` becomes the From
+  address, so a key issued "write, scoped to bob" could send mail as `lisa@`,
+  DKIM-signed by the domain. Same class as phase 1's finding 1f, which fixed
+  the drop and upload paths and never reached these three. RED first
+  (`test/send-scope.test.ts`, 8 failures, one of them proving mail really went
+  out), then fixed by deleting the one-off gate that carried the short check.
+  Filed as `done/bug-send-routes-ignore-inbox-scope`.
+- **NEW (phase 6), documentation was wrong, not just stale:** CLAUDE.md's
+  presigned-upload section documented the inbox in the request BODY, snake_case
+  field names (`drop_id`, `file_name`, `content_type`), and a `parts` array on
+  `/api/upload/complete`. None of that has ever been the API. Corrected against
+  the code. Anyone who integrated from those docs could not have worked.
+- **Phase 6d, unanswered on purpose:** deleting the SES fallback is a user
+  decision. Carried into the review ticket with its full blast radius.
+- **NEW (phase 6):** `~/.secrets` turned out to be a shell-sourced env file, so
+  the OAuth client secret went to `~/.secrets.d/agent-drop/` instead. Flagged in
+  the review ticket in case Jonas wants it somewhere else.
 - Phase 6 doc sweep: CLAUDE.md's send-path and `lib/` sections were corrected in
   phase 3 because they became actively wrong the moment the send path changed.
   The broader sweep (CI, build, reaper, R2 notifications, upload security model)
@@ -735,3 +827,79 @@ link_count: 5
   Decisions rather than as changes to the contract. Still `plan_version: 4`.
 
   **Nothing pushed to `origin`.** Spawning link 6 for phase 6.
+- 2026-08-01T18:40:00Z [link 6] phase 6 complete -- **and the chain with it.**
+  Branch `chain/p6-cleanup`, seven commits, merged to **local `main`**.
+  Tests 267 -> **413 pass, 0 fail**. `bun run verify` exits 0.
+
+  **6a, the riskiest item in the chain, done in the order the PLAN demanded.**
+  The tests came first and the git history proves it: `43519ab` and `5040634`
+  are 84 route-level tests written and run GREEN against the untouched
+  340-line router; `71f315c` is the rewrite, which passed them unchanged.
+
+  They drive the REAL handlers rather than recording doubles, deliberately: a
+  double answers "was this handler called" while quietly passing "was it called
+  with the right inbox, the right sub-path, the right URL", which is exactly
+  what a dispatch rewrite gets wrong.
+
+  | Was | Is |
+  |---|---|
+  | 487 lines, sequential `path.match(/regex/)` | 237 lines, two ordered route tables |
+  | write-permission-plus-scope pasted inline 4x | one `requireWriteScope`, named per route |
+  | `addHeaders(res, corsHeaders)` at ~20 returns | stamped once on the way out |
+  | ~50 lines of listing SQL inside the dispatcher | `src/api/admin-lists.ts` |
+
+  New files: `api/match.ts` (75), `api/gates.ts` (247), `api/cors.ts` (27),
+  `api/admin-lists.ts` (73), `lib/drops.ts` (41). Nothing over 250 lines.
+
+  **The quirks were pinned, not silently corrected.** Method-blind
+  `/api/health` and `/api/config`; admin routes matching by `startsWith` so
+  `/api/keysfoo` reaches the keys handler; OPTIONS short-circuiting every path;
+  and the 401-not-404 ordering. Each has a test whose comment says "this is
+  what shipped, not what is right".
+
+  **Mutation-checked, and the check earned its keep.** Seven seeded defects:
+  ignoring the HTTP method 6 failures, dropping the scope check 7, skipping the
+  CORS stamp 1, not burning a rate-limit token 2, never consulting the tier-2
+  table 25, dropping the inbox sub-path 2 -- and **one survivor**: removing the
+  empty-capture guard from `segments()` broke nothing any test could see, while
+  really changing `POST /api/drop/` from 404 to 400. Closed with
+  `test/match.test.ts` plus a route-level pin (`a34c500`), both verified against
+  the PRE-rewrite router as well, so they pin shipped behavior rather than the
+  rewrite's opinion.
+
+  **A real security hole came out of the consolidation** and is fixed:
+  `/api/send/:inbox`, `/api/compose/:inbox` and `/api/send/presign/:inbox`
+  checked write permission but never `inbox_scope`. `:inbox` becomes the From
+  address, so a key scoped to `bob` could send DKIM-signed mail as `lisa@`.
+  Phase 1's finding 1f fixed this class for the drop and upload paths and never
+  reached these three. RED first: 8 failures, including one asserting no mail
+  was sent -- it was. The fix is a deletion: the one-off gate carrying the short
+  check is gone, so there is no longer a variant that can drift (`00db531`).
+
+  **6b -- the regexes were worse than untidy.**
+  `<Part>\s*<PartNumber>(\d+)</PartNumber>\s*.*?<ETag>(.+?)</ETag>\s*.*?</Part>`
+  required `PartNumber` before `ETag` (S3 promises no order -- the other order
+  returned zero parts and failed the whole completion), walked through
+  `</Part>` under the `s` flag (a part missing its ETag borrowed its
+  neighbour's, completing an upload against bytes that were not there), and
+  matched nothing if written `<Part >`. `<UploadId>(.+?)</UploadId>` would read
+  an id out of an `<Error>` body. `src/lib/xml.ts` + `s3-xml.ts` replace both
+  with a strict reader that fails closed; 45 tests, mutation-checked five ways.
+
+  **6c** -- the OAuth client JSON is out of the working directory. **6d** --
+  raised in the review ticket, not answered. **6e** -- CLAUDE.md updated, and
+  the update turned up docs that were not merely stale: the presigned-upload
+  section had the inbox in the request body, snake_case field names and a
+  `parts` array on `/api/upload/complete`, none of which the API has ever
+  accepted.
+
+  **Honest limitations.** (1) Nothing is deployed and nothing was verified
+  against the live platform; all three DEPLOY GATE items still stand and are
+  collected in the review ticket. (2) The R2 -> queue -> consumer delivery has
+  still never run for real (phase 5's note stands unchanged). (3) The route
+  suite exercises the real handlers but stubs `fetch`, R2 and the EMAIL
+  binding, so it proves dispatch and authorization, not R2's or Cloudflare's
+  side of any contract. (4) CLAUDE.md remains **untracked**, so every doc
+  change from phases 3-6 lives only in this working copy.
+
+  **Nothing pushed to `origin`.** Chain complete -- no link 7.

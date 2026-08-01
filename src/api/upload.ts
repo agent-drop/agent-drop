@@ -1,6 +1,8 @@
 import { AwsClient } from "aws4fetch";
+import { type FinalizeDrop, resolveObjectKey } from "../lib/drops";
 import { generateId } from "../lib/id";
 import { slugifyFilename } from "../lib/normalize";
+import { readListedParts, readUploadId, renderCompleteBody } from "../lib/s3-xml";
 import type { Env } from "../types";
 import { r2ObjectUrl } from "../types";
 import type { DropContext } from "./drop";
@@ -17,40 +19,6 @@ function s3Url(env: Env, objectKey: string) {
 }
 
 const CHUNK_SIZE = 50 * 1024 * 1024; // 50MB
-
-// The columns the finalize endpoints need. The router loads this row to decide
-// who is allowed to finalize the drop, then hands it to the handler so the key
-// and the inbox both come from the same authenticated row.
-export interface FinalizeDrop {
-	id: string;
-	inbox: string;
-	r2_prefix: string | null;
-	object_key: string | null;
-	subject: string | null;
-	status: string;
-}
-
-/**
- * The R2 key this drop's upload was signed against, derived from server-side
- * state only.
- *
- * `/api/upload/complete` used to take `dropId` and `objectKey` as independent
- * body fields and never check they belonged to the same row, so a caller
- * holding any valid drop id could complete a multipart upload against an
- * arbitrary key -- another box's object included -- and flip that drop to
- * `completed`. The key is now recorded at presign time (migration 0008) and
- * read back here; the request body is not consulted.
- */
-export function resolveObjectKey(drop: FinalizeDrop): string | null {
-	if (drop.object_key) return drop.object_key;
-	// Rows written before migration 0008 -- an upload already in flight across the
-	// deploy -- carry no key. Rebuild it the way presign built it, still without
-	// touching the request: `subject` holds the original filename.
-	if (drop.r2_prefix && drop.subject) {
-		return `${drop.r2_prefix}/uploads/${slugifyFilename(drop.subject)}`;
-	}
-	return null;
-}
 
 // POST /api/upload/presign - get presigned PUT URL for direct upload
 export async function handlePresign(
@@ -164,12 +132,10 @@ export async function handleMultipartInit(
 		return Response.json({ error: "failed to init multipart" }, { status: 500 });
 	}
 
-	const xml = await initRes.text();
-	const uploadIdMatch = xml.match(/<UploadId>(.+?)<\/UploadId>/);
-	if (!uploadIdMatch) {
+	const uploadId = readUploadId(await initRes.text());
+	if (!uploadId) {
 		return Response.json({ error: "no upload ID" }, { status: 500 });
 	}
-	const uploadId = uploadIdMatch[1];
 
 	// Generate presigned URLs for each part
 	const totalParts = Math.ceil(body.fileSize / CHUNK_SIZE);
@@ -246,28 +212,12 @@ export async function handleMultipartComplete(
 		return Response.json({ error: "failed to list parts" }, { status: 500 });
 	}
 
-	const listXml = await listRes.text();
-	const partMatches = [
-		...listXml.matchAll(
-			/<Part>\s*<PartNumber>(\d+)<\/PartNumber>\s*.*?<ETag>(.+?)<\/ETag>\s*.*?<\/Part>/gs,
-		),
-	];
-	if (partMatches.length === 0) {
+	const parts = readListedParts(await listRes.text());
+	if (parts.length === 0) {
 		return Response.json({ error: "no parts found" }, { status: 500 });
 	}
 
-	const parts = partMatches
-		.map((m) => ({ partNumber: Number(m[1]), etag: m[2] }))
-		.sort((a, b) => a.partNumber - b.partNumber);
-
-	// Complete multipart via S3 API
-	const completeXml = [
-		"<CompleteMultipartUpload>",
-		...parts.map(
-			(p) => `<Part><PartNumber>${p.partNumber}</PartNumber><ETag>${p.etag}</ETag></Part>`,
-		),
-		"</CompleteMultipartUpload>",
-	].join("");
+	const completeXml = renderCompleteBody(parts);
 
 	const completeUrl = new URL(s3Url(env, objectKey));
 	completeUrl.searchParams.set("uploadId", body.uploadId);
