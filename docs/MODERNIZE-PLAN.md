@@ -1,5 +1,5 @@
 ---
-version: 3
+version: 4
 created: 2026-08-01
 ---
 
@@ -289,11 +289,18 @@ which the pre-chain sweep already satisfies). It collapses the
 - The `brand-html` plugin in `vite.config.ts` -- a `transformIndexHtml` hook that
   substitutes `%BRAND%` / `%DOMAIN%` tokens, plus the `define` block injecting
   `__BRAND__` / `__DOMAIN__`. Both come from `.env` via `loadEnv`.
-- `scripts/deploy.ts` -- renders the placeholder values in the committed
-  `wrangler.toml` (`example.com`, `your-cloudflare-account-id`,
-  `your-d1-database-id`, `your-google-client-id`) from `.env` into a gitignored
-  temp config before invoking wrangler. The committed `wrangler.toml` must keep
-  carrying only placeholders; the public repo leaks no real domain or account id.
+- The placeholder-rendering deploy flow. The committed `wrangler.toml` must keep
+  carrying only placeholders (`example.com`, `your-cloudflare-account-id`,
+  `your-d1-database-id`, `your-google-client-id`); the public repo leaks no real
+  domain or account id. **CORRECTION (v4, found while executing the phase): the
+  MECHANISM could not be preserved, only the guarantee.** `scripts/deploy.ts`
+  rendered those placeholders into a gitignored temp config *after* the build and
+  pointed wrangler at it. The plugin reads the Worker config itself, at build AND
+  dev time, so a config rendered afterwards is never consulted. The injection
+  moves into the plugin's programmatic `config` hook (`vite.config.ts` ->
+  `scripts/deploy-identity.ts`), which mutates the parsed config field by field;
+  `scripts/deploy.ts` survives as the deploy-time guard that the generated config
+  actually matches `.env`. The committed `wrangler.toml` is still never written to.
 
 Known upstream regression: the plugin does not work with Vite's `base` option for
 SPAs. This project does not set `base`, so it does not apply -- but do not
@@ -372,6 +379,23 @@ behavior-identical.
 **artifacts:** `src/api/router.ts`, `src/api/upload.ts`, `CLAUDE.md`, tests.
 
 ## Changelog
+
+### v4 -- 2026-08-01 -- author: link 4
+
+- Phase 4: "`scripts/deploy.ts` renders the placeholders into a gitignored temp
+  config before invoking wrangler" -> "the MECHANISM could not be preserved,
+  only the guarantee". Factual correction found while executing the phase: the
+  plugin reads the Worker config itself at build and dev time, so a temp config
+  rendered after the build is never consulted. The injection moved into the
+  plugin's programmatic `config` hook; `deploy.ts` became the guard instead of
+  the renderer.
+- Phase 4, added to the record: `[assets] directory` was removed from the
+  committed `wrangler.toml` (the plugin populates it from the client build
+  output, and the hardcoded path now also holds the Worker bundle).
+- No GOAL, requirement, or acceptance-criterion change. The requirement --
+  committed `wrangler.toml` carries only placeholders, public repo leaks nothing
+  -- is unchanged and is now pinned by a test rather than by convention. The
+  phase's abort clause did not fire.
 
 ### v3 -- 2026-08-01 -- author: link 3
 

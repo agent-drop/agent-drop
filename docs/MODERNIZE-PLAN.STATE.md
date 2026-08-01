@@ -1,11 +1,11 @@
 ---
 chain_id: modernize-20260801-161212-5998
 plan_file: /Users/jonas/projects/agent-drop/docs/MODERNIZE-PLAN.md
-plan_version: 3
+plan_version: 4
 status: in_progress
-current_phase: 4
-last_updated: 2026-08-01T14:05:00Z
-link_count: 3
+current_phase: 5
+last_updated: 2026-08-01T15:40:00Z
+link_count: 4
 ---
 
 # Agent Drop modernization chain state
@@ -41,7 +41,17 @@ link_count: 3
     it cannot be deleted, the relay replay path needs it)
   - [x] 3g. BONUS (found in-phase): forwarded inline images had `<<cid>>`
   - [x] 3h. BONUS (found in-phase): Message-ID domain read from the display name
-- [ ] 4. Dev loop: `@cloudflare/vite-plugin`
+- [x] 4. Dev loop: `@cloudflare/vite-plugin` (link 4, local `main` `dc6a90e`)
+  - [x] 4a. Plugin wired in; `vite dev` runs the Worker with real bindings
+  - [x] 4b. `/api` dev proxy hack removed
+  - [x] 4c. `brand-html` + `__BRAND__`/`__DOMAIN__` define still work
+  - [x] 4d. `.env` placeholder rendering preserved -- moved from a temp toml into
+    the plugin's `config` hook; committed `wrangler.toml` still placeholders-only
+  - [x] 4e. `scripts/deploy.ts` deploys the generated config and REFUSES a
+    config that does not match `.env`
+  - [x] 4f. BONUS (found in-phase): `vite.config.ts` + `scripts/` were in no
+    tsconfig; folded into `bun run typecheck`
+  - [x] 4g. BONUS (found in-phase): `db:migrate` was pinned to `0001_initial.sql`
 - [ ] 5. Platform optimizations
   - [ ] 5a. `ctx.waitUntil` on `last_used_at`
   - [ ] 5b. R2 event notifications -> retire confirm handshake
@@ -105,6 +115,22 @@ link_count: 3
   (which still claimed a deleted `ses.ts`) (phase 3)
 - `web/public/styleguide.html`, `web/src/components/{DropZone,InboxView,
   GoogleSignIn}.tsx` -- duplicate-attribute and a11y fixes (phase 2)
+- `scripts/deploy-identity.ts` -- new; the `.env` -> Worker-config bridge
+  (`readDeployIdentity`, `applyDeployIdentity`, `checkDeployIdentity`,
+  `renderBrandTokens`) (phase 4)
+- `vite.config.ts` -- `cloudflare()` plugin, identity injected via its `config`
+  hook, `server.proxy` deleted (phase 4)
+- `scripts/deploy.ts` -- no longer renders a temp toml; finds the generated
+  config, verifies it against `.env`, deploys it (phase 4)
+- `scripts/tsconfig.json` -- new; typechecks `vite.config.ts` + `scripts/`
+  (phase 4)
+- `wrangler.toml` -- `[assets] directory` removed (the plugin populates it)
+  (phase 4)
+- `package.json` -- `preview` added, `dev:worker` removed, `typecheck` covers
+  `scripts/`, `db:migrate` fixed + `db:migrate:local` added (phase 4)
+- `test/deploy-identity.test.ts`, `test/toml.d.ts` -- new (phase 4)
+- `CLAUDE.md` -- "Dev loop & Deployment" section rewritten (phase 4, LOCAL ONLY
+  -- the file is untracked)
 
 ## Decisions
 
@@ -179,6 +205,34 @@ link_count: 3
   would have attached base64 text. `resolveAttachment` now decodes once at the
   edge; the compose preview re-encodes only for display.
 
+- 2026-08-01 [link 4]: **The `.env` injection moved from a temp file into the
+  plugin's `config` hook.** The old flow rendered placeholders into
+  `.wrangler.deploy.toml` and pointed wrangler at it. That cannot survive the
+  plugin, which reads the Worker config itself at build AND dev time -- a file
+  rendered later is simply never consulted. The plugin's programmatic `config`
+  option takes a function over the parsed config, so the substitution is now
+  structural (four named fields) rather than a whole-file `replaceAll`, which is
+  also strictly more precise: a placeholder token appearing in an absolute path
+  can no longer be mangled.
+- 2026-08-01 [link 4]: **`scripts/deploy.ts` survives as a guard, not a
+  renderer.** It resolves the generated config through the plugin's own
+  `web/.wrangler/deploy/config.json` redirect, then refuses to deploy unless the
+  config matches `.env` field by field. Rejected the alternative of scanning the
+  built config for leftover placeholder text: CI legitimately builds from
+  `.env.example`, whose values ARE the placeholders, so that check would have to
+  be disabled exactly where it is cheapest to run.
+- 2026-08-01 [link 4]: **Vite `root` stays `web/`.** The plugin's defaults assume
+  root == project root, but `configPath: "../wrangler.toml"` is enough, and the
+  alternative (moving `web/index.html` to the repo root so the plugin's paths
+  line up) is a layout change with no payoff. Cost of the choice: build output
+  lands under `web/dist/{client,agent_drop}` and the deploy redirect under
+  `web/.wrangler/`, both already gitignored.
+- 2026-08-01 [link 4]: **`[assets] directory` deleted from the committed
+  `wrangler.toml`.** The plugin populates it from the client build output. The
+  hardcoded `./web/dist` was not merely redundant, it had become dangerous: that
+  directory now also holds the Worker bundle and a `.dev.vars`, so anything
+  falling back to it would publish both as public assets.
+
 ## Open questions / blockers
 
 - **DEPLOY GATE (phase 1):** migration `0008_drop_object_key.sql` MUST be applied
@@ -217,6 +271,21 @@ link_count: 3
 - **NEW (phase 3):** the send path can now reject before sending
   (>50 recipients, oversized headers) with a 400 naming the limit. Previously
   such a payload was handed to the platform and came back as an opaque `E_*`.
+- **NEW (phase 4), for whoever ships this:** `bunx wrangler deploy` from the
+  repo root now silently deploys the PLACEHOLDER config. The real values only
+  exist in the config the Vite build generates, and wrangler's auto-detection
+  redirect lives at `web/.wrangler/deploy/config.json` (Vite root is `web/`), not
+  at the repo root. Always deploy via `bun run deploy`. `scripts/deploy.ts` is
+  the guard, and it exits 1 with a field-by-field diff if the built config does
+  not match `.env` -- verified by building with `.env` absent and then deploying
+  with it present.
+- **NEW (phase 4):** `vite build` writes `web/dist/agent_drop/.dev.vars`
+  containing **every secret in `.env` in plaintext** (the plugin's local-dev
+  secret injection). It is inside a gitignored directory and `.assetsignore`
+  keeps it out of the asset upload, but it is a real file on disk that did not
+  exist before. Do not `cp -r` the build output anywhere public.
+- **NEW (phase 4):** the local dev D1 is empty until seeded --
+  `bun run db:migrate:local`. State persists under `web/.wrangler/state`.
 - Phase 6d: deleting the SES fallback is a user decision, not the chain's.
 - Phase 6 doc sweep: CLAUDE.md's send-path and `lib/` sections were corrected in
   phase 3 because they became actively wrong the moment the send path changed.
@@ -423,3 +492,74 @@ link_count: 3
   stands). First real send after deploy is the remaining unknown.
 
   **Nothing pushed to `origin`.** Spawning link 4 for phase 4.
+- 2026-08-01T15:40:00Z [link 4] phase 4 complete. Branch `chain/p4-vite-plugin`,
+  two commits, merged to **local `main` as `dc6a90e`**. Tests 202 -> **221 pass,
+  0 fail**. `bun run verify` exits 0 on `main`.
+
+  **The abort clause did not fire.** The PLAN's escape hatch was "if the plugin
+  cannot coexist with the `.env` placeholder-rendering deploy flow, stop". It
+  can, but not by keeping the old mechanism: `scripts/deploy.ts` rendered a temp
+  `.wrangler.deploy.toml` *after* the build, and the plugin reads the Worker
+  config *itself*, at build and dev time, so a file rendered afterwards is never
+  consulted. The plugin's programmatic `config` option is the seam --
+  `vite.config.ts` hands it a function that injects the real identity from
+  `.env` into the parsed config, and the generated
+  `web/dist/agent_drop/wrangler.json` comes out with real values while the
+  committed `wrangler.toml` is never written to.
+
+  | Requirement | Outcome |
+  |---|---|
+  | `brand-html` `%BRAND%`/`%DOMAIN%` + `__BRAND__`/`__DOMAIN__` define | Intact. Extracted to `renderBrandTokens()` so it is unit-tested rather than trusted; dev server serves `<title>FRST - Agent Drop</title>`. |
+  | Committed `wrangler.toml` carries only placeholders | Intact, and now pinned by a test that parses the real file. |
+  | No `base` option introduced | None. The known SPA regression does not apply. |
+  | Two-step build collapsed | `vite build` emits worker + client + deployable config in one pass. |
+
+  **The dev loop is real, verified against live bindings, not asserted.** With
+  `bunx vite dev` (single process, no `wrangler dev`, `server.proxy` deleted):
+  `GET /` served the SPA with brand tokens substituted; `GET /api/health` came
+  back `{"ok":true,...}` from workerd with `access-control-allow-origin:
+  https://frst.dev` (phase 1's scoped CORS resolving `env.DOMAIN` at runtime);
+  `POST /api/keys` minted a real key into local D1; `POST /api/drop/devprobe`
+  then `GET /api/inbox/devprobe/latest` round-tripped a drop through D1. The
+  R2 and email bindings instantiate locally (`web/.wrangler/state/v3/r2`,
+  `.wrangler/tmp/email`).
+
+  **The deploy guard, proven negatively.** `scripts/deploy.ts` no longer renders
+  anything; it resolves the generated config via the plugin's
+  `web/.wrangler/deploy/config.json` redirect and refuses to deploy one that
+  disagrees with `.env`. Built with `.env` absent, then deployed with real vars
+  present: exit 1, six field-by-field mismatches listed, wrangler never invoked.
+  Built normally: `--dry-run` reports `env.DOMAIN ("frst.dev")` and the real
+  account id, all seven bindings registering.
+
+  **CI re-verified in a clean clone** with `.env.example` only and the shell's
+  own `DOMAIN`/`GOOGLE_CLIENT_ID`/etc. stripped (the trap phase 2 hit): types
+  check, typecheck, lint, 221 tests, build, and deploy dry-run all green on
+  placeholder values -- so the guard does not fire on the legitimate
+  placeholder-valued build.
+
+  **Two things found mid-phase, both flagged inline, both fixed:**
+
+  | Finding | What it was |
+  |---|---|
+  | `vite.config.ts` and `scripts/` were in NO tsconfig | The root project includes only `src/**`. So the two files that decide which account, domain and database the Worker deploys to were the only unchecked TypeScript in the repo -- and phase 4 was about to put more logic there. New `scripts/tsconfig.json`, folded into `bun run typecheck`. |
+  | `db:migrate` was `d1 execute --file=migrations/0001_initial.sql` | Flagged in STATE by link 1 as a phase-1 deploy-gate footnote. It re-ran the initial migration and applied nothing else, so the documented way to migrate could never have applied `0008`. Now `d1 migrations apply --remote` against the generated config, plus a `db:migrate:local` for the new dev loop. |
+
+  **New tests are mutation-checked**, so "221 pass" is not decoration: skipping
+  route substitution in the injector fails 6, dropping the BRAND assignment
+  fails 7, blinding `checkDeployIdentity` to the database id fails 2. The
+  strongest of them parses the committed `wrangler.toml` and asserts no
+  placeholder token survives injection -- so a placeholder added later to a
+  field the injector does not visit fails the suite instead of shipping a
+  half-rendered config.
+
+  **Honest limitations.** (1) Nothing was deployed, so the generated
+  `wrangler.json` has only ever been through `--dry-run`; wrangler validated and
+  bundled it, but no Worker was updated. The phase-1 DEPLOY GATE (migration
+  `0008`) still stands. (2) `vite preview` was added as a script but only
+  smoke-checked by the plugin's presence, not exercised. (3) The dev-loop
+  verification was HTTP-level; I did not test HMR or worker hot-reload
+  behaviour.
+
+  **Nothing pushed to `origin`** -- local `main` is 21 commits ahead. Spawning
+  link 5 for phase 5.
