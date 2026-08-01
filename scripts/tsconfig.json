@@ -1,0 +1,11 @@
+{
+	// The build/deploy tooling: `vite.config.ts` and everything under `scripts/`.
+	// These were unchecked until phase 4 put the deployment identity in them --
+	// a type error here mis-deploys the Worker, so they get the same gate as src.
+	"extends": "../tsconfig.json",
+	"compilerOptions": {
+		"types": ["node"],
+		"allowImportingTsExtensions": true
+	},
+	"include": ["**/*", "../vite.config.ts"]
+}

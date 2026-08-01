@@ -4,7 +4,11 @@
 		// The suite runs under Bun, not the Workers runtime, so it needs Bun's
 		// globals on top of the worker types the code under test is written
 		// against. Kept in a separate project so these never leak into `src/`.
-		"types": ["bun-types", "node"]
+		"types": ["bun-types", "node"],
+		// The suite imports the build tooling under `scripts/`, which is written
+		// with explicit `.ts` specifiers (Vite's native config loader requires
+		// them). Emit-free, so this is safe.
+		"allowImportingTsExtensions": true
 	},
 	"include": ["**/*", "../src/**/*", "../worker-configuration.d.ts"]
 }
