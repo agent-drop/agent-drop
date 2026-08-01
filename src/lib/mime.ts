@@ -38,7 +38,6 @@ function wrap76(s: string): string {
 
 // RFC 2047-encode a header value if it contains non-ASCII
 function encodeHeaderWord(s: string): string {
-	// biome-ignore lint/suspicious/noControlCharactersInRegex: printable-ASCII range bound
 	return /^[\x20-\x7E]*$/.test(s) ? s : `=?UTF-8?B?${b64(s)}?=`;
 }
 
