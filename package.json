@@ -5,17 +5,18 @@
 	"type": "module",
 	"scripts": {
 		"dev": "vite dev",
-		"dev:worker": "wrangler dev",
+		"preview": "vite preview",
 		"build": "vite build",
 		"deploy": "vite build && bun scripts/deploy.ts",
 		"test": "bun test",
 		"types": "wrangler types --include-env false ./worker-configuration.d.ts",
-		"typecheck": "tsc --noEmit && tsc --noEmit -p web/tsconfig.json && tsc --noEmit -p test/tsconfig.json && tsc --noEmit -p tools/tsconfig.json",
+		"typecheck": "tsc --noEmit && tsc --noEmit -p web/tsconfig.json && tsc --noEmit -p test/tsconfig.json && tsc --noEmit -p tools/tsconfig.json && tsc --noEmit -p scripts/tsconfig.json",
 		"lint": "biome check .",
 		"format": "biome check --write .",
 		"check": "bun run types && bun run typecheck && bun run lint && bun test",
 		"verify": "bun run check && bunx vite build && bun scripts/deploy.ts --dry-run --outdir .claude/temp/dryrun",
-		"db:migrate": "wrangler d1 execute agent-drop-db --file=migrations/0001_initial.sql"
+		"db:migrate": "vite build && wrangler d1 migrations apply agent-drop-db --remote -c web/dist/agent_drop/wrangler.json",
+		"db:migrate:local": "vite build && wrangler d1 migrations apply agent-drop-db --local --persist-to web/.wrangler/state -c web/dist/agent_drop/wrangler.json"
 	},
 	"dependencies": {
 		"aws4fetch": "^1.0.20",
@@ -26,6 +27,7 @@
 	},
 	"devDependencies": {
 		"@biomejs/biome": "^2.5.6",
+		"@cloudflare/vite-plugin": "1.50.0",
 		"@tailwindcss/vite": "^4.3.3",
 		"@types/node": "^26.1.2",
 		"@types/react": "^19.2.18",

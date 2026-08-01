@@ -12,8 +12,11 @@ account_id = "your-cloudflare-account-id"
 enabled = true
 head_sampling_rate = 1
 
+# `directory` is intentionally absent: the Cloudflare Vite plugin populates it in
+# the Worker config it generates at build time, pointing at the client build
+# output. Hardcoding it here would be stale at best and, since the build output
+# now also holds the Worker bundle, would risk publishing it as a public asset.
 [assets]
-directory = "./web/dist"
 binding = "ASSETS"
 not_found_handling = "single-page-application"
 run_worker_first = ["/api/*", "/f/*"]

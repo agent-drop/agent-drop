@@ -39,7 +39,7 @@ jobs:
       - name: Worker types are in sync with wrangler.toml
         run: bunx wrangler types --check
 
-      - name: Typecheck (src, web, test, tools)
+      - name: Typecheck (src, web, test, tools, scripts)
         run: bun run typecheck
 
       - name: Lint + format check
