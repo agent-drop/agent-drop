@@ -1,11 +1,11 @@
 ---
 chain_id: modernize-20260801-161212-5998
 plan_file: /Users/jonas/projects/agent-drop/docs/MODERNIZE-PLAN.md
-plan_version: 1
+plan_version: 2
 status: in_progress
-current_phase: 2
-last_updated: 2026-08-01T10:34:00Z
-link_count: 1
+current_phase: 3
+last_updated: 2026-08-01T12:20:00Z
+link_count: 2
 ---
 
 # Agent Drop modernization chain state
@@ -20,11 +20,14 @@ link_count: 1
   - [x] 1e. Scope CORS (none on admin routes, real origin on web routes)
   - [x] 1f. BONUS (found in-phase): enforce `inbox_scope` on write paths
   - [x] Test harness: D1-over-`bun:sqlite`, `cloudflare:email` virtual module
-- [ ] 2. Safety net: web typecheck, Biome, CI, tests on pure functions
-  - [ ] 2a. `web/tsconfig.json` + fix whatever it surfaces
-  - [ ] 2b. Biome config + fix flagged issues
-  - [ ] 2c. `.github/workflows/ci.yml`
-  - [ ] 2d. Tests: rules.ts, relay.ts addressing, normalize.ts, hosting.ts
+- [x] 2. Safety net: web typecheck, Biome, CI, tests on pure functions
+  (link 2, local `main` `47583b3`)
+  - [x] 2a. `web/` + `test/` typechecked and wired into `bun run typecheck`
+  - [x] 2b. Biome config (`biome.jsonc`) + fixes, folded into `bun run check`
+  - [x] 2c. `.github/workflows/ci.yml`, every step verified in a clean clone
+  - [x] 2d. Tests: rules.ts, relay.ts addressing, normalize.ts, hosting.ts
+  - [x] 2e. BONUS (found in-phase): `slugifyFilename` extension left unsanitized
+  - [x] 2f. BONUS (found in-phase): hosted subdir + trailing slash always 404'd
 - [ ] 3. Migrate outbound mail to `EmailMessageBuilder`
   - [ ] 3a. `api/send.ts:172` compose path -> builder
   - [ ] 3b. `relay.ts:248` forwardViaBinding -> builder IF attachments survive
@@ -63,6 +66,23 @@ link_count: 1
   real migrations, plus Env/rate-limiter/fixture builders (phase 1)
 - `test/upload-auth.test.ts`, `test/auth.test.ts`, `test/cors.test.ts`,
   `test/ratelimit.test.ts`, `test/write-scope.test.ts` (phase 1)
+- `web/tsconfig.json` -- gained `types: ["vite/client"]`; it already existed but
+  was never invoked by any script (phase 2)
+- `test/tsconfig.json` -- new; root project + bun-types/node (phase 2)
+- `package.json` -- `typecheck` now covers src/web/test/tools; new `lint` and
+  `format` scripts; `lint` folded into `check` (phase 2)
+- `biome.jsonc` -- Biome 2.5.6, tabs / double quotes / 100 cols (phase 2)
+- `.github/workflows/ci.yml` -- install, `wrangler types --check`, typecheck,
+  lint, test, build, deploy dry-run (phase 2)
+- `src/lib/normalize.ts` -- `slugifyFilename` now sanitizes the extension
+  (phase 2 bugfix)
+- `src/lib/hosting.ts` -- `key += "/index.html"` separator fix (phase 2 bugfix)
+- `test/helpers/env.ts` -- `makeCtx()` records + settles `waitUntil` promises;
+  new `makeBucket()` R2 read stub (phase 2)
+- `test/rules.test.ts`, `test/relay-address.test.ts`, `test/normalize.test.ts`,
+  `test/hosting.test.ts` (phase 2)
+- `web/public/styleguide.html`, `web/src/components/{DropZone,InboxView,
+  GoogleSignIn}.tsx` -- duplicate-attribute and a11y fixes (phase 2)
 
 ## Decisions
 
@@ -91,7 +111,31 @@ link_count: 1
   (`git push origin HEAD:main`) is forbidden here. Phases run sequentially in the
   primary tree on per-phase branches, merged to local `main`.
 - 2026-08-01: Green gate is `bun run verify` (= `check` + `vite build` +
-  `deploy --dry-run`).
+  `deploy --dry-run`). As of phase 2, `check` also runs `biome check .` and
+  typechecks `web/` and `test/`.
+- 2026-08-01 [link 2]: **Biome config lives in `biome.jsonc`, not `biome.json`.**
+  Biome lints its own config, and a plain `.json` file rejects comments -- so the
+  non-obvious exclusions (`*.css`, see below) could not carry their reason. The
+  `.jsonc` name is fully supported by Biome and by editors.
+- 2026-08-01 [link 2]: **`*.css` is excluded from Biome.** Its CSS parser rejects
+  Tailwind v4 at-rules (`@theme`, `@plugin`, `@custom-variant`) as syntax errors.
+  Revisit if Biome adds Tailwind v4 support.
+- 2026-08-01 [link 2]: **`test/` is a separate TS project, not folded into the
+  root one.** The suite needs `bun-types` + `node`; the worker project sets
+  `types: []` on purpose so its globals come from `worker-configuration.d.ts`.
+  `test/tsconfig.json` extends the root and adds those two, which keeps Bun's
+  globals out of `src/` while still typechecking the tests against the real
+  worker types.
+- 2026-08-01 [link 2]: **CI needs no secrets.** It copies `.env.example` to
+  `.env`, so the build and deploy dry-run exercise the real placeholder-rendering
+  path in `scripts/deploy.ts` with values that are already public -- and
+  `.env.example` becomes self-checking (a var added to the code but forgotten
+  there fails CI). Verified in a clean clone.
+- 2026-08-01 [link 2]: **Biome's unsafe fix for unused variables was rejected.**
+  It renames to `_name` rather than deleting, which preserves dead code under an
+  uglier name. Every instance was deleted by hand instead. One (`merged` in the
+  CLI's `invite` command) was still used further down -- caught by the newly
+  wired typecheck, which is the phase justifying itself.
 
 ## Open questions / blockers
 
@@ -105,9 +149,15 @@ link_count: 1
   on a box can call `/api/upload/complete` against a non-`pending` drop of their
   own box. It fails at the S3 layer and crosses no boundary, so no guard was
   added. Noted so a later phase does not "discover" it as new.
-- Phase 2a (`web/tsconfig.json`) is an unknown quantity -- the React frontend has
-  never been typechecked. Could surface 0 errors or dozens. Fixing them is in
-  scope for phase 2.
+- **RESOLVED (phase 2):** the `web/tsconfig.json` unknown quantity came in cheap
+  -- one error in `web/` (a missing ambient declaration for the CSS side-effect
+  import), 14 in `test/`. The PLAN said no `web/tsconfig.json` existed; in fact
+  it has existed since the initial commit and was simply never invoked by any
+  script. Correction recorded in the PLAN changelog (v2).
+- **CI never runs on push in this chain.** `.github/workflows/ci.yml` is
+  committed but nothing is pushed to `origin`, so GitHub has never executed it.
+  Every step was verified by running it in a clean local clone with only
+  `.env.example` values. First real run happens whenever Jonas pushes.
 - Phase 3b: whether `forwardViaBinding`'s attachment re-encoding survives the
   `EmailMessageBuilder` API is unverified. If not, that call site stays on raw.
 - Phase 6d: deleting the SES fallback is a user decision, not the chain's.
@@ -155,3 +205,68 @@ link_count: 1
   `3ad0137`), `bun run verify` re-run green on `main` after the merge, branch
   `chain/p1-security` deleted, tree clean. **Nothing pushed to `origin`** -- local
   `main` is 7 commits ahead, as the plan requires. Spawning link 2 for phase 2.
+- 2026-08-01T12:20:00Z [link 2] phase 2 complete. Branch `chain/p2-safety-net`,
+  three commits, merged to **local `main` as `47583b3`**.
+
+  **2a -- typecheck.** The PLAN's premise was wrong in a useful way:
+  `web/tsconfig.json` has existed since the initial commit, it was just never
+  referenced by any script, so nothing ever ran it. Wiring it in surfaced exactly
+  **one** error (no ambient declaration for `import "./styles/globals.css"`),
+  fixed with `types: ["vite/client"]`. Folding `test/` in via a new
+  `test/tsconfig.json` surfaced **14**, all in the phase-1 helpers, all fixed.
+  `bun run typecheck` now covers src, web, test and tools.
+
+  **2b -- Biome 2.5.6.** Tabs, double quotes, 100 columns (measured: p95 line
+  length is 92). 32 files reformatted, 55 lint errors driven to zero. Fixed
+  rather than suppressed, except two control-character regexes that are
+  deliberate (an ASCII range bound in `romanize`, ANSI SGR stripping in the CLI's
+  column padding) and now carry `biome-ignore` comments saying why. `bun run
+  lint` is part of `bun run check`, so the green gate covers it.
+
+  Three real defects came out of that pass, beyond formatting:
+  `styleguide.html` had `class="name" class="glow-pink"` on two swatches (second
+  attribute silently dropped by every browser); `DropZone`'s drop target had
+  click/drop handlers on a bare `div` with no keyboard path at all; and
+  `handleDrop` was a `useCallback` whose dep array omitted the two upload
+  functions it closes over -- those are redefined every render and nothing
+  consuming it is memoized, so the memo bought nothing and hid a stale-closure
+  hazard. Now a plain function.
+
+  **2c -- CI.** `.github/workflows/ci.yml`: frozen-lockfile install,
+  `wrangler types --check` (the wrangler.toml/type drift catcher), typecheck,
+  lint, test, build, deploy dry-run. No secrets -- it copies `.env.example` to
+  `.env`. Every step verified by running it in a clean `git clone` of the branch
+  with only `.env.example` present. Note: the first run showed a real Google
+  client id because this shell's profile exports one, overriding the file; re-run
+  with those vars stripped to prove the placeholder-only path works. **CI has
+  never actually run on GitHub, because this chain does not push.**
+
+  **2d -- tests.** 92 new tests (47 -> **139 pass, 0 fail**) across `rules.ts`,
+  relay addressing, `normalize.ts` and `hosting.ts`. The rules suite was
+  mutation-checked: turning the exact pattern into a prefix match, breaking out
+  of the cascade after the first hit, and no-op'ing `substitute()` fails 9 of its
+  25 tests, so the suite has teeth rather than just passing.
+
+  **Two bugs found mid-phase, both flagged inline, both RED before the fix:**
+
+  | Bug | RED test | What it did |
+  |---|---|---|
+  | `slugifyFilename` copied the extension verbatim | 3 | `"../../etc/passwd"` -> `"file./etc/passwd"`; separators after the last dot went straight into the R2 key, and inbound-email filenames come from a remote MIME part. Downward path injection, not traversal (`..` cannot occur in a slice starting at the last dot) -- but that safety rested on an invariant nobody had written down. |
+  | `serveHostedSite` built `…/docsindex.html` | 1 | Every hosted site with a subdirectory index 404'd at its canonical trailing-slash URL while the no-slash form worked. Missing `/` before `index.html`. |
+
+  Both filed on the board and moved to `done/`:
+  `bug-slugify-extension-unsanitized`, `bug-hosting-dir-index-missing-slash`.
+
+  **Honest note on three hosting tests I wrote and then had to rewrite:** I
+  asserted that `..` and `%2e%2e` in a hosted path would be caught by
+  `serveHostedSite`'s own segment filter. They are not -- WHATWG `URL` collapses
+  dot segments, encoded ones included, before the worker sees the path. The
+  worker's filter is real defense in depth but cannot be triggered through a
+  `Request`. The tests now pin that normalization explicitly and assert what
+  actually holds: the R2 key is always rebuilt as `sites/{box}/{site}/...`, and
+  the registry (not the path shape) is the gate. `sanitizeSitePath` is unit
+  tested directly, which is where that filter's logic genuinely lives.
+
+  `bun run verify` exits 0 on `main` after the merge. Branch deleted, tree clean.
+  **Nothing pushed to `origin`** -- local `main` is 12 commits ahead. Spawning
+  link 3 for phase 3.

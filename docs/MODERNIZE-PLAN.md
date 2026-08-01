@@ -1,5 +1,5 @@
 ---
-version: 1
+version: 2
 created: 2026-08-01
 ---
 
@@ -183,12 +183,13 @@ and the phase log must record that each was RED first.
 
 Blocks phases 3 and 4 -- do not refactor the mail path without this in place.
 
-1. **`web/` has never been typechecked.** Root `tsconfig.json` excludes it and
-   there is no `web/tsconfig.json`, so the entire React frontend is unchecked and
-   `vite build` will happily ship type errors. Add `web/tsconfig.json` (jsx:
-   react-jsx, DOM libs, `@types/react`) and wire it into `bun run typecheck`.
+1. **`web/` has never been typechecked.** Root `tsconfig.json` excludes it, and
+   while `web/tsconfig.json` DOES exist (since the initial commit), no script
+   ever invokes it -- so the entire React frontend is unchecked in practice and
+   `vite build` will happily ship type errors. Wire it into `bun run typecheck`.
    UNKNOWN QUANTITY: this may surface anywhere from 0 to dozens of errors. Fix
-   them all; that is part of this phase, not a follow-up.
+   them all; that is part of this phase, not a follow-up. Fold `test/` in too
+   (see the phase-1 handover note on the ticket).
 2. **Add Biome** (format + lint) with a config matching the existing style: tabs,
    double quotes. Run it, fix what it flags, add `bun run lint` and fold it into
    `bun run check`.
@@ -358,6 +359,16 @@ behavior-identical.
 **artifacts:** `src/api/router.ts`, `src/api/upload.ts`, `CLAUDE.md`, tests.
 
 ## Changelog
+
+### v2 -- 2026-08-01 -- author: link 2
+
+- Phase 2 item 1: "there is no `web/tsconfig.json`" -> "`web/tsconfig.json` DOES
+  exist (since the initial commit) but no script invokes it". Factual
+  correction, found while executing the phase. Nothing about the required work
+  changes -- the frontend was still effectively unchecked, and wiring it into
+  `bun run typecheck` was and is the deliverable. Also made explicit that `test/`
+  is folded in alongside it, which was only recorded on the phase ticket before.
+- No GOAL, requirement, or acceptance-criterion change.
 
 ### v1 -- 2026-08-01 -- author: user + link 0
 
