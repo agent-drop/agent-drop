@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: typecheck / lint / test / build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - run: bun install --frozen-lockfile
+
+      # No secrets are needed and none are available: this is a public repo and
+      # every value below is a placeholder. .env.example is used verbatim so the
+      # build and the deploy dry-run exercise the real placeholder-rendering path
+      # in scripts/deploy.ts, and so a var added to the code but forgotten in
+      # .env.example fails here instead of at deploy time.
+      - name: Synthesize .env from .env.example
+        run: cp .env.example .env
+
+      # Catches wrangler.toml <-> worker-configuration.d.ts drift: a binding
+      # added to the config but never regenerated into types fails right here.
+      - name: Worker types are in sync with wrangler.toml
+        run: bunx wrangler types --check
+
+      - name: Typecheck (src, web, test, tools)
+        run: bun run typecheck
+
+      - name: Lint + format check
+        run: bun run lint
+
+      - name: Test
+        run: bun test
+
+      - name: Build the SPA
+        run: bunx vite build
+
+      - name: Deploy dry-run
+        run: bun scripts/deploy.ts --dry-run --outdir .claude/temp/dryrun
