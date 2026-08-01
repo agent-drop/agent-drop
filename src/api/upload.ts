@@ -2,6 +2,7 @@ import { AwsClient } from "aws4fetch";
 import { type FinalizeDrop, resolveObjectKey } from "../lib/drops";
 import { generateId } from "../lib/id";
 import { slugifyFilename } from "../lib/normalize";
+import { readListedParts, readUploadId, renderCompleteBody } from "../lib/s3-xml";
 import type { Env } from "../types";
 import { r2ObjectUrl } from "../types";
 import type { DropContext } from "./drop";
@@ -131,12 +132,10 @@ export async function handleMultipartInit(
 		return Response.json({ error: "failed to init multipart" }, { status: 500 });
 	}
 
-	const xml = await initRes.text();
-	const uploadIdMatch = xml.match(/<UploadId>(.+?)<\/UploadId>/);
-	if (!uploadIdMatch) {
+	const uploadId = readUploadId(await initRes.text());
+	if (!uploadId) {
 		return Response.json({ error: "no upload ID" }, { status: 500 });
 	}
-	const uploadId = uploadIdMatch[1];
 
 	// Generate presigned URLs for each part
 	const totalParts = Math.ceil(body.fileSize / CHUNK_SIZE);
@@ -213,28 +212,12 @@ export async function handleMultipartComplete(
 		return Response.json({ error: "failed to list parts" }, { status: 500 });
 	}
 
-	const listXml = await listRes.text();
-	const partMatches = [
-		...listXml.matchAll(
-			/<Part>\s*<PartNumber>(\d+)<\/PartNumber>\s*.*?<ETag>(.+?)<\/ETag>\s*.*?<\/Part>/gs,
-		),
-	];
-	if (partMatches.length === 0) {
+	const parts = readListedParts(await listRes.text());
+	if (parts.length === 0) {
 		return Response.json({ error: "no parts found" }, { status: 500 });
 	}
 
-	const parts = partMatches
-		.map((m) => ({ partNumber: Number(m[1]), etag: m[2] }))
-		.sort((a, b) => a.partNumber - b.partNumber);
-
-	// Complete multipart via S3 API
-	const completeXml = [
-		"<CompleteMultipartUpload>",
-		...parts.map(
-			(p) => `<Part><PartNumber>${p.partNumber}</PartNumber><ETag>${p.etag}</ETag></Part>`,
-		),
-		"</CompleteMultipartUpload>",
-	].join("");
+	const completeXml = renderCompleteBody(parts);
 
 	const completeUrl = new URL(s3Url(env, objectKey));
 	completeUrl.searchParams.set("uploadId", body.uploadId);

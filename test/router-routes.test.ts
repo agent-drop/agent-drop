@@ -619,6 +619,52 @@ describe("upload finalize routes", () => {
 		expect(await json(res)).toEqual({ error: "uploadId required" });
 	});
 
+	test("complete round-trips R2's escaped ETags into the completion body", async () => {
+		// R2 returns ETags XML-escaped (`&quot;abc&quot;`). The completion body has
+		// to carry the SAME etag back. It goes out with literal quotes rather than
+		// `&quot;` -- both parse to the same string, and a quote needs no escaping
+		// in element content -- so this asserts the decoded value, sorted by part
+		// number, which is what R2 actually reads.
+		const env = makeEnv();
+		await seedApiKey(env, "ad_writer", { permissions: "write" });
+		await seedPendingDrop(env, { id: "drop-mp", inbox: "lisa", fileName: "big.zip" });
+
+		let sentBody = "";
+		globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+			const method = (
+				init?.method ?? (input instanceof Request ? input.method : "GET")
+			).toUpperCase();
+			if (method === "GET") {
+				return new Response(
+					`<?xml version="1.0" encoding="UTF-8"?>
+					<ListPartsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+						<Part><PartNumber>2</PartNumber><ETag>&quot;second&quot;</ETag><Size>5</Size></Part>
+						<Part><PartNumber>1</PartNumber><ETag>&quot;first&quot;</ETag><Size>5</Size></Part>
+					</ListPartsResult>`,
+				);
+			}
+			// aws4fetch signs into a Request, so the body is on it, not on `init`.
+			sentBody = input instanceof Request ? await input.clone().text() : String(init?.body ?? "");
+			return new Response("<CompleteMultipartUploadResult/>");
+		}) as unknown as typeof fetch;
+
+		const res = await send(
+			env,
+			"POST",
+			"/api/upload/complete",
+			{ Authorization: "Bearer ad_writer" },
+			{ dropId: "drop-mp", uploadId: "up-1" },
+		);
+
+		expect(res.status).toBe(200);
+		expect(sentBody).toBe(
+			"<CompleteMultipartUpload>" +
+				'<Part><PartNumber>1</PartNumber><ETag>"first"</ETag></Part>' +
+				'<Part><PartNumber>2</PartNumber><ETag>"second"</ETag></Part>' +
+				"</CompleteMultipartUpload>",
+		);
+	});
+
 	test("complete and confirm are POST-only", async () => {
 		const env = makeEnv();
 		await seedApiKey(env, "ad_writer", { permissions: "write" });
