@@ -12,6 +12,7 @@
     "types": "wrangler types --include-env false ./worker-configuration.d.ts",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tools/tsconfig.json",
     "check": "bun run types && bun run typecheck && bun test",
+    "verify": "bun run check && bunx vite build && bun scripts/deploy.ts --dry-run --outdir .claude/temp/dryrun",
     "db:migrate": "wrangler d1 execute agent-drop-db --file=migrations/0001_initial.sql"
   },
   "dependencies": {
