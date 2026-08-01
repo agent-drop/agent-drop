@@ -1,5 +1,5 @@
 import type { Env } from "../types";
-import { resolveObjectKey } from "../api/upload";
+import { resolveObjectKey } from "./drops";
 
 /**
  * Reaper for drops stuck in `pending`.
