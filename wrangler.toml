@@ -46,6 +46,21 @@ max_batch_size = 5
 max_batch_timeout = 10
 retry_delay = 2
 
+# Rate limiting. These counters are PER COLOCATION, not global -- each Cloudflare
+# location keeps its own, so the effective ceiling is roughly
+# (limit x colos reached). They throttle brute force and leaked-link abuse; they
+# are not a hard quota and must not be described as one. `period` may only be 10
+# or 60.
+[[ratelimits]]
+name = "AUTH_RATE_LIMIT"
+namespace_id = "1001"
+simple = { limit = 20, period = 60 }
+
+[[ratelimits]]
+name = "UPLOAD_RATE_LIMIT"
+namespace_id = "1002"
+simple = { limit = 60, period = 60 }
+
 [vars]
 DOMAIN = "example.com"
 BRAND = "Agent Drop"

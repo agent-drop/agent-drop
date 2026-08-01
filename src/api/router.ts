@@ -7,11 +7,42 @@ import { handleTargets, validateDropToken } from "./targets";
 import { handleUsers } from "./users";
 import { validateApiKey, isAdmin } from "../lib/auth";
 import { validateGoogleToken } from "../lib/google-auth";
-import { handlePresign, handleMultipartInit, handleMultipartComplete, handleConfirm } from "./upload";
+import { recordAuthFailure, recordDropTokenUpload } from "../lib/ratelimit";
+import {
+	handlePresign,
+	handleMultipartInit,
+	handleMultipartComplete,
+	handleConfirm,
+	type FinalizeDrop,
+} from "./upload";
 import { normalizeInbox } from "../lib/normalize";
 import { handleRules } from "./rules";
 import { handleMasks } from "./masks";
 import { handleHostPresign, handleHostFinalize, handleHostList, handleHostDelete } from "./host";
+
+// The only routes a browser ever calls cross-origin. Everything else on /api is
+// CLI- and agent-driven over an Authorization header and needs no CORS headers
+// at all -- handing them out unconditionally is how
+// `Access-Control-Allow-Origin: *` ended up advertising the admin surface to
+// every page on the internet.
+function isBrowserRoute(path: string): boolean {
+	return (
+		path === "/api/health" ||
+		path === "/api/config" ||
+		path.startsWith("/api/drop/") ||
+		path.startsWith("/api/upload/")
+	);
+}
+
+function corsHeadersFor(env: Env, path: string): Record<string, string> {
+	if (!isBrowserRoute(path)) return {};
+	return {
+		// The real origin, not a wildcard: credentials travel on these routes.
+		"Access-Control-Allow-Origin": `https://${env.DOMAIN}`,
+		"Access-Control-Allow-Methods": "GET, POST, PATCH, DELETE, OPTIONS",
+		"Access-Control-Allow-Headers": "Authorization, Content-Type",
+	};
+}
 
 export async function handleAPI(
 	request: Request,
@@ -22,14 +53,25 @@ export async function handleAPI(
 	const path = url.pathname;
 	const method = request.method;
 
-	const corsHeaders = {
-		"Access-Control-Allow-Origin": "*",
-		"Access-Control-Allow-Methods": "GET, POST, PATCH, DELETE, OPTIONS",
-		"Access-Control-Allow-Headers": "Authorization, Content-Type",
-	};
+	const corsHeaders = corsHeadersFor(env, path);
 
 	if (method === "OPTIONS") {
 		return new Response(null, { headers: corsHeaders });
+	}
+
+	// Every rejected *credential* burns a token from this client's failure bucket;
+	// once it is empty the caller gets 429 instead of another guess. Authorization
+	// failures on a valid credential (wrong scope, missing permission) are NOT
+	// counted -- that is a misconfigured client, not a brute-force attempt, and
+	// throttling it would punish the legitimate agent.
+	async function denyCredential(status: number, body: Record<string, unknown>): Promise<Response> {
+		if (!(await recordAuthFailure(env, request))) {
+			return Response.json(
+				{ error: "too many failed authentication attempts" },
+				{ status: 429, headers: corsHeaders },
+			);
+		}
+		return Response.json(body, { status, headers: corsHeaders });
 	}
 
 	if (path === "/api/health") {
@@ -45,8 +87,8 @@ export async function handleAPI(
 
 	// Admin-only routes
 	if (path.startsWith("/api/keys") || path.startsWith("/api/targets") || path.startsWith("/api/users") || path.startsWith("/api/rules") || path.startsWith("/api/deliveries") || path.startsWith("/api/masks")) {
-		if (!isAdmin(request, env)) {
-			return Response.json({ error: "admin required" }, { status: 403, headers: corsHeaders });
+		if (!(await isAdmin(request, env))) {
+			return denyCredential(403, { error: "admin required" });
 		}
 		const handler = path.startsWith("/api/keys")
 			? handleKeys
@@ -64,11 +106,11 @@ export async function handleAPI(
 
 	// GET /api/drops - list ALL drops across all inboxes (admin only)
 	if (path === "/api/drops" && method === "GET") {
-		if (!isAdmin(request, env)) {
+		if (!(await isAdmin(request, env))) {
 			// Also allow with API key that has admin permissions
 			const auth = await validateApiKey(env, request);
 			if (!auth.valid || auth.permissions !== "admin") {
-				return Response.json({ error: "admin required" }, { status: 403, headers: corsHeaders });
+				return denyCredential(403, { error: "admin required" });
 			}
 		}
 		const limit = Math.min(parseInt(url.searchParams.get("limit") || "50"), 200);
@@ -92,10 +134,10 @@ export async function handleAPI(
 
 	// GET /api/boxes - list all unique inboxes with stats
 	if (path === "/api/boxes" && method === "GET") {
-		if (!isAdmin(request, env)) {
+		if (!(await isAdmin(request, env))) {
 			const auth = await validateApiKey(env, request);
 			if (!auth.valid || auth.permissions !== "admin") {
-				return Response.json({ error: "admin required" }, { status: 403, headers: corsHeaders });
+				return denyCredential(403, { error: "admin required" });
 			}
 		}
 
@@ -142,10 +184,19 @@ export async function handleAPI(
 		const authParam = url.searchParams.get("auth");
 		if (authParam) {
 			const tokenAuth = await validateDropToken(env, authParam);
-			if (tokenAuth.valid && tokenAuth.inbox === inboxName) {
-				return { ctx: { authMethod: "drop_token" } };
+			if (!tokenAuth.valid || tokenAuth.inbox !== inboxName) {
+				return denyCredential(401, { error: "invalid or expired token" });
 			}
-			return Response.json({ error: "invalid or expired token" }, { status: 401, headers: corsHeaders });
+			// A drop link is a bearer URL pasted into chats and emails, so it leaks
+			// by design. Cap how fast one can be spent, keyed by the token itself so
+			// the cap follows the link rather than the uploader's IP.
+			if (!(await recordDropTokenUpload(env, authParam))) {
+				return Response.json(
+					{ error: "rate limit exceeded for this drop link" },
+					{ status: 429, headers: corsHeaders },
+				);
+			}
+			return { ctx: { authMethod: "drop_token" } };
 		}
 
 		const authHeader = request.headers.get("Authorization") || "";
@@ -156,17 +207,22 @@ export async function handleAPI(
 				return { ctx: { authMethod: "api_key", authKeyName: `google:${googleAuth.email}` } };
 			}
 			if (googleAuth.denied) {
+				// A real Google identity that is not on the allowlist: authenticated,
+				// just not authorized. Not a guess, so it does not burn a token.
 				return Response.json({ error: "not authorized", email: googleAuth.email }, { status: 403, headers: corsHeaders });
 			}
-			return Response.json({ error: "invalid google token" }, { status: 401, headers: corsHeaders });
+			return denyCredential(401, { error: "invalid google token" });
 		}
 
 		const auth = await validateApiKey(env, request);
 		if (!auth.valid) {
-			return Response.json({ error: "invalid api key" }, { status: 401, headers: corsHeaders });
+			return denyCredential(401, { error: "invalid api key" });
 		}
 		if (auth.permissions !== "write" && auth.permissions !== "admin") {
 			return Response.json({ error: "write permission required" }, { status: 403, headers: corsHeaders });
+		}
+		if (auth.inboxScope && auth.inboxScope !== inboxName) {
+			return Response.json({ error: "inbox not in scope" }, { status: 403, headers: corsHeaders });
 		}
 		return { ctx: { authMethod: "api_key", authKeyName: auth.keyName || undefined } };
 	}
@@ -206,15 +262,45 @@ export async function handleAPI(
 		return res;
 	}
 
-	if (path === "/api/upload/complete" && method === "POST") {
-		// Complete doesn't need inbox-level auth - the dropId was already authenticated at presign
-		const res = await handleMultipartComplete(request, env);
-		addHeaders(res, corsHeaders);
-		return res;
+	// Finalizing an upload used to run with NO auth at all: the router assumed
+	// "the dropId was already authenticated at presign", but nothing re-checked
+	// the caller, so anyone who learned a drop id could flip it to `completed` and
+	// publish it to every agent reading that inbox. The drop row is the authority
+	// on which inbox is being written to -- recover it and re-run the same write
+	// auth the presign required.
+	async function authenticateFinalize(): Promise<
+		{ drop: FinalizeDrop; body: { uploadId?: string } } | Response
+	> {
+		let body: { dropId?: string; uploadId?: string };
+		try {
+			body = (await request.json()) as { dropId?: string; uploadId?: string };
+		} catch {
+			return Response.json({ error: "invalid JSON body" }, { status: 400, headers: corsHeaders });
+		}
+		if (!body?.dropId) {
+			return Response.json({ error: "dropId required" }, { status: 400, headers: corsHeaders });
+		}
+
+		const drop = await env.DB.prepare(
+			"SELECT id, inbox, r2_prefix, object_key, subject, status FROM drops WHERE id = ?",
+		)
+			.bind(body.dropId)
+			.first<FinalizeDrop>();
+		if (!drop) {
+			return Response.json({ error: "drop not found" }, { status: 404, headers: corsHeaders });
+		}
+
+		const authResult = await authenticateWrite(drop.inbox);
+		if (authResult instanceof Response) return authResult;
+		return { drop, body };
 	}
 
-	if (path === "/api/upload/confirm" && method === "POST") {
-		const res = await handleConfirm(request, env);
+	if ((path === "/api/upload/complete" || path === "/api/upload/confirm") && method === "POST") {
+		const finalize = await authenticateFinalize();
+		if (finalize instanceof Response) { addHeaders(finalize, corsHeaders); return finalize; }
+		const res = path === "/api/upload/complete"
+			? await handleMultipartComplete(env, finalize.drop, finalize.body)
+			: await handleConfirm(env, finalize.drop);
 		addHeaders(res, corsHeaders);
 		return res;
 	}
@@ -222,7 +308,7 @@ export async function handleAPI(
 	// All other routes require API key
 	const auth = await validateApiKey(env, request);
 	if (!auth.valid) {
-		return Response.json({ error: "invalid api key" }, { status: 401, headers: corsHeaders });
+		return denyCredential(401, { error: "invalid api key" });
 	}
 
 	const inboxMatch = path.match(/^\/api\/inbox\/([^/]+)(.*)$/);
