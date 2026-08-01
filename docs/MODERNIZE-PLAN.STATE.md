@@ -3,9 +3,9 @@ chain_id: modernize-20260801-161212-5998
 plan_file: /Users/jonas/projects/agent-drop/docs/MODERNIZE-PLAN.md
 plan_version: 4
 status: in_progress
-current_phase: 5
-last_updated: 2026-08-01T15:40:00Z
-link_count: 4
+current_phase: 6
+last_updated: 2026-08-01T17:20:00Z
+link_count: 5
 ---
 
 # Agent Drop modernization chain state
@@ -52,11 +52,15 @@ link_count: 4
   - [x] 4f. BONUS (found in-phase): `vite.config.ts` + `scripts/` were in no
     tsconfig; folded into `bun run typecheck`
   - [x] 4g. BONUS (found in-phase): `db:migrate` was pinned to `0001_initial.sql`
-- [ ] 5. Platform optimizations
-  - [ ] 5a. `ctx.waitUntil` on `last_used_at`
-  - [ ] 5b. R2 event notifications -> retire confirm handshake
-  - [ ] 5c. Cron reaper for stale `pending` drops
-  - [ ] 5d. D1 Sessions API on read paths
+- [x] 5. Platform optimizations (link 5, local `main` `8cbf743`)
+  - [x] 5a. `ctx.waitUntil` on `last_used_at`
+  - [x] 5b. R2 event notifications -> confirm handshake now optional + idempotent
+  - [x] 5c. Cron reaper for stale `pending` drops
+  - [x] 5d. D1 Sessions API on read paths
+  - [x] 5e. `scheduled` exercised against the live local runtime, both branches;
+    the R2-notification queue consumer could NOT be (see log)
+  - [x] 5f. `wrangler r2 bucket notification` + `queues create` documented in
+    `CLAUDE.md` (LOCAL ONLY -- the file is untracked)
 - [ ] 6. Structural cleanup + final docs
   - [ ] 6a. Router rewrite (tests FIRST, behavior-identical)
   - [ ] 6b. Real XML parse in upload.ts
@@ -131,6 +135,30 @@ link_count: 4
 - `test/deploy-identity.test.ts`, `test/toml.d.ts` -- new (phase 4)
 - `CLAUDE.md` -- "Dev loop & Deployment" section rewritten (phase 4, LOCAL ONLY
   -- the file is untracked)
+- `src/lib/r2-events.ts` -- new; R2 object-create notification consumer,
+  `parseUploadKey`, `processR2Event`, `processR2EventBatch` (phase 5)
+- `src/lib/reaper.ts` -- new; `reapPendingDrops` + `runScheduled`, the stale
+  `pending` sweep (phase 5)
+- `src/lib/auth.ts` -- `validateApiKey` takes an optional `ExecutionContext` and
+  defers the `last_used_at` write through it (phase 5)
+- `src/index.ts` -- `scheduled` export; `queue` dispatches on `batch.queue`
+  (phase 5)
+- `src/api/upload.ts` -- `handleConfirm` is idempotent; already-completed is a
+  200, not a 404 (phase 5)
+- `src/api/inbox.ts`, `src/api/router.ts`, `src/lib/hosting.ts` -- read paths run
+  in a `first-unconstrained` D1 session (phase 5)
+- `wrangler.toml` -- second `[[queues.consumers]]` (`agent-drop-r2-events`),
+  `[triggers] crons = ["17 * * * *"]` (phase 5)
+- `test/helpers/d1.ts` -- `withSession` on the fake D1, recording the constraint
+  each caller asked for (phase 5)
+- `test/helpers/env.ts` -- `gateStatement()` (holds a statement so deferral is
+  observable), `makeBucket().head` + `heads` log, `seedPendingDrop({createdAt})`
+  (phase 5)
+- `test/last-used.test.ts`, `test/r2-events.test.ts`, `test/reaper.test.ts`,
+  `test/d1-sessions.test.ts` (phase 5)
+- `CLAUDE.md` -- Drop Lifecycle rewritten (three completion paths), R2 event
+  notification + `queues create` + cron reproduction commands, `lib/` listing
+  (phase 5, LOCAL ONLY -- the file is untracked)
 
 ## Decisions
 
@@ -233,6 +261,46 @@ link_count: 4
   directory now also holds the Worker bundle and a `.dev.vars`, so anything
   falling back to it would publish both as public assets.
 
+- 2026-08-01 [link 5]: **The reaper rescues, it does not only delete.** The PLAN
+  said "`pending` older than 24h with no R2 object -> delete the row". It is
+  silent on the case where the object IS there, which is exactly what a lost
+  notification looks like -- and deleting that row destroys a drop whose bytes
+  are sitting in the bucket. The reaper therefore asks R2 first: object present
+  -> `completed`, object absent -> deleted, key unresolvable -> left alone and
+  counted as `skipped`. Superset of what the PLAN asked for, never less.
+- 2026-08-01 [link 5]: **`/api/upload/confirm` had to become idempotent, and that
+  is a (sanctioned) response-shape change.** It answered `404 {"error":"drop not
+  found or already confirmed"}` when nothing changed. With R2 notifications
+  running, the notification usually wins the race, so that 404 would have become
+  the NORMAL outcome of a healthy upload and the SPA would have reported a
+  failure on every successful drop. It now returns
+  `200 {"confirmed":true,"dropId":...,"alreadyCompleted":boolean}`. The PLAN
+  explicitly asked for "keep it as a back-compat no-op", so this is the ask, not
+  drift. A genuinely unknown drop id is still a 404 (the router's row lookup),
+  and a row in neither state is a 409.
+- 2026-08-01 [link 5]: **The R2 event consumer matches on the recorded
+  `object_key`, not just the drop id.** The key comes from R2 itself, so parsing
+  `drops/{box}/{id}/uploads/{file}` out of it is server-side state coming home,
+  not user input -- but pinning it to the row's own `object_key` (phase 1's
+  migration 0008) means a stray object under a drop's prefix still cannot
+  complete it. Pre-0008 rows carry no key and match on id + inbox alone.
+- 2026-08-01 [link 5]: **No producer binding for `agent-drop-r2-events`.** R2 is
+  the producer; the Worker only consumes. Adding a producer binding would have
+  made the queue writable by our own code for no reason.
+- 2026-08-01 [link 5]: **Read paths use `first-unconstrained`, not
+  `first-primary`.** `first-primary` on a handler that runs ONE query is a
+  session with no benefit -- the first query is the only query and it goes to the
+  primary either way. The trade taken: an inbox listing can miss a drop written
+  microseconds earlier by a *different* request, bounded by replica lag. D1's
+  cross-request read-your-writes guarantee needs a bookmark the client would have
+  to carry, which would change the public API surface the PLAN forbids changing.
+  Write paths were left with no session at all rather than given
+  `first-primary` -- same routing, less ceremony.
+- 2026-08-01 [link 5]: **`last_used_at` failures are swallowed, deliberately.** A
+  transient D1 error on a bookkeeping write must not fail an otherwise-valid
+  request, and an unhandled rejection inside `waitUntil` is just noise. Cost of a
+  lost one is a stale timestamp. Pinned by a test.
+
 ## Open questions / blockers
 
 - **DEPLOY GATE (phase 1):** migration `0008_drop_object_key.sql` MUST be applied
@@ -286,6 +354,36 @@ link_count: 4
   exist before. Do not `cp -r` the build output anywhere public.
 - **NEW (phase 4):** the local dev D1 is empty until seeded --
   `bun run db:migrate:local`. State persists under `web/.wrangler/state`.
+- **DEPLOY GATE (phase 5), two new out-of-band steps.** The code is inert without
+  them:
+  1. `wrangler queues create agent-drop-r2-events` -- the consumer is declared in
+     `wrangler.toml`, so a deploy before the queue exists will fail.
+  2. `wrangler r2 bucket notification create agent-drop-storage --event-type
+     object-create --queue agent-drop-r2-events --prefix "drops/"` -- bucket
+     config, not `wrangler.toml`, and lost if the bucket is ever recreated.
+     Documented in CLAUDE.md next to the lifecycle/CORS commands.
+  The cron trigger needs nothing extra; `bun run deploy` registers it. Until step
+  2 lands, `/api/upload/confirm` still completes drops exactly as before and the
+  reaper is the backstop -- so a partial rollout degrades, it does not break.
+- **The R2-event queue consumer was NOT exercised against the live local
+  runtime**, and this is a real gap, not a formality. Miniflare does not emulate
+  R2 bucket event notifications, and neither `wrangler dev` nor the Vite plugin
+  exposes a queue-handler endpoint the way it exposes
+  `/cdn-cgi/handler/scheduled` (probed: `/cdn-cgi/handler/queue` and
+  `/cdn-cgi/handler/queues` both fail). The consumer's logic and the entry
+  point's dispatch-by-queue-name are covered by unit tests, but the first real
+  R2 -> queue -> worker delivery happens after deploy. Watch the first presigned
+  upload after the notification rule is created.
+- **NEW (phase 5), for whoever ships this:** the `drops/` notification prefix is
+  as narrow as R2 filters go (prefix/suffix only), so the queue also carries
+  every inbound email's `raw.eml` and `attachments/` writes. They are filtered
+  out in code, not at the bucket, so the queue's message volume is higher than
+  the upload rate. Harmless, but it is what the invoice will show.
+- **`src/lib/reaper.ts` imports `resolveObjectKey` from `src/api/upload.ts`** --
+  `lib/` reaching into `api/`, the wrong direction. No cycle (nothing in `api/`
+  imports the reaper) and the function is pure, so it works, but it is a
+  candidate for phase 6's structural cleanup: `resolveObjectKey` + `FinalizeDrop`
+  belong in a `lib/drops.ts`.
 - Phase 6d: deleting the SES fallback is a user decision, not the chain's.
 - Phase 6 doc sweep: CLAUDE.md's send-path and `lib/` sections were corrected in
   phase 3 because they became actively wrong the moment the send path changed.
@@ -563,3 +661,77 @@ link_count: 4
 
   **Nothing pushed to `origin`** -- local `main` is 21 commits ahead. Spawning
   link 5 for phase 5.
+- 2026-08-01T16:00:00Z [link 5] phase 5 started on branch
+  `chain/p5-platform-opt` from `main` `95f55af`. Tree clean, `bun run verify`
+  green on `main` at 221 tests. Working the four PLAN items in order, plus a
+  live-runtime exercise of the two new handlers (`scheduled`, the R2-event queue
+  consumer) as the phase-4 handover asks.
+- 2026-08-01T17:20:00Z [link 5] phase 5 complete. Branch `chain/p5-platform-opt`,
+  merged to **local `main` as `8cbf743`**. Tests 221 -> **267 pass, 0 fail**.
+  `bun run verify` exits 0. All four PLAN items shipped; nothing deferred to
+  phase 6.
+
+  | Item | Outcome |
+  |---|---|
+  | 5a `ctx.waitUntil` on `last_used_at` | Every authenticated request used to carry a serialized D1 write before it could answer. Deferred, and the failure swallowed on purpose. |
+  | 5b R2 event notifications | New `agent-drop-r2-events` consumer flips `pending` -> `completed` when the bucket reports the object. `/api/upload/confirm` survives as an idempotent no-op. |
+  | 5c Cron reaper | `[triggers] crons = ["17 * * * *"]`, `scheduled` handler, `src/lib/reaper.ts`. |
+  | 5d D1 Sessions | `first-unconstrained` on `/api/inbox/*`, `/api/drops`, `/api/boxes`, hosted-site lookup. |
+
+  **The dev loop earned its keep, exactly as the phase-4 handover predicted.**
+  With `bun run dev` (one process, workerd, live D1/R2 bindings) and
+  `curl "localhost:5173/cdn-cgi/handler/scheduled?cron=17+*+*+*+*"`, both reaper
+  branches were driven against real bindings, not doubles:
+
+  - Presigned a drop through the real API, backdated `created_at` in the local
+    D1, triggered the cron. Worker logged
+    `reaper: scanned 1 stale pending drops -- completed 0, deleted 1, skipped 0`
+    and the row was gone. The unrelated `completed` drop was untouched.
+  - Presigned a second drop, put its object into local R2 with
+    `wrangler r2 object put --local`, backdated, triggered. Worker logged
+    `completed 1, deleted 0` and the row came back as `completed`. The rescue
+    branch is not theory.
+
+  Three more things were checked live because a failure in any of them would
+  only have shown up in production:
+
+  - **`withSession` works on miniflare's D1.** `/api/inbox/lisa`, `/api/boxes`
+    and `/api/drops` all 200 against workerd. Had it been unimplemented locally,
+    every read path would 500 in dev and the unit tests (which stub D1) would
+    never have said so.
+  - **`/api/upload/confirm` is idempotent on the real runtime**: first call
+    `{"confirmed":true,"alreadyCompleted":false}`, second call the same with
+    `alreadyCompleted:true`, both 200. Under the old code the second was a 404.
+  - **The deferred `last_used_at` write really lands** in workerd's `waitUntil`,
+    not just in the test's `settle()`.
+
+  **What could NOT be exercised live, stated plainly:** the R2 -> queue ->
+  consumer delivery itself. Miniflare does not emulate bucket event
+  notifications, and there is no local queue-handler endpoint (`/cdn-cgi/handler/
+  queue` and `/queues` were both probed and both fail). The consumer's logic and
+  the entry point's dispatch-by-queue-name are unit-tested; the first genuine
+  delivery happens after deploy, once the notification rule exists. Logged as an
+  open item above.
+
+  **Tests are mutation-checked**, so "267 pass" is not decoration. Four seeded
+  defects, one at a time: dropping the `object_key` guard from `processR2Event`
+  fails 1; inverting the reaper's object-present branch fails 5; switching the
+  read paths from `first-unconstrained` to `first-primary` fails 5; making the
+  entry point ignore `batch.queue` fails 1.
+
+  One test-harness finding worth recording: the FakeD1 runs SQLite
+  *synchronously* inside an `async` method, so its writes land before the
+  returned promise ever yields -- which makes an inline `await` look deferred.
+  "The response came back before the write landed" was untestable until
+  `gateStatement()` was added to hold a statement open. The first version of the
+  5a tests passed against the unfixed code for that reason; they were rewritten,
+  not relaxed.
+
+  **PLAN not amended.** Nothing in phase 5 turned out to be factually wrong the
+  way phases 3 and 4 did. The two places the implementation goes beyond the
+  written item -- the reaper rescuing an object that exists instead of deleting
+  its row, and `/api/upload/confirm` returning 200 where it used to 404 -- are a
+  superset of the ask and the PLAN's own words respectively, recorded under
+  Decisions rather than as changes to the contract. Still `plan_version: 4`.
+
+  **Nothing pushed to `origin`.** Spawning link 6 for phase 6.
