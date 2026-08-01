@@ -107,6 +107,14 @@ function leafText(mime: string, text: string): MimeEntity {
 	};
 }
 
+// Strip the angle brackets off a Content-ID. postal-mime hands back the RAW
+// header value ("<logo123>"), while both our MIME renderer and the Email Sending
+// builder want the bare token -- wrapping an already-wrapped id yields
+// "<<logo123>>", which no client matches against `cid:logo123`.
+export function bareContentId(cid: string): string {
+	return cid.replace(/^<|>$/g, "").trim();
+}
+
 function leafAttachment(a: MimeAttachment): MimeEntity {
 	const name = a.filename.replace(/"/g, "");
 	const disp = a.inline ? "inline" : "attachment";
@@ -114,7 +122,7 @@ function leafAttachment(a: MimeAttachment): MimeEntity {
 		"Content-Transfer-Encoding: base64",
 		`Content-Disposition: ${disp}; filename="${name}"`,
 	];
-	if (a.cid) headers.push(`Content-ID: <${a.cid}>`);
+	if (a.cid) headers.push(`Content-ID: <${bareContentId(a.cid)}>`);
 	return {
 		ct: `${a.contentType}; name="${name}"`,
 		headers,
@@ -146,8 +154,11 @@ export function buildRawEmail(opts: {
 }): string {
 	const toList = (Array.isArray(opts.to) ? opts.to : [opts.to]).filter(Boolean);
 	const ccList = (Array.isArray(opts.cc) ? opts.cc : opts.cc ? [opts.cc] : []).filter(Boolean);
-	// Message-ID domain tracks the sending domain (parsed from the From address).
-	const fromDomain = (opts.from.match(/@([^\s>]+)/)?.[1] || "localhost").trim();
+	// Message-ID domain tracks the SENDING domain, which is the address inside the
+	// angle brackets -- a display name may itself contain an @ (forwards read
+	// `"sender@example.com (via lisa@frst.dev)" <lisa@frst.dev>`), so matching the
+	// first @ in the whole string picks the wrong domain.
+	const fromDomain = (bareAddr(opts.from).match(/@([^\s>]+)/)?.[1] || "localhost").trim();
 	const messageId = `<${crypto.randomUUID()}@${fromDomain}>`;
 	const date = new Date().toUTCString();
 
