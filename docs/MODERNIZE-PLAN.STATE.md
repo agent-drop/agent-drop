@@ -2,10 +2,10 @@
 chain_id: modernize-20260801-161212-5998
 plan_file: /Users/jonas/projects/agent-drop/docs/MODERNIZE-PLAN.md
 plan_version: 4
-status: in_progress
+status: completed
 current_phase: 6
-last_updated: 2026-08-01T17:20:00Z
-link_count: 5
+last_updated: 2026-08-01T18:55:00Z
+link_count: 6
 ---
 
 # Agent Drop modernization chain state
@@ -61,7 +61,7 @@ link_count: 5
     the R2-notification queue consumer could NOT be (see log)
   - [x] 5f. `wrangler r2 bucket notification` + `queues create` documented in
     `CLAUDE.md` (LOCAL ONLY -- the file is untracked)
-- [x] 6. Structural cleanup + final docs (link 6, local `main` `PENDING`)
+- [x] 6. Structural cleanup + final docs (link 6, local `main` `a42e85d`)
   - [x] 6a. Router rewrite (tests FIRST, behavior-identical)
     - [x] 6a-i. Route-level tests GREEN against the CURRENT router
       (`test/router-routes.test.ts`, 78 + 6 quirk pins, commits `43519ab`,
@@ -828,7 +828,8 @@ link_count: 5
 
   **Nothing pushed to `origin`.** Spawning link 6 for phase 6.
 - 2026-08-01T18:40:00Z [link 6] phase 6 complete -- **and the chain with it.**
-  Branch `chain/p6-cleanup`, seven commits, merged to **local `main`**.
+  Branch `chain/p6-cleanup`, seven commits, merged to **local `main` as
+  `a42e85d`** (phase commits `43519ab`..`73aa5b6`).
   Tests 267 -> **413 pass, 0 fail**. `bun run verify` exits 0.
 
   **6a, the riskiest item in the chain, done in the order the PLAN demanded.**
