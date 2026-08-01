@@ -1,6 +1,13 @@
 import { AwsClient } from "aws4fetch";
+import {
+	type ResolvedAttachment,
+	toEmailAttachment,
+	toRecipients,
+	validateHeaders,
+	validateRecipients,
+} from "../lib/email-builder";
 import { generateId } from "../lib/id";
-import { buildRawEmail, sendRawViaBinding, type MimeAttachment } from "../lib/relay";
+import { renderBuilderPreview } from "../lib/mime";
 import { slugifyFilename } from "../lib/normalize";
 import { r2ObjectUrl } from "../types";
 import type { Env } from "../types";
@@ -15,15 +22,13 @@ interface AttachmentInput {
 	cid?: string;
 }
 
-// base64-encode raw bytes
-function bufToBase64(buf: ArrayBuffer): string {
-	const bytes = new Uint8Array(buf);
-	let binary = "";
-	const chunk = 0x8000;
-	for (let i = 0; i < bytes.length; i += chunk) {
-		binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
-	}
-	return btoa(binary);
+// Decode base64 into bytes. The Email Sending binding treats a string `content`
+// as RAW content, so a base64 string would arrive as base64 text in the mail.
+function base64ToBytes(encoded: string): ArrayBuffer {
+	const binary = atob(encoded);
+	const bytes = new Uint8Array(binary.length);
+	for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+	return bytes.buffer;
 }
 
 function basename(p: string): string {
@@ -37,15 +42,15 @@ function asList(v: string | string[] | undefined): string[] {
 	return (Array.isArray(v) ? v : [v]).map((s) => String(s).trim()).filter(Boolean);
 }
 
-// Resolve an attachment source (base64 / R2 / URL) into MIME-ready bytes
-async function resolveAttachment(env: Env, a: AttachmentInput): Promise<MimeAttachment> {
+// Resolve an attachment source (base64 / R2 / URL) into bytes
+async function resolveAttachment(env: Env, a: AttachmentInput): Promise<ResolvedAttachment> {
 	const inline = !!a.inline || !!a.cid;
 
 	if (a.dataBase64) {
 		return {
 			filename: a.filename || "attachment",
 			contentType: a.contentType || "application/octet-stream",
-			contentBase64: a.dataBase64,
+			content: base64ToBytes(a.dataBase64),
 			inline,
 			cid: a.cid,
 		};
@@ -54,11 +59,10 @@ async function resolveAttachment(env: Env, a: AttachmentInput): Promise<MimeAtta
 	if (a.r2Key) {
 		const obj = await env.BUCKET.get(a.r2Key);
 		if (!obj) throw new Error(`attachment not found in R2: ${a.r2Key}`);
-		const buf = await obj.arrayBuffer();
 		return {
 			filename: a.filename || obj.customMetadata?.originalFilename || basename(a.r2Key),
 			contentType: a.contentType || obj.httpMetadata?.contentType || "application/octet-stream",
-			contentBase64: bufToBase64(buf),
+			content: await obj.arrayBuffer(),
 			inline,
 			cid: a.cid,
 		};
@@ -67,12 +71,11 @@ async function resolveAttachment(env: Env, a: AttachmentInput): Promise<MimeAtta
 	if (a.url) {
 		const r = await fetch(a.url);
 		if (!r.ok) throw new Error(`failed to fetch attachment url (${r.status}): ${a.url}`);
-		const buf = await r.arrayBuffer();
 		return {
 			filename: a.filename || basename(a.url),
 			contentType:
 				a.contentType || r.headers.get("content-type")?.split(";")[0] || "application/octet-stream",
-			contentBase64: bufToBase64(buf),
+			content: await r.arrayBuffer(),
 			inline,
 			cid: a.cid,
 		};
@@ -97,17 +100,17 @@ interface EmailBody {
 }
 
 interface PreparedEmail {
-	raw: string;
-	from: string;
+	/** Exactly what goes to env.EMAIL.send(). */
+	builder: EmailMessageBuilder;
+	/** The recipient lists as supplied, for the outbound log. */
 	to: string[];
 	cc: string[];
 	bcc: string[];
-	subject: string;
-	attachments: MimeAttachment[];
 }
 
-// Shared by /api/send and /api/compose: validate, resolve attachments, assemble MIME.
-// Returns a 4xx Response on validation/resolution failure, else the prepared email.
+// Shared by /api/send and /api/compose: validate, resolve attachments, build the
+// EmailMessageBuilder payload. Returns a 4xx Response on validation/resolution
+// failure, else the prepared email.
 async function prepareEmail(
 	env: Env,
 	inbox: string,
@@ -117,11 +120,9 @@ async function prepareEmail(
 	const cc = asList(body.cc);
 	const bcc = asList(body.bcc);
 
-	if (to.length === 0 && cc.length === 0 && bcc.length === 0) {
-		return Response.json(
-			{ error: "at least one recipient (to/cc/bcc) is required" },
-			{ status: 400 },
-		);
+	const recipientError = validateRecipients(to, cc, bcc);
+	if (recipientError) {
+		return Response.json({ error: recipientError }, { status: 400 });
 	}
 	if (!body.subject) {
 		return Response.json({ error: "subject is required" }, { status: 400 });
@@ -132,11 +133,9 @@ async function prepareEmail(
 
 	// From address: optional +topic, optional display name
 	const addr = `${inbox}${body.topic ? `+${body.topic}` : ""}@${env.DOMAIN}`;
-	const from = body.fromName ? `"${body.fromName.replace(/"/g, "")}" <${addr}>` : addr;
 
 	// Threading: resolve inReplyTo (a drop id -> its message-id, or a raw <message-id>)
 	let inReplyTo: string | undefined;
-	let references: string | undefined;
 	if (body.inReplyTo) {
 		if (body.inReplyTo.startsWith("<")) {
 			inReplyTo = body.inReplyTo;
@@ -153,13 +152,12 @@ async function prepareEmail(
 				}
 			}
 		}
-		references = inReplyTo;
 	}
 
 	// Resolve attachment sources into bytes
-	let attachments: MimeAttachment[];
+	let resolved: ResolvedAttachment[];
 	try {
-		attachments = await Promise.all((body.attachments || []).map((a) => resolveAttachment(env, a)));
+		resolved = await Promise.all((body.attachments || []).map((a) => resolveAttachment(env, a)));
 	} catch (err) {
 		return Response.json(
 			{ error: err instanceof Error ? err.message : "attachment resolution failed" },
@@ -167,30 +165,48 @@ async function prepareEmail(
 		);
 	}
 
-	const raw = buildRawEmail({
-		from,
-		to,
-		cc,
-		replyTo: body.replyTo,
-		subject: body.subject,
-		textBody: body.text,
-		htmlBody: body.html,
-		inReplyTo,
-		references,
-		attachments,
-	});
+	// Only non-empty lists go in: `to: []` is not a recipient, and a cc-only or
+	// bcc-only send is legal. validateRecipients above guarantees at least one of
+	// the three survives, which is what the cast asserts.
+	const destinations = {
+		...(to.length ? { to: toRecipients(to) } : {}),
+		...(cc.length ? { cc: toRecipients(cc) } : {}),
+		...(bcc.length ? { bcc: toRecipients(bcc) } : {}),
+	} as EmailDestinations;
 
-	return { raw, from, to, cc, bcc, subject: body.subject, attachments };
+	const builder: EmailMessageBuilder = {
+		from: body.fromName ? { name: body.fromName.replace(/"/g, ""), email: addr } : addr,
+		subject: body.subject,
+		...destinations,
+	};
+	if (body.replyTo) builder.replyTo = body.replyTo;
+	if (body.text) builder.text = body.text;
+	if (body.html) builder.html = body.html;
+	if (resolved.length) builder.attachments = resolved.map(toEmailAttachment);
+	// Message-ID and Date are platform-controlled; only threading headers are ours.
+	if (inReplyTo) builder.headers = { "In-Reply-To": inReplyTo, References: inReplyTo };
+
+	const headerError = validateHeaders(builder.headers || {});
+	if (headerError) {
+		return Response.json({ error: headerError }, { status: 400 });
+	}
+
+	return { builder, to, cc, bcc };
 }
 
-// POST /api/compose/:inbox - assemble the email exactly as /api/send would,
-// but return the raw RFC822 .eml instead of sending. Same code path, no SES.
+// POST /api/compose/:inbox - build the email exactly as /api/send would, then
+// render that same builder payload as raw RFC822 instead of sending it.
+//
+// The preview is rendered locally, so it approximates rather than reproduces
+// what the platform puts on the wire (Message-ID, Date and the exact MIME
+// nesting are the platform's). What it does guarantee is field parity with the
+// send path: it is built from the builder, not from the request body.
 export async function handleCompose(request: Request, env: Env, inbox: string): Promise<Response> {
 	const body = (await request.json()) as EmailBody;
 	const prepared = await prepareEmail(env, inbox, body);
 	if (prepared instanceof Response) return prepared;
 
-	return new Response(prepared.raw, {
+	return new Response(renderBuilderPreview(prepared.builder), {
 		headers: {
 			"Content-Type": "message/rfc822; charset=utf-8",
 			"Content-Disposition": 'inline; filename="composed.eml"',
@@ -204,8 +220,10 @@ export async function handleSend(request: Request, env: Env, inbox: string): Pro
 	const prepared = await prepareEmail(env, inbox, body);
 	if (prepared instanceof Response) return prepared;
 
-	const { raw, from, to, cc, bcc } = prepared;
-	const messageId = await sendRawViaBinding(env, raw, from, { to, cc, bcc });
+	const { builder, to, cc, bcc } = prepared;
+	// One send for the whole recipient list: the builder carries to/cc/bcc, so
+	// Bcc stays off the visible headers without a message per recipient.
+	const { messageId } = await env.EMAIL.send(builder);
 
 	// Opt-in cleanup: delete the outbound/temp R2 objects we just consumed
 	if (body.deleteAfterSend) {
@@ -252,7 +270,9 @@ export async function handleSendPresign(
 	url.searchParams.set("X-Amz-Expires", "3600");
 	const signed = await aws.sign(
 		new Request(url, { method: "PUT", headers: { "Content-Type": ct } }),
-		{ aws: { signQuery: true } },
+		{
+			aws: { signQuery: true },
+		},
 	);
 
 	return Response.json({ uploadUrl: signed.url, r2Key, fileName: slugged });
