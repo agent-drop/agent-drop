@@ -1,7 +1,9 @@
 import { EmailMessage } from "cloudflare:email";
 import { AwsClient } from "aws4fetch";
 import type { Env } from "../types";
+import { toEmailAttachment } from "./email-builder";
 import { generateId } from "./id";
+import { bareAddr, buildRawEmail } from "./mime";
 
 // Encode sender email for use in relay address
 // sender@example.com -> sender_at_example.com
@@ -62,161 +64,14 @@ export async function findRelayRule(
 	return null;
 }
 
-// ---------------------------------------------------------------------------
-// MIME assembly
-// ---------------------------------------------------------------------------
-
-export interface MimeAttachment {
-	filename: string;
-	contentType: string;
-	contentBase64: string; // already base64-encoded bytes
-	inline?: boolean;
-	cid?: string;
-}
-
-// base64-encode a UTF-8 string
-function b64(s: string): string {
-	return btoa(unescape(encodeURIComponent(s)));
-}
-
-// wrap a base64 blob to 76-char lines (RFC 2045)
-function wrap76(s: string): string {
-	return (s.match(/.{1,76}/g) || []).join("\r\n");
-}
-
-// RFC 2047-encode a header value if it contains non-ASCII
-function encodeHeaderWord(s: string): string {
-	return /^[\x20-\x7E]*$/.test(s) ? s : `=?UTF-8?B?${b64(s)}?=`;
-}
-
-interface MimeEntity {
-	ct: string;
-	headers?: string[];
-	body: string;
-}
-
-function renderPart(e: MimeEntity): string {
-	return [`Content-Type: ${e.ct}`, ...(e.headers || []), "", e.body].join("\r\n");
-}
-
-function leafText(mime: string, text: string): MimeEntity {
-	return {
-		ct: `${mime}; charset=UTF-8`,
-		headers: ["Content-Transfer-Encoding: base64"],
-		body: wrap76(b64(text)),
-	};
-}
-
-function leafAttachment(a: MimeAttachment): MimeEntity {
-	const name = a.filename.replace(/"/g, "");
-	const disp = a.inline ? "inline" : "attachment";
-	const headers = [
-		"Content-Transfer-Encoding: base64",
-		`Content-Disposition: ${disp}; filename="${name}"`,
-	];
-	if (a.cid) headers.push(`Content-ID: <${a.cid}>`);
-	return {
-		ct: `${a.contentType}; name="${name}"`,
-		headers,
-		body: wrap76(a.contentBase64),
-	};
-}
-
-function multipart(subtype: string, parts: MimeEntity[]): MimeEntity {
-	const boundary = `----=_Part_${crypto.randomUUID()}`;
-	const body = [...parts.flatMap((p) => [`--${boundary}`, renderPart(p)]), `--${boundary}--`].join(
-		"\r\n",
-	);
-	return { ct: `multipart/${subtype}; boundary="${boundary}"`, body };
-}
-
-// Build a raw MIME email for SES SendRawEmail.
-// Nesting: multipart/mixed[ multipart/related[ multipart/alternative, inline... ], attachments... ]
-export function buildRawEmail(opts: {
-	from: string;
-	to: string | string[];
-	cc?: string | string[];
-	replyTo?: string;
-	subject: string;
-	textBody?: string;
-	htmlBody?: string;
-	inReplyTo?: string;
-	references?: string;
-	attachments?: MimeAttachment[];
-}): string {
-	const toList = (Array.isArray(opts.to) ? opts.to : [opts.to]).filter(Boolean);
-	const ccList = (Array.isArray(opts.cc) ? opts.cc : opts.cc ? [opts.cc] : []).filter(Boolean);
-	// Message-ID domain tracks the sending domain (parsed from the From address).
-	const fromDomain = (opts.from.match(/@([^\s>]+)/)?.[1] || "localhost").trim();
-	const messageId = `<${crypto.randomUUID()}@${fromDomain}>`;
-	const date = new Date().toUTCString();
-
-	const headers = [
-		`From: ${opts.from}`,
-		`To: ${toList.join(", ")}`,
-		ccList.length ? `Cc: ${ccList.join(", ")}` : null,
-		opts.replyTo ? `Reply-To: ${opts.replyTo}` : null,
-		`Subject: ${encodeHeaderWord(opts.subject)}`,
-		`Date: ${date}`,
-		`Message-ID: ${messageId}`,
-		opts.inReplyTo ? `In-Reply-To: ${opts.inReplyTo}` : null,
-		opts.references ? `References: ${opts.references}` : null,
-		`MIME-Version: 1.0`,
-	].filter(Boolean) as string[];
-
-	// 1. body (alternative if both, else single)
-	let body: MimeEntity;
-	if (opts.textBody && opts.htmlBody) {
-		body = multipart("alternative", [
-			leafText("text/plain", opts.textBody),
-			leafText("text/html", opts.htmlBody),
-		]);
-	} else if (opts.htmlBody) {
-		body = leafText("text/html", opts.htmlBody);
-	} else {
-		body = leafText("text/plain", opts.textBody || "");
-	}
-
-	const atts = opts.attachments || [];
-	const inlines = atts.filter((a) => a.inline);
-	const regular = atts.filter((a) => !a.inline);
-
-	// 2. related wrapper for inline (cid) images
-	let related = body;
-	if (inlines.length) {
-		related = multipart("related", [body, ...inlines.map(leafAttachment)]);
-	}
-
-	// 3. mixed wrapper for regular attachments
-	let root = related;
-	if (regular.length) {
-		root = multipart("mixed", [related, ...regular.map(leafAttachment)]);
-	}
-
-	return [...headers, `Content-Type: ${root.ct}`, ...(root.headers || []), "", root.body].join(
-		"\r\n",
-	);
-}
-
-// base64-encode raw bytes (ArrayBuffer / typed array). Strings are UTF-8 encoded.
-function bytesToBase64(data: ArrayBuffer | ArrayBufferView | string): string {
-	if (typeof data === "string") return b64(data);
-	const bytes =
-		data instanceof ArrayBuffer
-			? new Uint8Array(data)
-			: new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
-	let binary = "";
-	const chunk = 0x8000;
-	for (let i = 0; i < bytes.length; i += chunk) {
-		binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
-	}
-	return btoa(binary);
-}
-
 // Forward a received email to `to` via the Cloudflare Email Sending binding.
 // message.forward() only delivers to CF-verified destinations; re-sending via the
 // binding delivers to any address. The From is rewritten to the box address (so
 // the zone's DKIM/SPF apply), with the original sender preserved in Reply-To.
+//
+// The original attachments ride along as bytes: the binding takes `content` as
+// ArrayBuffer/ArrayBufferView/string directly, so nothing is base64-encoded on
+// the way out. postal-mime's parsed attachments already have that shape.
 export async function forwardViaBinding(
 	env: Env,
 	opts: {
@@ -239,64 +94,54 @@ export async function forwardViaBinding(
 ): Promise<string> {
 	const boxAddr = `${opts.box}@${env.DOMAIN}`;
 	const label = (opts.fromName || opts.from || "").replace(/"/g, "");
-	const fromHeader = `"${label} (via ${boxAddr})" <${boxAddr}>`;
 
-	const attachments: MimeAttachment[] = (opts.attachments || []).map((a) => ({
-		filename: a.filename || "attachment",
-		contentType: a.mimeType || "application/octet-stream",
-		contentBase64: bytesToBase64(a.content),
-		inline: a.disposition === "inline" || !!a.contentId,
-		cid: a.contentId,
-	}));
+	const attachments = (opts.attachments || []).map((a) =>
+		toEmailAttachment({
+			filename: a.filename || "attachment",
+			contentType: a.mimeType || "application/octet-stream",
+			content: a.content,
+			inline: a.disposition === "inline" || !!a.contentId,
+			cid: a.contentId,
+		}),
+	);
 
-	const raw = buildRawEmail({
-		from: fromHeader,
+	const builder: EmailMessageBuilder = {
+		from: { name: `${label} (via ${boxAddr})`, email: boxAddr },
 		to: opts.to,
-		replyTo: opts.from || undefined,
 		subject: opts.subject || "(no subject)",
-		textBody: opts.textBody,
-		htmlBody: opts.htmlBody,
-		references: opts.messageId || undefined,
-		attachments,
-	});
+	};
+	if (opts.from) builder.replyTo = opts.from;
+	if (opts.textBody) builder.text = opts.textBody;
+	if (opts.htmlBody) builder.html = opts.htmlBody;
+	if (!builder.text && !builder.html) builder.text = "";
+	if (attachments.length) builder.attachments = attachments;
+	// The forwarded copy points back at the original so a client that has both
+	// threads them together. In-Reply-To is deliberately not set: this is a
+	// forward, not a reply.
+	if (opts.messageId) builder.headers = { References: opts.messageId };
 
-	return sendRawViaBinding(env, raw, fromHeader, { to: [opts.to] });
+	const res = await env.EMAIL.send(builder);
+	return res?.messageId ?? "";
 }
 
-// Strip a "Display Name <addr>" wrapper down to the bare address for the SMTP envelope.
-function bareAddr(s: string): string {
-	const m = s.match(/<([^>]+)>/);
-	return (m ? m[1] : s).trim();
-}
-
-// Send raw MIME via the Cloudflare Email Sending binding (cloudflare:email).
-// The legacy EmailMessage envelope is single-recipient, so we send one message
-// per envelope recipient (to + cc + bcc) sharing the same raw body - this matches
-// SES SendRawEmail's Destination semantics and keeps Bcc out of the visible headers
-// (buildRawEmail never writes a Bcc header). Returns the last platform message id.
+// Send raw MIME through the legacy EmailMessage API, one envelope recipient at a
+// time. Composed mail no longer comes through here -- it goes to the structured
+// builder in api/send.ts, which takes the whole recipient list in one send. This
+// path survives for the relay queue consumer, which replays a MIME string it
+// stored at enqueue time and so has nothing structured left to hand the builder.
 export async function sendRawViaBinding(
 	env: Env,
 	rawMessage: string,
 	envelopeFrom: string,
-	destination: { to?: string[]; cc?: string[]; bcc?: string[] },
+	recipient: string,
 ): Promise<string> {
 	const from = bareAddr(envelopeFrom);
-	const recipients = [
-		...(destination.to || []),
-		...(destination.cc || []),
-		...(destination.bcc || []),
-	]
-		.map(bareAddr)
-		.filter(Boolean);
-	if (recipients.length === 0) throw new Error("no envelope recipients");
+	const to = bareAddr(recipient);
+	if (!to) throw new Error("no envelope recipient");
 
-	let lastId = "";
-	for (const rcpt of recipients) {
-		const msg = new EmailMessage(from, rcpt, rawMessage);
-		const res = (await env.EMAIL.send(msg)) as { messageId?: string } | undefined;
-		lastId = res?.messageId ?? lastId;
-	}
-	return lastId;
+	const msg = new EmailMessage(from, to, rawMessage);
+	const res = (await env.EMAIL.send(msg)) as { messageId?: string } | undefined;
+	return res?.messageId ?? "";
 }
 
 // LEGACY/FALLBACK: send raw email via AWS SES. Kept available in case we need to
@@ -343,7 +188,10 @@ export async function sendRawEmail(
 	return result.MessageId;
 }
 
-// Queue a relay email for delivery
+// Queue a relay email for delivery.
+// The MIME is assembled here, at enqueue time, and replayed verbatim by the
+// consumer -- a relay must reproduce the message it was handed, so the raw API
+// is the right one for this path.
 export async function enqueueRelay(
 	env: Env,
 	opts: {
@@ -401,7 +249,7 @@ export async function processRelayMessage(msg: Message<any>, env: Env): Promise<
 	}
 
 	try {
-		const messageId = await sendRawViaBinding(env, relay.rawEmail, relay.from, { to: [relay.to] });
+		const messageId = await sendRawViaBinding(env, relay.rawEmail, relay.from, relay.to);
 
 		await env.DB.prepare(
 			"UPDATE delivery_log SET status = 'success', attempts = ?, completed_at = ?, error = ? WHERE id = ?",

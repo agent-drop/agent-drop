@@ -1,11 +1,11 @@
 ---
 chain_id: modernize-20260801-161212-5998
 plan_file: /Users/jonas/projects/agent-drop/docs/MODERNIZE-PLAN.md
-plan_version: 2
+plan_version: 3
 status: in_progress
-current_phase: 3
-last_updated: 2026-08-01T12:20:00Z
-link_count: 2
+current_phase: 4
+last_updated: 2026-08-01T14:05:00Z
+link_count: 3
 ---
 
 # Agent Drop modernization chain state
@@ -28,11 +28,19 @@ link_count: 2
   - [x] 2d. Tests: rules.ts, relay.ts addressing, normalize.ts, hosting.ts
   - [x] 2e. BONUS (found in-phase): `slugifyFilename` extension left unsanitized
   - [x] 2f. BONUS (found in-phase): hosted subdir + trailing slash always 404'd
-- [ ] 3. Migrate outbound mail to `EmailMessageBuilder`
-  - [ ] 3a. `api/send.ts:172` compose path -> builder
-  - [ ] 3b. `relay.ts:248` forwardViaBinding -> builder IF attachments survive
-  - [ ] 3c. Keep `relay.ts:395` relay-queue replay on raw
-  - [ ] 3d. Differential `send-email --dry-run` old vs new
+- [x] 3. Migrate outbound mail to `EmailMessageBuilder` (link 3, local `main`
+  `PENDING`)
+  - [x] 3a. `api/send.ts` compose + send path -> builder, one send for the list
+  - [x] 3b. `forwardViaBinding` -> builder; attachment re-encoding VERIFIED to
+    survive (and improve: no base64 round-trip)
+  - [x] 3c. `processRelayMessage` stays on raw; `sendRawViaBinding` reduced to it
+  - [x] 3d. Differential `send-email --dry-run` old vs new: 11 cases, 10 byte-
+    identical, 1 intended difference
+  - [x] 3e. Constraints encoded as validation (50 recipients / 16KB / 20 non-X)
+  - [x] 3f. MIME assembler relocated to `src/lib/mime.ts` (PLAN v3 correction:
+    it cannot be deleted, the relay replay path needs it)
+  - [x] 3g. BONUS (found in-phase): forwarded inline images had `<<cid>>`
+  - [x] 3h. BONUS (found in-phase): Message-ID domain read from the display name
 - [ ] 4. Dev loop: `@cloudflare/vite-plugin`
 - [ ] 5. Platform optimizations
   - [ ] 5a. `ctx.waitUntil` on `last_used_at`
@@ -81,6 +89,20 @@ link_count: 2
   new `makeBucket()` R2 read stub (phase 2)
 - `test/rules.test.ts`, `test/relay-address.test.ts`, `test/normalize.test.ts`,
   `test/hosting.test.ts` (phase 2)
+- `src/lib/email-builder.ts` -- new; `EmailMessageBuilder` construction (address
+  parsing, attachment shaping) + platform-limit validation (phase 3)
+- `src/lib/mime.ts` -- new; the hand-rolled MIME assembler, moved out of
+  `relay.ts`, plus `renderBuilderPreview()` for `/api/compose` (phase 3)
+- `src/lib/relay.ts` -- `forwardViaBinding` on the builder; `sendRawViaBinding`
+  reduced to the single-recipient relay replay; 423 -> 249 lines (phase 3)
+- `src/api/send.ts` -- `prepareEmail` returns the builder payload; `handleSend`
+  makes ONE send; `handleCompose` renders the preview from the builder (phase 3)
+- `test/helpers/email.ts` -- new; `EMAIL` binding double recording builder vs
+  raw sends, plus `onlyBuilder()` (phase 3)
+- `test/send-email.test.ts`, `test/forward.test.ts`, `test/email-builder.test.ts`
+  (phase 3)
+- `CLAUDE.md` -- send-path description, the 40MB/25MiB limit, the `lib/` listing
+  (which still claimed a deleted `ses.ts`) (phase 3)
 - `web/public/styleguide.html`, `web/src/components/{DropZone,InboxView,
   GoogleSignIn}.tsx` -- duplicate-attribute and a11y fixes (phase 2)
 
@@ -137,6 +159,26 @@ link_count: 2
   CLI's `invite` command) was still used further down -- caught by the newly
   wired typecheck, which is the phase justifying itself.
 
+- 2026-08-01 [link 3]: **`/api/compose` renders its preview FROM the builder
+  payload, not from the request body.** The dry-run is only worth having if it
+  goes stale the moment the send path's field mapping does; deriving it from the
+  same object makes that structural rather than a promise. The response shape is
+  unchanged (`message/rfc822`), so the CLI contract holds.
+- 2026-08-01 [link 3]: **The preview is an approximation of the wire format and
+  is documented as one.** Message-ID and Date are platform-controlled on the
+  builder path, and the exact MIME nesting and header quoting are Cloudflare's.
+  What the preview guarantees is field parity, not byte parity. Rejected the
+  alternative of returning the builder payload as JSON: it would break
+  `--dry-run --out file.eml`, and the PLAN forbids changing the API surface.
+- 2026-08-01 [link 3]: **The MIME assembler was moved, not deleted.** See PLAN
+  v3. `enqueueRelay` still assembles a raw message for the queue, so the code has
+  a live caller; putting it in `src/lib/mime.ts` makes the "platform assembles" /
+  "we assemble" boundary legible and drops `relay.ts` from 423 to 249 lines.
+- 2026-08-01 [link 3]: **Attachments travel as bytes, never base64.** The
+  binding reads a string `content` as RAW content, so the old base64 pipeline
+  would have attached base64 text. `resolveAttachment` now decodes once at the
+  edge; the compose preview re-encodes only for display.
+
 ## Open questions / blockers
 
 - **DEPLOY GATE (phase 1):** migration `0008_drop_object_key.sql` MUST be applied
@@ -158,9 +200,36 @@ link_count: 2
   committed but nothing is pushed to `origin`, so GitHub has never executed it.
   Every step was verified by running it in a clean local clone with only
   `.env.example` values. First real run happens whenever Jonas pushes.
-- Phase 3b: whether `forwardViaBinding`'s attachment re-encoding survives the
-  `EmailMessageBuilder` API is unverified. If not, that call site stays on raw.
+- **RESOLVED (phase 3):** `forwardViaBinding`'s attachment re-encoding survives
+  the builder, and improves. `EmailAttachment.content` accepts
+  `ArrayBuffer | ArrayBufferView | string`, which is exactly postal-mime's output
+  shape, so forwarded attachments are no longer base64'd on the way out at all.
+  That call site migrated. Pinned by `test/forward.test.ts`.
+- **NEW (phase 3), for whoever ships this:** an inline attachment with no
+  Content-ID is not representable in the binding's `EmailAttachment` union
+  (`disposition: "inline"` requires `contentId`). Such a part now degrades to a
+  regular attachment instead of being sent as an unaddressable inline part.
+  Behaviour change, deliberate, tested. Nothing in the CLI or SPA produces one.
+- **NEW (phase 3):** `Message-ID` and `Date` are platform-controlled on the
+  builder path -- Cloudflare rejects them as custom headers. Composed and
+  forwarded mail no longer carries an id we minted. The relay path, which stays
+  on raw, still mints its own.
+- **NEW (phase 3):** the send path can now reject before sending
+  (>50 recipients, oversized headers) with a 400 naming the limit. Previously
+  such a payload was handed to the platform and came back as an opaque `E_*`.
 - Phase 6d: deleting the SES fallback is a user decision, not the chain's.
+- Phase 6 doc sweep: CLAUDE.md's send-path and `lib/` sections were corrected in
+  phase 3 because they became actively wrong the moment the send path changed.
+  The broader sweep (CI, build, reaper, R2 notifications, upload security model)
+  is still phase 6's.
+- **`CLAUDE.md` IS NOT TRACKED IN THIS REPO.** `~/.gitignore:14` ignores it
+  globally, so the file exists on disk but git has never seen it -- despite its
+  own header calling itself "project instructions, checked into the codebase".
+  Phase 3's corrections to it are therefore **local to this working copy and are
+  in no commit**. Phase 6 item 5 ("update CLAUDE.md") should know this before it
+  starts: either it is a local-only edit, or Jonas decides to force-add the file
+  (`git add -f`). Not the chain's call to make -- the global ignore is
+  deliberate.
 
 ## Log
 
@@ -270,3 +339,87 @@ link_count: 2
   `bun run verify` exits 0 on `main` after the merge. Branch deleted, tree clean.
   **Nothing pushed to `origin`** -- local `main` is 12 commits ahead. Spawning
   link 3 for phase 3.
+- 2026-08-01T14:05:00Z [link 3] phase 3 complete. Branch
+  `chain/p3-email-builder`, merged to **local `main` as `MERGE_SHA`**.
+  Tests 139 -> **202 pass, 0 fail**. `bun run verify` exits 0.
+
+  **What migrated, and what deliberately did not.**
+
+  | Call site | Outcome |
+  |---|---|
+  | `api/send.ts` compose + send | Builder. ONE send for the whole to/cc/bcc list, replacing the loop that sent a separate raw message per envelope recipient. |
+  | `relay.ts` `forwardViaBinding` | Builder. The PLAN said VERIFY before committing -- see below. |
+  | `relay.ts` `processRelayMessage` | **Stays on raw**, per PLAN. `sendRawViaBinding` reduced from an N-recipient loop to the single recipient this path actually has. |
+
+  **3b, the PLAN's open question, answered empirically.** Attachment re-encoding
+  does not merely survive the builder, it gets simpler:
+  `EmailAttachment.content` takes `ArrayBuffer | ArrayBufferView | string`, which
+  is exactly what postal-mime hands back, so forwarded attachments are no longer
+  base64-encoded on the way out. The catch found in the same pass: a **string
+  `content` is RAW content, not base64** -- the old pipeline's base64 strings
+  would have been attached as literal base64 text. `resolveAttachment` now
+  decodes once at the edge and everything downstream carries bytes.
+
+  **3d -- the differential check.** A harness under `.claude/temp/p3-diff/`
+  (gitignored, so it survived the branch switch) stands up a local server
+  mounting the tree's own `handleCompose` and drives the **real CLI** --
+  `bun tools/agent-drop.ts send-email --dry-run` -- across 11 cases: plain text;
+  text+html; html with an inline `cid:` image; a regular attachment; a remote
+  URL attachment; multi to/cc/bcc; `+addressing` topic; `--in-reply-to` by raw
+  message-id; `--in-reply-to` by drop id; display-name recipients + `--from-name`
+  + `--reply-to`; and a unicode subject and body. Run on `main`, then on the
+  branch. Message-ID, Date and MIME boundaries are random by construction and
+  were normalised before diffing.
+
+  **Result: 10 of 11 byte-identical. One intended difference, case 09:**
+
+  ```
+  - Cc: Team Lead <lead@example.com>
+  + Cc: "Team Lead" <lead@example.com>
+  ```
+
+  The old path passed a recipient string straight into the header; the new one
+  parses it into the binding's `{name, email}` object, and the preview renderer
+  re-quotes the display name. Both are valid RFC 5322, and quoting is the safer
+  of the two -- an unquoted display name containing specials (`.`, `,`, `:`) is
+  malformed, a quoted one never is. Note what this difference is NOT evidence
+  about: on the real send path Cloudflare does its own header encoding, so the
+  quoting here is our preview renderer's choice. What the case proves is that the
+  name/address pair survives the new parsing intact.
+
+  Worth stating plainly: the inline-`cid` and attachment cases coming back
+  byte-identical means the base64 -> bytes -> base64 round-trip introduced by the
+  migration is lossless.
+
+  **Test suite mutation-checked**, so "202 pass" is not decoration. Seeding three
+  defects in the new code, one at a time: dropping `References` from the
+  threading headers fails 3; skipping address parsing on `To` fails 1; leaving
+  Content-IDs unnormalised fails 2.
+
+  **Two bugs found mid-phase, both flagged inline, both RED before the fix:**
+
+  | Bug | What it did |
+  |---|---|
+  | Forwarded inline `Content-ID` double-wrapped | postal-mime returns the raw header value *with* brackets, and `leafAttachment` wrapped it again -> `Content-ID: <<logo123>>`. No client matches that against `cid:logo123`, so inline images silently failed to render in **every** forwarded email. RED output captured before the fix. |
+  | Message-ID domain taken from the display name | `buildRawEmail` matched the first `@` in the From header. A forward's From is `"sender@example.com (via lisa@frst.dev)" <lisa@frst.dev>`, so every forwarded message announced a Message-ID from a domain we do not sign -- exactly the mismatch spam filters weight. The RED is in the first bug's failure dump: `Message-ID: <...@example.com>`. |
+
+  Filed as `done/bug-forward-inline-cid-double-brackets` (both findings on the
+  one ticket -- same file, same fix commit).
+
+  **PLAN corrected to v3.** Its "~130 lines of MIME assembler get deleted" was
+  wrong: `enqueueRelay` builds the queued message with `buildRawEmail`, and the
+  consumer that replays it is the path this very phase mandates stays on raw. The
+  assembler therefore always keeps a live caller. It was **moved** to
+  `src/lib/mime.ts` instead, which makes the "platform assembles this" / "we
+  still assemble this" boundary legible and takes `relay.ts` from 423 to 249
+  lines. No GOAL or requirement changed.
+
+  **Honest limitation.** Nothing here exercises the real
+  `env.EMAIL.send(builder)`. The binding is a test double, and the differential
+  compares our own preview rendering on both sides -- it proves the field mapping
+  end to end, it does not prove Cloudflare assembles those fields the way we
+  expect. Verifying that needs one real send from a deployed worker, which this
+  chain does not do (nothing is deployed, and the DEPLOY GATE above still
+  stands). First real send after deploy is the remaining unknown.
+
+  **Nothing pushed to `origin`.** Spawning link 4 for phase 4.

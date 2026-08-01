@@ -1,5 +1,5 @@
 ---
-version: 2
+version: 3
 created: 2026-08-01
 ---
 
@@ -232,6 +232,19 @@ assembler in `src/lib/relay.ts`: `b64` (line ~78), `wrap76` (~83),
 `leafAttachment` (~110), `multipart` (~125), `buildRawEmail` (~136),
 `bytesToBase64` (~207) -- roughly 130 lines.
 
+**CORRECTION (v3, found while executing the phase): none of those ~130 lines can
+actually be deleted, and the "attachments support base64 content" line above is
+wrong for the Workers binding.** `enqueueRelay` calls `buildRawEmail` to assemble
+the message it puts on the queue, and `processRelayMessage` -- which this same
+phase mandates STAYS ON RAW -- replays it, so the whole assembler tree keeps a
+live caller regardless of what the send path does. Phase 3's win is therefore not
+deletion; it is that the assembler stops being on the *send* path. Relocate it to
+`src/lib/mime.ts` so the boundary between "the platform assembles this" and "we
+still assemble this" is legible in the file layout, and so `relay.ts` drops back
+under the 200-line hygiene limit. On attachments: `EmailAttachment.content` takes
+`string | ArrayBuffer | ArrayBufferView`, and a **string is RAW content, not
+base64** -- handing it base64 attaches the base64 text.
+
 **This is NOT a clean sweep of all three call sites. Get this right:**
 
 - `src/api/send.ts:172` (compose / `POST /api/send/:name`) -> migrates cleanly to
@@ -359,6 +372,21 @@ behavior-identical.
 **artifacts:** `src/api/router.ts`, `src/api/upload.ts`, `CLAUDE.md`, tests.
 
 ## Changelog
+
+### v3 -- 2026-08-01 -- author: link 3
+
+- Phase 3: "this replaces the hand-rolled MIME assembler ... roughly 130 lines"
+  -> "none of those ~130 lines can be deleted; the win is that the assembler
+  leaves the SEND path". Factual correction found while executing the phase:
+  `enqueueRelay` builds the queued message with `buildRawEmail`, and
+  `processRelayMessage` -- which this very phase mandates stays on raw -- replays
+  it, so the assembler always keeps a live caller. Added the relocation to
+  `src/lib/mime.ts` as the concrete deliverable in place of the deletion.
+- Phase 3: "attachments support base64 content" -> corrected. The Workers
+  binding's `EmailAttachment.content` treats a **string as RAW content**, so
+  base64 would be attached verbatim as text. Attachments now travel as bytes.
+- No GOAL, requirement, or acceptance-criterion change. The phase's success
+  criteria and its differential-check gate are untouched.
 
 ### v2 -- 2026-08-01 -- author: link 2
 
