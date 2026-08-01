@@ -3,7 +3,7 @@ chain_id: modernize-20260801-161212-5998
 plan_file: /Users/jonas/projects/agent-drop/docs/MODERNIZE-PLAN.md
 plan_version: 1
 status: in_progress
-current_phase: 1
+current_phase: 2
 last_updated: 2026-08-01T10:34:00Z
 link_count: 1
 ---
@@ -12,7 +12,7 @@ link_count: 1
 
 ## Phases
 
-- [>] 1. Close the security holes (link 1)
+- [x] 1. Close the security holes (link 1, local `main` `2c171b2`)
   - [x] 1a. Authenticate `/api/upload/complete` + `/api/upload/confirm`
   - [x] 1b. Derive `objectKey` from the drop row instead of trusting the client
   - [x] 1c. Constant-time `isAdmin()`
@@ -150,3 +150,8 @@ link_count: 1
   rather than string-comparing). The non-early-exit compare in
   `constantTimeEqual` is verified by reading it, not by a test. Said plainly
   rather than dressed up as coverage.
+
+  Merged into **local `main` as `2c171b2`** (merge commit; phase commit
+  `3ad0137`), `bun run verify` re-run green on `main` after the merge, branch
+  `chain/p1-security` deleted, tree clean. **Nothing pushed to `origin`** -- local
+  `main` is 7 commits ahead, as the plan requires. Spawning link 2 for phase 2.
