@@ -95,6 +95,20 @@ function ack(receiver: WebhookReceiver, payload: Record<string, unknown>): Respo
 }
 
 /**
+ * What was stored, for a caller that drove this path itself.
+ *
+ * A provider learns the event id from the response body -- but a receiver with a
+ * custom `response_body` answers whatever it was configured to, and `queue-put`
+ * still needs to know which row it just made. An out-param rather than a changed
+ * return type, so the public endpoint's behaviour is untouched.
+ */
+export interface ReceiveOutcome {
+	id?: string;
+	duplicate?: boolean;
+	status?: string;
+}
+
+/**
  * Serve one request to the public receiver endpoint. Called only for paths under
  * /{HOOK_PREFIX}/. Always returns a Response -- never throws at the provider.
  *
@@ -109,9 +123,10 @@ export async function serveWebhook(
 	env: Env,
 	url: URL,
 	ctx: ExecutionContext,
+	outcome?: ReceiveOutcome,
 ): Promise<Response> {
 	try {
-		return await receive(request, env, url, ctx);
+		return await receive(request, env, url, ctx, outcome);
 	} catch (err) {
 		console.error("webhook receive failed:", err);
 		return fail(503, "could not store event");
@@ -123,6 +138,7 @@ async function receive(
 	env: Env,
 	url: URL,
 	ctx: ExecutionContext,
+	outcome?: ReceiveOutcome,
 ): Promise<Response> {
 	const now = Date.now();
 	const segs = url.pathname.split("/").filter(Boolean); // ["h", box, slug, ...subpath]
@@ -211,7 +227,14 @@ async function receive(
 			},
 			verified: null,
 			status: "handshake",
-		}).catch((err: unknown) => console.error("handshake event not stored:", err));
+		})
+			.then((stored) => {
+				if (outcome) {
+					outcome.id = stored.id;
+					outcome.status = "handshake";
+				}
+			})
+			.catch((err: unknown) => console.error("handshake event not stored:", err));
 		return handshake.response;
 	}
 
@@ -251,6 +274,11 @@ async function receive(
 		verified: verdict.verified,
 		status,
 	});
+	if (outcome) {
+		outcome.id = stored.id;
+		outcome.duplicate = stored.duplicate;
+		outcome.status = stored.duplicate ? "duplicate" : status;
+	}
 
 	if (status === "rejected") {
 		// A bad signature is a guess at a credential, so it burns a token from the

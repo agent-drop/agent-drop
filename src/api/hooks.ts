@@ -20,6 +20,7 @@ import {
 	unsupportedMode,
 	view,
 } from "./hook-config";
+import { rotateSlug } from "./hook-rotate";
 import type { Env, WebhookReceiver } from "../types";
 
 const BASE = "/api/hooks/receivers";
@@ -199,6 +200,15 @@ export async function handleHookReceivers(request: Request, env: Env, url: URL):
 		if (method === "POST") return create(request, env);
 		if (method === "GET") return list(env, null);
 		return bad("method not allowed", 405);
+	}
+
+	// `{id}/rotate` and `{box}/{slug}/rotate` both work, because the verb is the
+	// last segment and everything before it is the same receiver reference the
+	// other routes take.
+	if (method === "POST" && segs.length >= 2 && segs[segs.length - 1] === "rotate") {
+		const receiver = await resolve(env, segs.slice(0, -1));
+		if (!receiver) return bad("no such receiver", 404);
+		return rotateSlug(request, env, receiver);
 	}
 
 	if (segs.length <= 2) {

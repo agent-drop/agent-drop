@@ -9,6 +9,7 @@
 import { Command } from "commander";
 import { formatOutput, addCommonOptions, createLogger } from "./lib/cli-utils";
 import { signRequest } from "./lib/hook-sign";
+import { emitEvents } from "./lib/queue-emit";
 import chalk from "chalk";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -2398,6 +2399,43 @@ withHandshakeOptions(
 	});
 
 program
+	.command("hook-rotate <ref>")
+	.description("Issue a new slug on the same receiver -- the row, counters and history stay")
+	.option("--slug <slug>", "An exact new slug (otherwise the name keeps a fresh suffix)")
+	.option("--grace <dur>", "Keep the old URL answering this long, e.g. 24h")
+	.action(async (ref, opts) => {
+		try {
+			const res = await api(`${hookPath(ref)}/rotate`, {
+				method: "POST",
+				admin: true,
+				body: {
+					slug: opts.slug,
+					graceSeconds: opts.grace ? Math.floor(parseDuration(opts.grace) / 1000) : 0,
+				},
+			});
+			console.log(chalk.green(`\n  Rotated to ${res.inbox}/${res.slug}`));
+			console.log(`  ${chalk.bold(res.url)}`);
+			if (res.previous_slug) {
+				console.log(
+					chalk.dim(
+						`  ${res.previous_slug} keeps answering until ${isoDate(res.previous_slug_expires_at)}`,
+					),
+				);
+			} else {
+				// No grace means the old URL is dead now, which is the right default when
+				// the reason for rotating is that it leaked.
+				console.log(
+					chalk.yellow("  The old URL is dead now -- pass --grace for a cutover window."),
+				);
+			}
+			console.log(chalk.dim("  Every event it already took is still there: they key on the id.\n"));
+		} catch (err: any) {
+			console.error(chalk.red(err.message));
+			process.exit(3);
+		}
+	});
+
+program
 	.command("hook-delete <ref>")
 	.description("Delete a receiver. Its events survive unless --purge")
 	.option("--purge", "Also destroy every event it received, R2 bodies included")
@@ -2561,6 +2599,423 @@ program
 			} else {
 				process.stdout.write(bytes);
 			}
+		} catch (err: any) {
+			console.error(chalk.red(err.message));
+			process.exit(3);
+		}
+	});
+
+/**
+ * `lisa ID ID` or `lisa/ID`. The box is not decoration: it is the authorization
+ * boundary every queue statement filters on, so an id never travels alone.
+ */
+function eventIds(box: string, ids: string[]): { box: string; ids: string[] } {
+	if (ids.length) return { box, ids };
+	const slash = box.indexOf("/");
+	if (slash === -1) {
+		throw new Error("Need a box and at least one event id, e.g. `queue-remove lisa EVENT_ID`");
+	}
+	return { box: box.slice(0, slash), ids: [box.slice(slash + 1)] };
+}
+
+function queuePost(box: string, verb: string, body: unknown): Promise<any> {
+	return api(`/api/hooks/queue/${encodeURIComponent(box)}/${verb}`, { method: "POST", body });
+}
+
+/** `Key:Value` pairs, repeatable, for --header. */
+function headerPairs(values: string[] | undefined): Record<string, string> {
+	const out: Record<string, string> = {};
+	for (const pair of values ?? []) {
+		const colon = pair.indexOf(":");
+		if (colon === -1) throw new Error(`--header wants Key:Value, got '${pair}'`);
+		out[pair.slice(0, colon).trim()] = pair.slice(colon + 1).trim();
+	}
+	return out;
+}
+
+function queryPairs(values: string[] | undefined): Record<string, string> {
+	const out: Record<string, string> = {};
+	for (const pair of values ?? []) {
+		const eq = pair.indexOf("=");
+		if (eq === -1) throw new Error(`--query wants key=value, got '${pair}'`);
+		out[pair.slice(0, eq).trim()] = pair.slice(eq + 1).trim();
+	}
+	return out;
+}
+
+/** One event, the way `queue-peek` renders it, so pulled and peeked look alike. */
+function printEvent(e: any) {
+	console.log(chalk.bold(`\n  ${e.id}`) + chalk.dim(`  ${isoDate(e.created_at)}`));
+	console.log(
+		`  ${e.method} ${e.inbox}/${e.slug}${e.subpath ? `/${e.subpath}` : ""}  ` +
+			`${e.status}  ${verdictLabel(e.verified)}`,
+	);
+	const label = [e.event_type, e.routing_key].filter(Boolean).join(" / ");
+	if (label) console.log(`  ${chalk.dim("type/key")} ${label}`);
+	console.log(chalk.dim(`  ${fmtBytes(e.body_bytes || 0)}  sha256 ${e.body_sha256}`));
+	if (e.body !== null && e.body !== undefined) {
+		console.log(
+			e.body
+				.split("\n")
+				.map((l: string) => `    ${l}`)
+				.join("\n"),
+		);
+	} else if (e.body_available) {
+		console.log(chalk.dim("  body: not inline -- use `queue-body` for the raw bytes"));
+	}
+}
+
+program
+	.command("queue-get <box>")
+	.description("LEASE events off the queue -- they are hidden from other consumers")
+	.option("--receiver <idOrSlug>", "Only this receiver")
+	.option("-l, --limit <n>", "How many to take", "10")
+	.option("--lease <seconds>", "How long to hold them", "60")
+	.option("--remove", "Ack at handout -- at-most-once, no lease bookkeeping")
+	.option("--delete-on-success", "Destroy each event once its write has returned (see below)")
+	.addHelpText(
+		"after",
+		"\n  --delete-on-success destroys an event after the write of it RETURNED, which\n" +
+			"  down a pipe means the OS accepted the bytes, not that the reader processed\n" +
+			"  them. A consumer that needs stronger than that should lease, do the work,\n" +
+			"  and `queue-remove` when it is genuinely done -- that is the default for a\n" +
+			"  reason. What --delete-on-success does guarantee is that a run which dies\n" +
+			"  partway leaves the rest LEASED, never destroyed.\n",
+	)
+	.action(async (box, opts) => {
+		const merged = program.opts();
+		try {
+			if (opts.remove && opts.deleteOnSuccess) {
+				throw new Error("--remove and --delete-on-success are two different exits; pick one");
+			}
+			const data = await queuePost(box, "get", {
+				limit: parseInt(opts.limit, 10),
+				leaseSeconds: parseInt(opts.lease, 10),
+				receiver: opts.receiver,
+				remove: Boolean(opts.remove),
+			});
+
+			if (!data.count) {
+				if (merged.format === "json") console.log(JSON.stringify({ events: [], count: 0 }));
+				else console.log(chalk.dim(`\n  Nothing queued in ${box}\n`));
+				return;
+			}
+
+			// The write happens BEFORE the delete, one event at a time. A pull that dies
+			// halfway leaves the remainder leased rather than destroyed -- see
+			// tools/lib/queue-emit.ts, which exists so that ordering is testable.
+			const result = await emitEvents<any>({
+				events: data.events,
+				write: (e) => {
+					if (merged.format === "json") {
+						try {
+							e.body_json = e.body ? JSON.parse(e.body) : null;
+						} catch {
+							e.body_json = null;
+						}
+						process.stdout.write(`${JSON.stringify(e)}\n`);
+					} else {
+						printEvent(e);
+					}
+				},
+				finish: opts.deleteOnSuccess
+					? async (e) => {
+							await api(`/api/hooks/queue/${encodeURIComponent(box)}/${encodeURIComponent(e.id)}`, {
+								method: "DELETE",
+							});
+						}
+					: undefined,
+			});
+
+			if (merged.format !== "json") {
+				console.log("");
+				if (data.lease_id) {
+					console.log(
+						chalk.dim(
+							`  lease ${data.lease_id} until ${isoDate(data.leased_until)} -- ` +
+								"`queue-remove` when done, `queue-return` to hand back",
+						),
+					);
+				} else if (opts.remove) {
+					console.log(chalk.dim("  removed at handout (--remove): nothing is being held"));
+				}
+				if (opts.deleteOnSuccess) {
+					console.log(chalk.dim(`  destroyed ${result.finished.length} after writing`));
+				}
+				console.log("");
+			}
+
+			if (result.error) {
+				console.error(chalk.red(`  Output failed: ${result.error}`));
+				console.error(
+					chalk.dim(`  ${result.remaining.length} event(s) left leased, not destroyed.`),
+				);
+				process.exit(5);
+			}
+		} catch (err: any) {
+			console.error(chalk.red(err.message));
+			process.exit(3);
+		}
+	});
+
+program
+	.command("queue-remove <box> [ids...]")
+	.description("Ack: off the queue, row kept and still readable (BOX/ID also works)")
+	.action(async (box, list) => {
+		try {
+			const ref = eventIds(box, list);
+			const res = await queuePost(ref.box, "remove", { ids: ref.ids });
+			const notes = [
+				res.already_removed ? `${res.already_removed} already removed` : "",
+				res.skipped_handshake ? chalk.yellow(`${res.skipped_handshake} handshake, kept`) : "",
+				res.missing ? chalk.red(`${res.missing} not in ${ref.box}`) : "",
+			].filter(Boolean);
+			console.log(
+				chalk.green(`\n  Removed ${res.removed}`) +
+					(notes.length ? chalk.dim(`  (${notes.join(", ")})`) : "") +
+					"\n",
+			);
+		} catch (err: any) {
+			console.error(chalk.red(err.message));
+			process.exit(3);
+		}
+	});
+
+program
+	.command("queue-return <box> [ids...]")
+	.description("Nack: release a lease immediately, back onto the queue")
+	.action(async (box, list) => {
+		try {
+			const ref = eventIds(box, list);
+			const res = await queuePost(ref.box, "return", { ids: ref.ids });
+			console.log(chalk.green(`\n  Returned ${res.returned} of ${res.requested}\n`));
+		} catch (err: any) {
+			console.error(chalk.red(err.message));
+			process.exit(3);
+		}
+	});
+
+program
+	.command("queue-extend <box> [ids...]")
+	.description("Hold a lease longer, mid-work -- ownership does not change")
+	.option("--lease <seconds>", "New remaining lease", "300")
+	.option("--lease-id <id>", "Only extend if this is still your lease")
+	.action(async (box, list, opts) => {
+		try {
+			const ref = eventIds(box, list);
+			const res = await queuePost(ref.box, "extend", {
+				ids: ref.ids,
+				leaseSeconds: parseInt(opts.lease, 10),
+				leaseId: opts.leaseId,
+			});
+			console.log(
+				chalk.green(`\n  Extended ${res.extended} of ${res.requested}`) +
+					chalk.dim(` until ${isoDate(res.leased_until)}\n`),
+			);
+			if (res.extended < res.requested) {
+				// An expired lease is back in the pool and may be someone else's now.
+				console.log(chalk.dim("  Not extended: already expired, or not your lease.\n"));
+			}
+		} catch (err: any) {
+			console.error(chalk.red(err.message));
+			process.exit(3);
+		}
+	});
+
+program
+	.command("queue-requeue <box> [ids...]")
+	.description("Put a removed or rejected event back on the queue")
+	.action(async (box, list) => {
+		try {
+			const ref = eventIds(box, list);
+			const res = await queuePost(ref.box, "requeue", { ids: ref.ids });
+			console.log(chalk.green(`\n  Requeued ${res.requeued} of ${res.requested}\n`));
+			if (res.requeued < res.requested) {
+				console.log(
+					chalk.dim("  Only removed and rejected events requeue. Handshakes never do.\n"),
+				);
+			}
+		} catch (err: any) {
+			console.error(chalk.red(err.message));
+			process.exit(3);
+		}
+	});
+
+program
+	.command("queue-delete <box> [ids...]")
+	.description("DESTROY events and their R2 bodies -- unlike queue-remove, nothing survives")
+	.option("--removed", "Bulk: everything already removed (acked)")
+	.option("--before <id>", "Bulk: everything that arrived before this id")
+	.option("-y, --yes", "Skip the confirmation on a bulk delete")
+	.action(async (box, list, opts) => {
+		try {
+			const bulk = Boolean(opts.removed || opts.before);
+			const ref = bulk ? { box, ids: [] } : eventIds(box, list);
+			if (bulk && !opts.yes) {
+				// Say what it will destroy, then make the operator say it again. A bulk
+				// destroy that only prints a count afterwards is a bad afternoon.
+				const preview = await api(
+					`/api/hooks/queue/${encodeURIComponent(box)}?limit=200` +
+						`${opts.removed ? "&status=acked" : ""}`,
+				);
+				const doomed = opts.before
+					? preview.events.filter((e: any) => e.id < opts.before)
+					: preview.events;
+				console.log(
+					chalk.yellow(`\n  About to DESTROY ${doomed.length} event(s) in ${box}:`) +
+						chalk.dim(`  (showing up to 200)\n`),
+				);
+				for (const e of doomed.slice(0, 10)) {
+					console.log(`    ${e.id}  ${e.status}  ${chalk.dim(relativeTime(e.created_at))}`);
+				}
+				if (doomed.length > 10) console.log(chalk.dim(`    ... and ${doomed.length - 10} more`));
+				console.log(chalk.dim("\n  Re-run with --yes to destroy them.\n"));
+				return;
+			}
+
+			const res = await queuePost(ref.box, "delete", {
+				ids: ref.ids.length ? ref.ids : undefined,
+				removed: opts.removed || undefined,
+				before: opts.before,
+			});
+			console.log(chalk.green(`\n  Destroyed ${res.deleted} event(s), R2 bodies included\n`));
+		} catch (err: any) {
+			console.error(chalk.red(err.message));
+			process.exit(3);
+		}
+	});
+
+program
+	.command("queue-put <box>")
+	.description("Inject a message as if a provider had sent it -- same path, same checks")
+	.requiredOption("--receiver <idOrSlug>", "Which receiver it arrives on")
+	.option("--body <body>", "Body text, or @path to a file (@- for stdin)", "{}")
+	.option("--header <kv...>", "Request headers as Key:Value")
+	.option("--query <kv...>", "Query parameters as key=value")
+	.option("--method <method>", "HTTP method", "POST")
+	.option("--subpath <path>", "Anything after /h/{box}/{slug}")
+	.option("--content-type <type>", "Body content type", "application/json")
+	.action(async (box, opts) => {
+		const merged = program.opts();
+		try {
+			const res = await fetch(`${getBaseUrl()}/api/hooks/queue/${encodeURIComponent(box)}/put`, {
+				method: "POST",
+				headers: {
+					Authorization: `Bearer ${getApiKey()}`,
+					"Content-Type": "application/json",
+				},
+				body: JSON.stringify({
+					receiver: opts.receiver,
+					method: opts.method,
+					subpath: opts.subpath,
+					headers: headerPairs(opts.header),
+					query: queryPairs(opts.query),
+					body: resolveBody(opts.body),
+					contentType: opts.contentType,
+				}),
+			});
+			const data: any = await res.json();
+			if (merged.format === "json") {
+				console.log(JSON.stringify(data, null, 2));
+			} else if (data.injected) {
+				const dup = data.duplicate ? chalk.yellow(" (duplicate -- nothing stored)") : "";
+				console.log(chalk.green(`\n  Injected ${data.id}${dup}`));
+				console.log(chalk.dim(`  receiver answered ${data.receiver_status}\n`));
+			} else {
+				// The receive path is not lenient because the caller is authenticated: a
+				// receiver that verifies signatures rejects an unsigned injection, and the
+				// row is stored `rejected` exactly as a real one would be.
+				console.log(chalk.red(`\n  Receiver rejected it: ${data.error || data.receiver_status}`));
+				if (data.id) console.log(chalk.dim(`  stored as ${data.id} (${data.event_status})`));
+				console.log("");
+			}
+			if (!data.injected) process.exit(4);
+		} catch (err: any) {
+			console.error(chalk.red(err.message));
+			process.exit(3);
+		}
+	});
+
+program
+	.command("queue-stats [box]")
+	.description("Counts by status, bytes and last arrival. No box = every box (needs admin)")
+	.action(async (box) => {
+		const merged = program.opts();
+		try {
+			let boxes: string[];
+			if (box) {
+				boxes = [box];
+			} else {
+				const data = await api("/api/hooks/receivers", { admin: true });
+				const names: string[] = (data.receivers || []).map((r: any) => String(r.inbox));
+				boxes = [...new Set(names)].sort();
+			}
+			const all = [];
+			for (const name of boxes) {
+				all.push(await api(`/api/hooks/queue/${encodeURIComponent(name)}/stats`));
+			}
+			if (merged.format === "json") {
+				console.log(JSON.stringify(box ? all[0] : { boxes: all }, null, 2));
+				return;
+			}
+			if (!all.length) {
+				console.log(chalk.dim("\n  No receivers yet\n"));
+				return;
+			}
+			console.log(chalk.bold("\n  Queue:\n"));
+			console.log(
+				chalk.dim("  BOX          TOTAL  QUEUED  LEASED  ACKED  REJECTED  HANDSHAKE  SIZE   LAST"),
+			);
+			for (const s of all) {
+				const by = s.by_status || {};
+				console.log(
+					`  ${padRight(chalk.cyan(s.inbox), 12)} ${padLeft(String(s.total), 5)}  ` +
+						`${padLeft(String(by.queued || 0), 6)}  ${padLeft(String(s.leased_now || 0), 6)}  ` +
+						`${padLeft(String(by.acked || 0), 5)}  ${padLeft(String(by.rejected || 0), 8)}  ` +
+						`${padLeft(String(by.handshake || 0), 9)}  ${padRight(fmtBytes(s.bytes || 0), 6)} ` +
+						chalk.dim(s.last_event_at ? relativeTime(s.last_event_at) : "never"),
+				);
+			}
+			console.log("");
+		} catch (err: any) {
+			console.error(chalk.red(err.message));
+			process.exit(3);
+		}
+	});
+
+program
+	.command("queue-replay <box> [eventId]")
+	.description("Re-deliver a stored event to an arbitrary URL, bytes and headers as they arrived")
+	.requiredOption("--to <url>", "Where to POST it")
+	.option("--header <kv...>", "Extra headers as Key:Value (override the stored ones)")
+	.action(async (box, eventId, opts) => {
+		try {
+			const ref = splitEventRef(box, eventId);
+			const event = await api(
+				`/api/hooks/queue/${encodeURIComponent(ref.box)}/${encodeURIComponent(ref.id)}`,
+			);
+			const raw = await apiRaw(
+				`/api/hooks/queue/${encodeURIComponent(ref.box)}/${encodeURIComponent(ref.id)}/body`,
+			);
+			const bytes = new Uint8Array(await raw.arrayBuffer());
+
+			const headers: Record<string, string> = {};
+			for (const [key, value] of Object.entries(event.headers || {})) {
+				// A redacted credential is a placeholder, not a header -- sending the
+				// literal string would be worse than sending nothing. Hop-by-hop headers
+				// describe the connection that is gone, not this one.
+				if (value === "<redacted>") continue;
+				if (["host", "content-length", "connection", "transfer-encoding"].includes(key)) continue;
+				headers[key] = String(value);
+			}
+			Object.assign(headers, headerPairs(opts.header));
+
+			console.log(chalk.dim(`\n  POST ${opts.to}  ${fmtBytes(bytes.byteLength)}`));
+			const res = await fetch(opts.to, { method: "POST", headers, body: bytes });
+			const text = (await res.text()).slice(0, 500);
+			const ok = res.status >= 200 && res.status < 300;
+			console.log(`  ${ok ? chalk.green(res.status) : chalk.red(res.status)} ${text}\n`);
+			if (!ok) process.exit(4);
 		} catch (err: any) {
 			console.error(chalk.red(err.message));
 			process.exit(3);

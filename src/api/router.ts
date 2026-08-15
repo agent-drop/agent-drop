@@ -34,7 +34,20 @@ import {
 	type OpenRoute,
 	type RequestScope,
 } from "./gates";
+import {
+	handleQueueExtend,
+	handleQueueGet,
+	handleQueueRemove,
+	handleQueueRequeue,
+	handleQueueReturn,
+} from "./hook-lease";
 import { handleQueueBody, handleQueueList, handleQueueOne, handleQueuePeek } from "./hook-queue";
+import {
+	handleQueueDelete,
+	handleQueueDeleteOne,
+	handleQueuePut,
+	handleQueueStats,
+} from "./hook-queue-write";
 import { handleHookReceivers } from "./hooks";
 import { handleHostDelete, handleHostFinalize, handleHostList, handleHostPresign } from "./host";
 import { handleInbox } from "./inbox";
@@ -196,8 +209,11 @@ const KEYED_ROUTES: Route<KeyedRoute>[] = [
 		run: keyedReader((s, inbox, params) => handleInbox(s.env, inbox, params.rest, s.url)),
 	},
 
-	// The webhook queue. Every route here is a read that takes no lease; the
-	// leasing and destroying verbs arrive in phase 4 as POSTs under keyedWriter.
+	// The webhook queue, split by what a verb DOES rather than by what it reads.
+	// Peek, list, body and stats take no lease and change nothing, so they are GETs
+	// under keyedReader -- retry-safe, cacheable, servable to a read-only key. Every
+	// verb that leases, mutates or destroys is a POST under keyedWriter, which is
+	// why you cannot consume a queue by accident with a curl you meant as a look.
 	{
 		method: "GET",
 		match: segments("/api/hooks/queue/:inbox"),
@@ -208,6 +224,47 @@ const KEYED_ROUTES: Route<KeyedRoute>[] = [
 		match: segments("/api/hooks/queue/:inbox/peek"),
 		run: keyedReader((s, inbox) => handleQueuePeek(s.env, inbox, s.url)),
 	},
+	// Before `/:inbox/:id`, which would otherwise swallow it as an event id.
+	{
+		method: "GET",
+		match: segments("/api/hooks/queue/:inbox/stats"),
+		run: keyedReader((s, inbox) => handleQueueStats(s.env, inbox)),
+	},
+	{
+		method: "POST",
+		match: segments("/api/hooks/queue/:inbox/get"),
+		run: keyedWriter((s, inbox) => handleQueueGet(s.request, s.env, inbox)),
+	},
+	{
+		method: "POST",
+		match: segments("/api/hooks/queue/:inbox/put"),
+		run: keyedWriter((s, inbox) => handleQueuePut(s.request, s.env, inbox, s.ctx)),
+	},
+	{
+		method: "POST",
+		match: segments("/api/hooks/queue/:inbox/remove"),
+		run: keyedWriter((s, inbox) => handleQueueRemove(s.request, s.env, inbox)),
+	},
+	{
+		method: "POST",
+		match: segments("/api/hooks/queue/:inbox/return"),
+		run: keyedWriter((s, inbox) => handleQueueReturn(s.request, s.env, inbox)),
+	},
+	{
+		method: "POST",
+		match: segments("/api/hooks/queue/:inbox/extend"),
+		run: keyedWriter((s, inbox) => handleQueueExtend(s.request, s.env, inbox)),
+	},
+	{
+		method: "POST",
+		match: segments("/api/hooks/queue/:inbox/requeue"),
+		run: keyedWriter((s, inbox) => handleQueueRequeue(s.request, s.env, inbox)),
+	},
+	{
+		method: "POST",
+		match: segments("/api/hooks/queue/:inbox/delete"),
+		run: keyedWriter((s, inbox) => handleQueueDelete(s.request, s.env, inbox)),
+	},
 	{
 		method: "GET",
 		match: segments("/api/hooks/queue/:inbox/:id/body"),
@@ -217,6 +274,11 @@ const KEYED_ROUTES: Route<KeyedRoute>[] = [
 		method: "GET",
 		match: segments("/api/hooks/queue/:inbox/:id"),
 		run: keyedReader((s, inbox, params) => handleQueueOne(s.env, inbox, params.id)),
+	},
+	{
+		method: "DELETE",
+		match: segments("/api/hooks/queue/:inbox/:id"),
+		run: keyedWriter((s, inbox, params) => handleQueueDeleteOne(s.env, inbox, params.id)),
 	},
 ];
 

@@ -32,7 +32,7 @@ function parseJsonColumn(raw: string | null): unknown {
 }
 
 /** Full detail, including the stored headers and the body when it is text. */
-function detail(row: WebhookEvent) {
+export function detail(row: WebhookEvent) {
 	const { headers, query, body_text, ...rest } = row;
 	return {
 		...rest,
@@ -43,6 +43,32 @@ function detail(row: WebhookEvent) {
 		// `queue-body` streams it back verbatim.
 		body_available: body_text !== null || Boolean(row.body_r2_key),
 	};
+}
+
+/**
+ * Turn a `?receiver=` reference -- an id, the current slug, or the slug it had
+ * before a rotation -- into the receiver id its events actually carry.
+ *
+ * Filtering on the events' own denormalized `slug` would have made rotation cost
+ * history: every message stored under the old slug would vanish from
+ * `--receiver <new-slug>` even though it is the same receiver, and §7 promises
+ * the opposite. Null means no such receiver, in which case the caller falls back
+ * to matching the raw string -- a deleted receiver's events are still findable by
+ * the slug they were stored under.
+ */
+export async function resolveReceiverId(
+	env: Env,
+	inbox: string,
+	ref: string,
+): Promise<string | null> {
+	const row = await env.DB.withSession("first-unconstrained")
+		.prepare(
+			`SELECT id FROM webhook_receivers
+			  WHERE inbox = ? AND (id = ? OR slug = ? OR previous_slug = ?) LIMIT 1`,
+		)
+		.bind(inbox, ref, ref, ref)
+		.first<{ id: string }>();
+	return row?.id ?? null;
 }
 
 function limitFrom(url: URL, fallback = 20): number {
@@ -75,9 +101,11 @@ async function selectEvents(
 	const receiver = url.searchParams.get("receiver");
 	if (receiver) {
 		// Accept the receiver id or its slug -- the id is what the API returns, the
-		// slug is what you remember.
+		// slug is what you remember -- and resolve it to the id, so a rotated
+		// receiver's older messages answer to its new name.
+		const ref = (await resolveReceiverId(env, inbox, receiver)) ?? receiver;
 		filters.push("(receiver_id = ? OR slug = ?)");
-		params.push(receiver, receiver);
+		params.push(ref, receiver);
 	}
 	const status = url.searchParams.get("status");
 	if (status) {
