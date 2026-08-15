@@ -1,5 +1,5 @@
 ---
-version: 6
+version: 7
 created: 2026-08-15
 ---
 
@@ -458,8 +458,22 @@ Handshake requests are **stored** (`status='handshake'`), because "the provider
 says my URL failed validation" is the number-one thing you will need to debug,
 and the request that failed is the only evidence.
 
-Exact Zoom CRC field names to be re-verified against Zoom's live docs at
-implementation time -- their validation rules changed once already.
+**Zoom's CRC was re-verified against `developers.zoom.us/docs/api/webhooks/` on
+2026-08-15**, as this section required. Every field name above is confirmed
+unchanged: event `endpoint.url_validation`, request `payload.plainToken`,
+response `{plainToken, encryptedToken}`, HMAC-SHA256 with the **secret token as
+the key and the plainToken as the message**, hex out. Two details the docs add:
+`200` **or** `204` is acceptable, and after **six** consecutive failed
+revalidations Zoom disables the endpoint (notifying after the 2nd and 4th). The
+72-hour cadence is confirmed. Meta's `hub.mode`/`hub.challenge`/`hub.verify_token`
+and Slack's `url_verification` were re-checked the same day against
+`developers.facebook.com` and `docs.slack.dev`; both match this table, and Slack
+documents plain-text, form-encoded and JSON as equally acceptable answers.
+
+**Detection is on SHAPE, and a failed handshake is still a handshake.** A `meta`
+request carrying the wrong `hub.verify_token` answers `403` rather than falling
+through to the delivery path -- see the v7 changelog for why. Everything else in
+the trigger column is literal.
 
 ---
 
@@ -927,6 +941,50 @@ All four confirmed by Jonas. Nothing in this plan is open; build it as written.
 ---
 
 ## Changelog
+
+### v7 -- 2026-08-15 -- author: link 3 (phase 3)
+
+No GOAL change, nothing weakened. One doc round trip §6 demanded, one refinement
+to §6's trigger column, and three implementation facts -- one of which is a
+pre-existing bug this phase would have widened.
+
+- **§6's Zoom re-verification is done, and the field names are unchanged.**
+  Recorded inline in §6 above, along with two details the plan did not carry
+  (`204` is acceptable as well as `200`; six consecutive failures disable the
+  endpoint). Meta and Slack were re-checked at the same time and also match.
+- **A failed handshake does not fall through to the delivery path.** §6's trigger
+  column read `hub.verify_token == config`, which literally means a wrong token is
+  "not a handshake" and takes the normal path. That path answers `200 {"ok":true}`
+  -- not the challenge -- so Meta reports a failure while our logs show a
+  perfectly ordinary event, and an unauthenticated prober can fill the queue by
+  guessing tokens. Detection is now on shape (`GET` + `hub.mode=subscribe` +
+  `hub.challenge`) and a mismatched token answers `403`, stored as
+  `status='handshake'`. This serves §6's own stated reason for storing handshakes
+  at all: the request that failed is the only evidence.
+- **A shared secret in the QUERY STRING was stored in plaintext.**
+  `collectHeaders` has taken a redaction list since phase 1; `collectQuery` never
+  did. Phase 2's `auth_mode: query` made `auth_config.param` a credential and the
+  gap opened silently; phase 3's `meta` would have added `hub.verify_token` to it.
+  Fixed with `secretParams()` beside `secretHeaders()`. §4's header policy is
+  unchanged -- this extends the same rule to the other half of the request. The
+  `hmac`/`digest` carve-out deliberately does NOT extend here: no provider on the
+  list signs via the query string. Card `bug-query-secret-stored-plaintext`,
+  mutation-checked in both directions.
+- **A handshake config that could not answer is refused at registration.** `meta`
+  without a verify token, `zoom` without a secret, `static` with an empty
+  predicate. The failure they replace surfaces days later for Zoom, whose CRC
+  re-runs every 72 hours, and only in our logs. Same fail-closed posture as the
+  mode gate. An empty `static` predicate also matches nothing at request time, so
+  it can never silently divert a live queue.
+- **A `meta` receiver gets `GET` added to its method list automatically.** Meta
+  verifies over GET, and the default `POST` would 405 before the handshake ever
+  ran -- an error the operator sees only as "verification failed". Applied on
+  create and on the patch that switches a live receiver to `meta`, and printed by
+  the CLI so it does not look like the flag was ignored.
+- **A storage failure does not fail a handshake.** Everywhere else a write we
+  could not complete becomes the 503 of §4's status table, because the provider is
+  trusting us to have kept its event. A handshake has no event to keep: the answer
+  is the whole product and does not depend on the row.
 
 ### v6 -- 2026-08-15 -- author: link 2 (phase 2)
 

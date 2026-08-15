@@ -1,11 +1,11 @@
 ---
 chain_id: webhooks-20260815-115712-c042
 plan_file: /Users/jonas/projects/agent-drop/docs/WEBHOOKS-PLAN.md
-plan_version: 6
+plan_version: 7
 status: in_progress
-current_phase: 3
-last_updated: 2026-08-15T07:35:00Z
-link_count: 2
+current_phase: 4
+last_updated: 2026-08-15T08:55:00Z
+link_count: 3
 ---
 
 # Agent Drop webhook-receiver chain state
@@ -35,12 +35,19 @@ link_count: 2
         `<redacted>` (card `bug-signature-header-redacted`)
   - [x] 2j. RUNTIME check: verified=1 round trip, one-byte tamper -> 401 (log below)
   - [x] 77 new tests; full suite 543 pass / 0 fail; `bun run verify` exit 0
-- [ ] 3. Handshakes -- meta/slack/zoom/echo/static
-  - [ ] 3z. **Do for handshakes what 2a did for auth**: derive
-        `SUPPORTED_HANDSHAKE_MODES` in `src/lib/webhook-defs.ts` from the
-        handshake dispatch table rather than typing the list twice. It is still
-        `["none"]`, so every handshake mode is refused by the CRUD and dead on
-        the receive path until that edit lands.
+- [x] 3. Handshakes -- meta/slack/zoom/echo/static (link 3)
+  - [x] 3a. `SUPPORTED_HANDSHAKE_MODES` DERIVED from the handshake dispatch table
+  - [x] 3b. Zoom CRC re-verified against the live docs (plus Meta and Slack)
+  - [x] 3c. `webhook-handshake.ts` -- all five modes, one dispatch table
+  - [x] 3d. The seam in `webhook-receive.ts`, BEFORE verify, never falling through
+  - [x] 3e. Handshakes stored `status='handshake'`, never deduped, never counted
+  - [x] 3f. Config refused at registration when it could not answer; `meta` gets GET
+  - [x] 3g. **Bug found + fixed**: a query-string secret was stored in plaintext
+        (card `bug-query-secret-stored-plaintext`)
+  - [x] 3h. CLI `--handshake-*` flags, shared by hook-create and hook-update
+  - [x] 3i. Mutation-checked, three ways, before trusting a clean first run
+  - [x] 3j. RUNTIME check: all five modes on `bun run dev` (log below)
+  - [x] 42 new tests; full suite 585 pass / 0 fail; `bun run verify` exit 0
 - [ ] 4. The pull queue -- lease/remove/return/delete/put/peek + completeness gate
 - [ ] 5. Onward delivery -- RuleSubject, hook channel, passthrough, replay
 - [ ] 6. Retention, provisioning, deploy, docs
@@ -91,6 +98,23 @@ Modified: `src/lib/auth.ts` (imports the shared compare), `src/lib/webhook-defs.
 `tools/agent-drop.ts` (`hook-test`, the `--auth-*` flags on create+update,
 `verdictLabel` so peek shows all three verdicts), `test/webhook-receive.test.ts`
 (+8), `test/webhook-api.test.ts` (+1).
+
+Phase 3 (link 3):
+
+| File | What |
+|---|---|
+| `src/lib/webhook-handshake.ts` | the five modes in one dispatch table; `HANDSHAKE_MODES` is its keys |
+| `test/webhook-handshake.test.ts` | 32 tests: per-mode challenges, the ordering guarantee, what a handshake is not |
+
+Modified: `src/lib/webhook-defs.ts` (`SUPPORTED_HANDSHAKE_MODES` derived),
+`src/lib/webhook-receive.ts` (the seam + a shared store envelope),
+`src/lib/webhook-body.ts` (`secretParams`, and `static` predicate headers),
+`src/lib/webhook-store.ts` (`collectQuery` takes a redaction list),
+`src/api/hook-config.ts` (`handshakeConfigError`, `methodsForHandshake`),
+`src/api/hooks.ts` (both gates, on create and on patch),
+`tools/agent-drop.ts` (`withHandshakeOptions` on create + update, `hook-get`),
+`test/helpers/env.ts` (`handshakeConfig` on `seedReceiver`),
+`test/webhook-receive.test.ts` (+3), `test/webhook-api.test.ts` (+7).
 
 ## Decisions
 
@@ -152,6 +176,34 @@ Phase 2 (link 2) -- all recorded in PLAN v6's changelog:
 - **The 401 body says nothing about why.** The reason goes to
   `console.warn` for the operator; a caller probing for a working secret learns
   only that it failed.
+
+Phase 3 (link 3) -- all recorded in PLAN v7's changelog:
+
+- **`collectQuery` had no redaction list and `collectHeaders` always did.** The
+  asymmetry was free until something named a query parameter as a credential;
+  `auth_mode: query` did that in phase 2 and `meta` would have again in phase 3.
+  A shared secret is no less a credential for arriving in a `?token=`. Card
+  `bug-query-secret-stored-plaintext`. **Phase 4 note: any new surface that
+  copies a request into a row wants both lists, not one.**
+- **A failed handshake is still a handshake.** A wrong Meta verify token answers
+  403 instead of falling through, because the fall-through path answers
+  `{"ok":true}` -- which is not the challenge, so Meta fails the validation while
+  our logs show an ordinary event and the queue fills with probes.
+- **Detection is on SHAPE, and every handler may decline.** A `meta`/`slack`/
+  `zoom` receiver takes ordinary deliveries on the same URL; the handler returns
+  null and the normal verify-and-store path has it. That is why `echo` and
+  `static` are bounded (short non-JSON only; empty predicate matches nothing) --
+  an unbounded one would silently divert a live queue into `handshake`.
+- **A handshake is never deduped.** Zoom re-runs its CRC every 72 hours with a
+  fresh token, but a receiver on body-hash dedupe would have swallowed a repeat.
+  It is also never counted: `event_count` describes the queue, and a handshake
+  never joins it.
+- **A storage failure does not fail a handshake.** The one place where a write we
+  could not complete is NOT a 503. There is no event to keep -- the answer is the
+  whole product.
+- **Zoom, Meta and Slack were all re-verified against live docs**, not memory.
+  Zoom's field names are unchanged since the plan was written; `204` is
+  acceptable as well as `200`, and six consecutive failures disable the endpoint.
 
 ## Open questions / blockers
 
@@ -324,6 +376,98 @@ Left behind in the LOCAL dev D1 for phase 3 to reuse: receivers
 `lisa/track-17-0qjqda` (digest) and `lisa/stripe-live-jaekt0` (stripe), and an
 admin API key named `p2-runtime`.
 
+## Phase 3 runtime log -- handshakes, proven on `bun run dev`
+
+Not tests: the real worker in workerd, real local D1, real local R2. Zoom's
+expected hash was computed with `openssl` OUTSIDE the codebase, so a match is
+agreement with an external tool rather than the code agreeing with itself.
+
+```
+$ drop hook-create lisa fb-page --handshake meta --handshake-token verify-me-please
+  https://frst.dev/h/lisa/fb-page-1125es
+  id 3a0ecf58-506a-462f-a794-30759a511b0e  POST,GET  keeps 120d
+  handshake meta, GET added for it        <- Meta verifies over GET; POST-only
+                                             would have 405'd before the handshake
+
+$ curl "…/h/lisa/fb-page-1125es?hub.mode=subscribe&hub.challenge=1158201444\
+&hub.verify_token=verify-me-please"
+HTTP 200  content-type=text/plain; charset=utf-8
+body: [1158201444]                        <- bare, not JSON, not quoted
+
+$ curl "…?hub.mode=subscribe&hub.challenge=999&hub.verify_token=nope"
+{"error":"hub.verify_token mismatch"}  HTTP 403   <- never falls through
+
+$ drop --format json queue-peek lisa 01m020t2q7ddnvyzbyt0qh0jqd
+  query: {"hub.mode":"subscribe","hub.challenge":"999",
+          "hub.verify_token":"<redacted>"}        <- the bug fixed this phase
+```
+
+The ordering guarantee, live -- the same receiver, the same invalid signature,
+two different requests:
+
+```
+$ printf '%s' 'qgg8vlvZRS6UYooatFL8Aw' | openssl dgst -sha256 -hmac 'zoomSecret123' -hex
+  3ee215dfbe53223d6ab24ea678f99d586ea8dc959ce3f737482a1a702f29ac2f   <- ground truth
+
+$ drop hook-create lisa zoom-crc --handshake zoom --handshake-secret zoomSecret123 \
+    --auth digest --secret signing-key --auth-header sign
+
+# Zoom's real CRC shape, signature DELIBERATELY garbage:
+$ curl -X POST …/h/lisa/zoom-crc-s7rw1m -H 'sign: deadbeef…deadbeef' \
+    -d '{"payload":{"plainToken":"qgg8vlvZRS6UYooatFL8Aw"},"event_ts":1654503849680,
+         "event":"endpoint.url_validation"}'
+{"plainToken":"qgg8vlvZRS6UYooatFL8Aw",
+ "encryptedToken":"3ee215dfbe53223d6ab24ea678f99d586ea8dc959ce3f737482a1a702f29ac2f"}
+  HTTP 200                                 <- MATCHES openssl. never reached the verifier
+
+# same receiver, same garbage signature, an ORDINARY delivery:
+$ curl -X POST …/h/lisa/zoom-crc-s7rw1m -H 'sign: deadbeef…deadbeef' \
+    -d '{"event":"meeting.started"}'
+{"error":"signature verification failed"}   HTTP 401   <- the control
+```
+
+The other three modes, and the fall-through half of each:
+
+```
+slack url_verification  -> {"challenge":"3eZbrw1aBm2rZgRNFdxV…"}      200
+slack event_callback    -> {"ok":true,"id":"01m020vncjxra3c25s4f5py8mj"}
+echo  'challenge-abc123' -> challenge-abc123                          200
+echo  {"real":"event"}   -> {"ok":true,"id":"01m020vne1k58pbrr1d58bmg0f"}
+static GET /ping         -> PONG                                      200
+static GET /elsewhere    -> {"ok":true,"id":"01m020vnf87w3gxy6tm629s984"}
+
+$ drop hook-create lisa broken-zoom --handshake zoom
+API 400: handshake_mode 'zoom' needs the webhook secret token -- its CRC
+         answer is an HMAC keyed by it          <- refused, not left to fail live
+```
+
+Every mode stored, and nothing miscounted:
+
+```
+handshake  fb-page-1125es     meta.url_verification    verified=None
+handshake  zoom-crc-s7rw1m    endpoint.url_validation  verified=None
+handshake  slack-app-prcmjt   url_verification         verified=None
+handshake  echo-box-wyc5nt    echo                     verified=None
+handshake  setup-ping-jha5mj  static                   verified=None
+rejected   zoom-crc-s7rw1m    (the control)            verified=0
+
+  zoom-crc-s7rw1m   handshake=zoom   events=0    <- a handshake never joins the
+  fb-page-1125es    handshake=meta   events=0       queue, so it is not counted
+  slack-app-prcmjt  handshake=slack  events=1    <- the one real delivery
+```
+
+`verified=None` and not 0 throughout: 0 would mean the verifier ran and said no,
+null means it was never asked. That distinction IS the phase.
+
+Left behind in the LOCAL dev D1 for phase 4 to reuse: receivers
+`lisa/track-17-0qjqda` (digest), `lisa/stripe-live-jaekt0` (stripe),
+`lisa/zoom-crc-s7rw1m` (zoom + digest), `lisa/fb-page-1125es` (meta),
+`lisa/slack-app-prcmjt`, `lisa/echo-box-wyc5nt`, `lisa/setup-ping-jha5mj`, and
+17 events across `queued` / `handshake` / `rejected` -- a decent queue to lease
+against. Admin API key named `p3-runtime` (value not recorded; make your own with
+`drop key-create`). The CLI reaches local dev via `AGENT_DROP_URL=http://localhost:5173`
+-- export it AFTER `source ~/.secrets`, which sets the production key.
+
 ## Log
 
 - 2026-08-15T04:57:12Z [link 1] chain started at plan v3, phase 1
@@ -375,3 +519,26 @@ admin API key named `p2-runtime`.
   trusting 46 first-run passes: swapping `standard`'s template to
   `{ts}.{id}.{body}` turns 3 tests red, restoring it turns them green. The
   fixtures bite.
+- 2026-08-15T08:20:00Z [link 3] Zoom CRC re-verified against
+  `developers.zoom.us/docs/api/webhooks/` as PLAN §6 required -- field names
+  unchanged, and two details added to §6 (`204` is acceptable too; six
+  consecutive failures disable the endpoint). Meta and Slack re-checked the same
+  way against `developers.facebook.com` and `docs.slack.dev`; both match.
+- 2026-08-15T08:40:00Z [link 3] **off-mission bug found and fixed**, card
+  `bug-query-secret-stored-plaintext`: `collectQuery` copied the whole query
+  string into the row untouched while `collectHeaders` had taken a redaction list
+  since phase 1. Phase 2's `auth_mode: query` turned `auth_config.param` into a
+  credential and the gap opened silently; phase 3's `meta` (`hub.verify_token`)
+  would have widened it. Mirror image of phase 2's bug -- that one destroyed
+  evidence that should have been kept, this one kept a credential that should
+  have been destroyed. Proven RED by mutation (3 tests) before the fix stood.
+- 2026-08-15T08:55:00Z [link 3] **phase 3 complete.** All five handshake modes:
+  `meta`, `slack`, `zoom`, `echo`, `static`. 42 new tests, full suite 585 pass /
+  0 fail, `bun run verify` exit 0. Zoom's expected HMAC was computed with
+  `openssl` and again with python's `hmac` outside the codebase, both agreeing,
+  and one fixture pins a digest with a leading zero. Mutation-checked three ways
+  before the clean run was trusted: swapping the HMAC key and message turns 4
+  red; making a configured signature suppress the handshake turns exactly the
+  PLAN's required test red; dropping the query redaction turns 3 red. Runtime
+  round trip transcribed above, including the ordering guarantee against a live
+  worker. Plan v6 -> v7.
