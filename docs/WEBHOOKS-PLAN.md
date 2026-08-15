@@ -1,5 +1,5 @@
 ---
-version: 9
+version: 10
 created: 2026-08-15
 ---
 
@@ -846,7 +846,10 @@ headers verbatim; a failing target retries with backoff and logs to
 2. `HOOK_RATE_LIMIT` binding + the per-receiver daily cap (§11).
 3. Out-of-band provisioning documented AND run, in this order:
    ```bash
-   wrangler d1 migrations apply agent-drop-db --remote      # 0009 -- BEFORE the deploy
+   bun run db:migrate      # 0009 + 0010 -- BEFORE the deploy. NOT a bare
+                           # `wrangler d1 migrations apply`: the committed
+                           # wrangler.toml carries placeholder ids and that form
+                           # fails with "could not route" (v10).
    bun run deploy
    wrangler r2 bucket lifecycle add agent-drop-storage hooks-130d "hooks/" --expire-days 130
    ```
@@ -941,6 +944,45 @@ All four confirmed by Jonas. Nothing in this plan is open; build it as written.
 ---
 
 ## Changelog
+
+### v10 -- 2026-08-15 -- author: link 6 (phase 6)
+
+No GOAL change, nothing weakened. The chain's only phase that found no
+pre-existing bug. Four decisions §9 and §11 imply but do not spell out, and one
+correction to a command §12 got wrong.
+
+- **The daily cap does NOT refuse a handshake, and the burst limiter does.** §11
+  gives the cap one job -- bound a table that grows forever -- and §6 already
+  established that a handshake's ANSWER is the whole product and does not depend
+  on its row (v7: "a storage failure does not fail a handshake"). Refusing a Zoom
+  CRC over a row cap costs the operator their endpoint registration -- six
+  consecutive failures and Zoom disables it -- to save one row. So the cap sits
+  AFTER handshake detection and the fail-open burst limiter sits before the body
+  read, where it sheds a flood of anything, handshake-shaped requests included.
+- **Every row counts towards the cap, whatever its status.** A flood of garbage
+  that fails verification grows the table exactly as fast as real traffic, so a
+  cap that only counted the well-behaved half would be a cap on the one kind of
+  traffic that was never the problem. The window is a rolling 24 hours (no
+  timezone to get wrong) and `Retry-After` is the time until the oldest row in it
+  ages out -- the earliest moment the answer could actually change.
+- **A body that will not delete keeps its row.** §9 says "R2 bodies first" and
+  does not say what a failed delete does. The row is the only record of which
+  object belonged to it, so deleting it anyway strands those bytes in the bucket
+  with nothing pointing at them. The row stays, `kept` is counted, and the next
+  tick tries again. One stuck body does not stop the rest of the batch.
+- **The two cron sweeps are settled, not chained.** §9 adds "a second sweep" to
+  an existing cron. Chaining them means a D1 or R2 hiccup in the drop sweep
+  silently stops webhook retention, which is the shape of failure nobody notices
+  for a month. `runSweeps` runs both and reports each independently;
+  `runScheduled` keeps its exact old contract, so every existing test in
+  `test/reaper.test.ts` passes with the file untouched.
+- **§12's `wrangler d1 migrations apply agent-drop-db --remote` does not work
+  from this repo**, and phase 6 hit it on the first command. The committed
+  `wrangler.toml` carries placeholder account and database ids by design, so the
+  bare form dies with a "could not route" API error naming
+  `your-cloudflare-account-id`. `bun run db:migrate` is the working form -- it
+  builds the real config first, exactly as `bun run deploy` does. Corrected in
+  `CLAUDE.md` and `README.md`, which both carried the same broken command.
 
 ### v9 -- 2026-08-15 -- author: link 5 (phase 5)
 

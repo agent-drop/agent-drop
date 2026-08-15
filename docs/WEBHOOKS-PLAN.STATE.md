@@ -86,7 +86,20 @@ link_count: 5
         replay, loop refusal, mirror (log below)
   - [x] 36 new tests; full suite 670 pass / 0 fail; `bun run verify` exit 0
   - [x] 5o. integrated into `main` at `e462dd0`
-- [ ] 6. Retention, provisioning, deploy, docs
+- [>] 6. Retention, provisioning, deploy, docs (link 6, IN PROGRESS)
+  - [x] 6a. `hook-reaper.ts` -- expired events, 500/run, R2 bodies before rows
+  - [x] 6b. `runSweeps` -- both sweeps settled, neither can cancel the other
+  - [x] 6c. Every existing test in `test/reaper.test.ts` passes UNCHANGED (file untouched)
+  - [x] 6d. `HOOK_RATE_LIMIT` binding, keyed by receiver id, fails open
+  - [x] 6e. `daily_cap` enforced in D1 -- rolling 24h, after the handshake, never before
+  - [x] 6f. 30 new tests; full suite 700 pass / 0 fail; `bun run verify` exit 0
+  - [x] 6g. Mutation-checked six ways before trusting the clean run
+  - [x] 6h. Local cron tick on `bun run dev` -- expired event + R2 body gone (log below)
+  - [x] 6i. Remote migrations `0009` + `0010` applied, THEN `bun run deploy`
+  - [x] 6j. R2 lifecycle `hooks-130d` added and verified
+  - [x] 6k. LIVE smoke test on `https://frst.dev/h/...` (log below)
+  - [x] 6l. Docs: `CLAUDE.md`, `README.md`, the `agent-drop` skill
+  - [x] 6m. Integrated into `main`
 
 ## Artifacts produced
 
@@ -199,6 +212,30 @@ count: two deferred tasks now, not one).
 
 `rules.ts` was 279 lines and would have been 526; it is 195 after the split, and
 every existing import of `lib/rules` still resolves through re-exports.
+
+Phase 6 (link 6):
+
+| File | What |
+|---|---|
+| `src/lib/hook-reaper.ts` | the retention sweep: 500/run, oldest expiry first, R2 bodies before rows |
+| `src/lib/webhook-throttle.ts` | `HOOK_RATE_LIMIT` (fails open) + the D1 daily cap (does not) |
+| `test/hook-reaper.test.ts` | 14 tests: what the cron destroys, what it must not, and both sweeps in one tick |
+| `test/webhook-throttle.test.ts` | 16 tests: the burst shed, the cap, and the handshake that outranks it |
+
+Modified: `src/lib/reaper.ts` (`runSweeps` -- both sweeps settled; `runScheduled`
+untouched), `src/index.ts` (the cron calls `runSweeps`), `src/lib/webhook-receive.ts`
+(two seams: burst before the body read, cap after the handshake), `src/types.ts`
+(`HOOK_RATE_LIMIT`), `wrangler.toml` (the third `[[ratelimits]]`),
+`tools/agent-drop.ts` (two `--daily-cap` help strings that described a calendar
+day), `test/helpers/env.ts` (`dailyCap` on `seedReceiver`, the binding on `makeEnv`),
+`CLAUDE.md`, `README.md`.
+
+**`test/reaper.test.ts` was not opened.** The phase's own gate: the stale-`pending`
+sweep is unchanged, so its 12 tests pass with the file byte-identical.
+
+Outside the repo (not committed): `~/.claude/skills/agent-drop/SKILL.md` -- the
+webhook section, the four ingest channels, and a corrected Storage & TTL block
+(it claimed R2 blobs expire at 30 days; `drops/` is 90).
 
 ## Decisions
 
@@ -358,6 +395,34 @@ Phase 5 (link 5) -- all recorded in PLAN v9's changelog:
   `rule-test` said a forward would fire on `web`/`api`; it never does. You check a
   dry run precisely when you are unsure, and it answered with confidence either
   way.
+
+Phase 6 (link 6) -- all recorded in PLAN v10's changelog:
+
+- **A fail-open throttle and a D1 cap are not alternatives, and neither is the
+  other's fallback.** The limiter sheds a burst per colo and lets everything
+  through when it is down; the cap is counted in D1 over a rolling 24h and cannot
+  fail open. §11 says as much; the code now says it too, in two different places
+  in the request path.
+- **The cap does not refuse a handshake.** It bounds rows; a handshake does not
+  need one. Refusing a Zoom CRC over a cap costs the endpoint registration (six
+  failures and Zoom disables it) to save a single row -- and phase 3 already
+  settled the general form of this when it made a storage failure not fail a
+  handshake. Proven live: same receiver, same instant, CRC answered 200 while an
+  ordinary delivery got 429.
+- **A body that will not delete keeps its row.** The row is the only record of
+  which object belonged to it. This is the mirror image of `queue-delete`'s
+  bodies-before-rows rule, and the reason both exist: an orphaned object is
+  invisible and bills forever.
+- **Settle the sweeps, do not chain them.** A drop-sweep failure that silently
+  stopped webhook retention is the shape of bug nobody notices for a month.
+  Tested directly, with the drop sweep throwing.
+- **`wrangler d1 migrations apply --remote` does not work from this repo.** The
+  placeholder ids in the committed `wrangler.toml` make it die naming
+  `your-cloudflare-account-id`. `bun run db:migrate` is the working form and was
+  already in `package.json`; both `CLAUDE.md` and `README.md` documented the
+  broken one. **Nothing was wrong with the code** -- this is the one "phase 6
+  found no bug" phase, and this was a doc bug the phase walked into on its first
+  command.
 
 ## Open questions / blockers
 
@@ -916,6 +981,152 @@ named `p5-runtime` (value not recorded; make your own with `drop key-create`).
 note `drop key-create` needs the real `AGENT_DROP_ADMIN_KEY` from `~/.secrets`
 -- the `ad_` key it hands back is for the keyed routes only.
 
+## Phase 6 runtime log -- retention and the limits, proven on `bun run dev`
+
+Not tests: the real worker in workerd, the real cron entrypoint, real local D1 and
+R2, driven by the real CLI. Row state is read straight out of the miniflare D1
+file; the R2 body is checked through the API, which is what a consumer sees.
+
+```
+$ drop hook-create lisa p6-retention
+  https://frst.dev/h/lisa/p6-retention-svz9k9
+  id 3072072e-3a57-486f-a172-e573e09f7075  POST  keeps 120d
+
+# 70 KB, so it lands in R2 rather than inline -- the sweep needs a body to destroy
+$ curl -X POST .../h/lisa/p6-retention-svz9k9 --data-binary @big.json
+{"ok":true,"id":"01m025fa7smhcgka6t6xttx3d9"}
+$ curl -X POST .../h/lisa/p6-retention-svz9k9 -d '{"event":"small.one"}'
+{"ok":true,"id":"01m025fa8zabsz3gxhs151x58z"}
+
+  01m025fa7sm…  70032B  hooks/lisa/p6-retention-svz9k9/01m025fa7sm…   <- R2
+  01m025fa8za…     21B  (inline)                                      <- D1
+
+$ sqlite  UPDATE webhook_events SET expires_at = <now-1s> WHERE id='01m025fa7sm…'
+  body endpoint BEFORE: HTTP 200  70032 bytes
+
+$ curl "http://localhost:5173/cdn-cgi/handler/scheduled?cron=17+*+*+*+*"
+ok   HTTP 200
+
+  hook reaper: scanned 1 expired events -- deleted 1, bodies 1, kept 0
+  events 23 -> 22                      <- exactly one row, not a table
+  01m025fa8za…  queued                 <- the unexpired one, untouched
+  body endpoint AFTER: HTTP 404        <- the R2 body went with it
+```
+
+The daily cap, live. The receiver already had one row in the window:
+
+```
+$ drop hook-update lisa/p6-retention-svz9k9 --daily-cap 2
+  POST #2 -> HTTP/1.1 200 OK           {"ok":true,"id":"01m025gjt9grmnqg5pfxydde08"}
+  POST #3 -> HTTP/1.1 429  retry-after: 86359
+                                       {"error":"daily event cap reached"}
+  rows after: 2                        <- refused means STORED NOTHING
+```
+
+`retry-after: 86359` is 24h minus the ~41 seconds the oldest row had already
+served -- the earliest moment the answer could change, not a fixed guess.
+
+The handshake carve-out, on one receiver at 5 rows against a cap of 1:
+
+```
+$ drop hook-update lisa/zoom-crc-s7rw1m --daily-cap 1
+
+# Zoom's CRC, at a receiver well past its cap:
+{"plainToken":"qgg8vlvZRS6UYooatFL8Aw",
+ "encryptedToken":"3ee215dfbe53223d6ab24ea678f99d586ea8dc959ce3f737482a1a702f29ac2f"}
+  HTTP 200                             <- answered. six failures and Zoom disables
+                                          the endpoint; the cap is not worth that
+
+# an ORDINARY delivery to the same receiver, the same instant:
+{"error":"daily event cap reached"}    HTTP 429   <- the control
+```
+
+## Phase 6 live log -- the deployed worker at `https://frst.dev`
+
+Not localhost. Against production, after `bun run db:migrate` and `bun run deploy`.
+
+```
+$ drop hook-create lisa p6-smoke --auth digest --secret p6-smoke-secret \
+    --auth-header sign --preset generic --routing-key data.tag
+  https://frst.dev/h/lisa/p6-smoke-yzyh9v
+  id ad4796a3-f0a0-4430-acc0-2ca69da4baa2  POST  keeps 120d
+
+$ shasum -a 256 p6live.json           # 104B: odd key order, interior newline,
+b1712d2870cef616…f93f81876  p6live.json    # a é escape AND a literal é
+$ SIGN=$(cat p6live.json <(printf '%s' '/p6-smoke-secret') | shasum -a 256 | cut -d' ' -f1)
+  4db7bd7b6733ba5b34bc02f9409d84663502f6e55e51f7a4b00d6e5136597d83
+
+$ curl -X POST https://frst.dev/h/lisa/p6-smoke-yzyh9v -H "sign: $SIGN" \
+    -H 'Authorization: Bearer must-be-redacted' --data-binary @p6live.json
+{"ok":true,"id":"01m025m0f58syq3w6w7kkq7n84"}   HTTP 200
+
+$ drop queue-peek lisa 01m025m0f58syq3w6w7kkq7n84
+  POST lisa/p6-smoke-yzyh9v  queued  verified      <- verified in PRODUCTION
+  type/key p6-live                                 <- routing key off data.tag
+  104B  sha256 b1712d2870cef616…f93f81876          <- MATCHES the sent file
+  headers:
+    authorization: <redacted>
+    sign: 4db7bd7b6733ba5b34bc02f9409d84663502f6e55e51f7a4b00d6e5136597d83
+    cf-connecting-ip: 49.0.79.228   cf-ipcountry: TH   <- real CF metadata
+
+$ drop queue-body lisa 01m025m0f5… -o roundtrip.bin
+  Wrote 104B
+$ cmp p6live.json roundtrip.bin && echo IDENTICAL
+IDENTICAL
+b1712d2870cef616…f93f81876  p6live.json
+b1712d2870cef616…f93f81876  roundtrip.bin
+
+$ drop queue-get lisa --receiver p6-smoke-yzyh9v --limit 5 --lease 120
+  POST lisa/p6-smoke-yzyh9v  leased  verified
+    {"event":"TRACKING_UPDATED",
+    "data":{"number":"RR123456789CN","tag":"p6-live","note":"café café"}}
+                                                   ^ newline, key order, both
+                                                     escapes -- all intact
+```
+
+One byte changed, the same signature, and an unregistered slug:
+
+```
+$ cmp -l p6live.json tampered.json | wc -l
+       1
+$ curl -X POST … -H "sign: $SIGN" --data-binary @tampered.json
+{"error":"signature verification failed"}   HTTP 401
+$ curl -X POST https://frst.dev/h/lisa/no-such-receiver-here -d '{}'
+{"error":"no such receiver"}                HTTP 404
+```
+
+Ack, then clean up after ourselves:
+
+```
+$ drop queue-remove lisa 01m025m0f5…
+  Removed 1
+$ drop hook-delete lisa/p6-smoke-yzyh9v --purge
+  Receiver deleted (3 event(s) destroyed)
+$ curl -X POST https://frst.dev/h/lisa/p6-smoke-yzyh9v -d '{}'
+{"error":"no such receiver"}                HTTP 404
+$ drop hooks        -> No receivers
+$ drop queue-stats  -> lisa  0 total
+```
+
+Production is live and clean: no receivers, no events, nothing left behind.
+
+## Provisioning actually run (2026-08-15, in this order)
+
+```bash
+bun run db:migrate    # 0009_webhook_receivers.sql ✅ + 0010_rule_payload_mode.sql ✅
+                      # NOT `wrangler d1 migrations apply --remote` -- see PLAN v10
+bun run deploy        # Version 6823a107-20e0-4c81-a137-bc2edfe1bb2a
+                      # bindings confirmed incl. HOOK_RATE_LIMIT (300 requests/60s)
+                      # triggers: frst.dev/*, schedule 17 * * * *, both queue consumers
+wrangler r2 bucket lifecycle add agent-drop-storage hooks-130d "hooks/" --expire-days 130
+```
+
+No `wrangler queues create` was needed: the webhook receivers reuse the existing
+`agent-drop-webhooks` queue, and `wrangler queues list` confirmed both
+`agent-drop-webhooks` and `agent-drop-r2-events` already exist. The R2 lifecycle
+rule was verified by `lifecycle list` afterwards -- four rules now, `hooks/` at
+130 days beside `drops/` at 90.
+
 ## Log
 
 - 2026-08-15T04:57:12Z [link 1] chain started at plan v3, phase 1
@@ -1057,3 +1268,39 @@ note `drop key-create` needs the real `AGENT_DROP_ADMIN_KEY` from `~/.secrets`
   body matches the sent file byte for byte, with the signature header verbatim
   and none of agent-drop's own headers added. Plan v8 -> v9.
 - 2026-08-15T13:45:00Z [link 5] phase 5 integrated into `main` at `e462dd0`.
+- 2026-08-15T14:20:00Z [link 6] mutation-checked the phase's suites six ways before
+  trusting a clean first run: a sweep that deletes a row whose body failed to
+  delete, an inclusive expiry boundary, a batch cap that is not applied, a burst
+  limiter that fails CLOSED, a daily cap that counts every receiver's rows, and
+  the two sweeps chained instead of settled. Each turned exactly the tests it
+  should -- and unlike link 5, none of them bit nothing.
+- 2026-08-15T14:35:00Z [link 6] **no code bug found this phase** -- the first of
+  the six. One DOC bug, hit on the phase's first command: §12's
+  `wrangler d1 migrations apply agent-drop-db --remote` cannot work from this
+  repo, because the committed `wrangler.toml` carries placeholder ids by design,
+  so it dies with "could not route ... your-cloudflare-account-id".
+  `bun run db:migrate` was already in `package.json` and does it properly.
+  Corrected in the PLAN, `CLAUDE.md` and `README.md`.
+- 2026-08-15T14:40:00Z [link 6] **SHIPPED.** `bun run db:migrate` applied `0009`
+  and `0010` remotely, then `bun run deploy` (version
+  `6823a107-20e0-4c81-a137-bc2edfe1bb2a`), then the `hooks-130d` R2 lifecycle
+  rule. Order per §12, and it matters: the receive path INSERTs into tables that
+  would not have existed. No queue creation was needed -- the receivers reuse
+  `agent-drop-webhooks`.
+- 2026-08-15T14:50:00Z [link 6] **live smoke test passed on `https://frst.dev`**,
+  not localhost: receiver created, a signed 104-byte body POSTed at the real URL
+  and stored `verified`, `queue-body` round-tripped byte-identical (`cmp` clean,
+  same sha256 both directions), leased back, a one-byte tamper answered 401, an
+  unregistered slug 404, acked, then deleted with `--purge`. Production is clean.
+  The signature was computed with `shasum` outside the codebase, so a pass is
+  agreement with an external tool rather than the code agreeing with itself.
+- 2026-08-15T15:00:00Z [link 6] **phase 6 complete.** Retention sweep (500/run,
+  R2 bodies before rows, a stuck body keeps its row), `HOOK_RATE_LIMIT` +
+  the D1 daily cap, both cron sweeps settled so neither can cancel the other.
+  30 new tests, full suite **700 pass / 0 fail**, `bun run verify` exit 0, and
+  **`test/reaper.test.ts` never opened** -- its 12 tests pass with the file
+  byte-identical, which was the phase's own gate. Docs rewritten from the CODE:
+  `CLAUDE.md` gained a full "Webhook Receivers" section plus the `hook.received`
+  envelope, `payload_mode`, the `hook` channel and ~30 new files in the tree;
+  `README.md` gained the fourth ingest channel; the `agent-drop` skill gained the
+  webhook vocabulary. Plan v9 -> v10.
