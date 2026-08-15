@@ -1,11 +1,102 @@
-# Agent Drop -- Generic Webhook Receiver
+---
+version: 1
+created: 2026-08-15
+---
+
+# Agent Drop -- generic webhook receiver
+
+## GOAL
 
 Turn frst.dev into a **webhook sink**: a third party POSTs to a URL we own, we
-verify it, store it forever-ish (120 days), answer fast, and let an agent pull
-it off a queue over the CLI. Optionally re-deliver it onward with the retry
-machinery the rules engine already has.
+answer its setup handshake, verify the sender, store the request faithfully for
+120 days, and hand it to an agent over a real pull-queue in the CLI. Optionally
+re-deliver it onward using the retry machinery the rules engine already has.
+This is agent-drop's fourth ingest channel, beside email, web upload and API
+push -- and unlike those three it is a channel agent-drop does not control the
+producer of, so faithful preservation of what arrived is the whole product.
 
-Status: PLAN v1, not started.
+## Context a link cannot get anywhere else
+
+**Read this before touching anything.** No link ever sees the conversation that
+produced this plan, so everything material is written down here.
+
+- Repo: `/Users/jonas/projects/agent-drop`. Cloudflare Worker + D1 + R2 +
+  Queues, Vite/React SPA in `web/`, Bun CLI in `tools/agent-drop.ts`.
+- `CLAUDE.md` at the repo root is the authoritative description of the system
+  as it stands today. It is also a **deliverable**: phase 6 updates it.
+- The immediately-preceding chain (`docs/MODERNIZE-PLAN.md`, completed
+  2026-08-01) built the things this plan leans on: the two-tier router with
+  named gates in `src/api/gates.ts`, the real-D1 test harness in
+  `test/helpers/`, `[[ratelimits]]`, and the hourly reaper. Read
+  "How the router dispatches" in `CLAUDE.md` before adding a route.
+- The green gate is `bun run verify` (= `bun run check` + `vite build` +
+  deploy dry-run). `bun run format` before committing.
+- Deploys go through `bun run deploy`, never bare `wrangler deploy` -- the
+  committed `wrangler.toml` carries placeholders on purpose.
+- **This plan is not speculative design.** Sections 1-11 were written against
+  the actual source and settle the mechanism; sections 13-14 record the first
+  consumer's constraints and the four decisions Jonas locked. Build what is
+  written; do not redesign it mid-chain. If something here turns out to be
+  factually wrong about the codebase, that is a version bump + changelog entry
+  (Hard Rule 1b), not a silent improvisation.
+
+## SPEC & ACCEPTANCE CRITERIA
+
+**Hard requirements, in the user's words** (from the originating conversation,
+2026-08-15):
+
+- "create a webhook receiver that, one, can match a URL"
+- "two, possibly answer a initial authorization. Some webhooks require initial
+  authorization"
+- "three, be configured with some authentication, basically, HMAC or whatever
+  is popular these days"
+- "after that, all webhooks just ends up in the drop database"
+- "a way for the drop CLI to pull, pull at the queue and then possibly delete
+  items from the queue"
+- "possibly a way to delegate those webhooks into new things using some kind of
+  mapping... we store it, and we retry delivery of that"
+- "Should obviously have some expiration. Let's call it hundred and twenty days
+  from now."
+
+**Settled decisions** (§14 -- all four confirmed, none open):
+
+- URL shape is `/h/{box}/{slug}`. NOT `/api/hook/*`.
+- Webhook events are a **separate surface** from drops, with their own table and
+  CLI verbs. `mirror_to_drops` is an off-by-default phase-5 convenience.
+- Queue default is **at-least-once with leases**; `--ack` on pull collapses it.
+- Execution is this six-phase chain.
+
+**References:**
+
+- Standard Webhooks spec --
+  <https://github.com/standard-webhooks/standard-webhooks/blob/main/spec/standard-webhooks.md>
+- The first consumer's constraints, and the 17TRACK behaviour that drives
+  several requirements: §13 of this document.
+
+**Acceptance criteria (observable):**
+
+- A real third-party provider can be pointed at a frst.dev URL, complete its
+  own dashboard verification, and have its pushes land -- verified end to end
+  against a live provider, not only against fixtures.
+- `drop hook-pull` hands an agent an event; two concurrent pulls never hand out
+  the same one; a crashed consumer's lease expires and the event is re-served.
+- The stored body is **byte-identical** to what was sent, and a consumer holding
+  the provider's secret can verify the signature from what agent-drop stored --
+  this is the criterion the header-redaction policy was corrected for (§4).
+- An event older than its retention is gone after one cron tick, R2 body too.
+- `bun run verify` green at every phase.
+
+**Explicit non-negotiables / out of scope:**
+
+- Do NOT change the existing drops/email/upload behaviour. This is additive.
+  The one sanctioned edit to existing behaviour is narrowing `fireRules`'
+  parameter to a `RuleSubject` (phase 5), which must leave every existing rules
+  test passing unchanged.
+- Do NOT add a `*.frst.dev` wildcard worker route (it would shadow the Caddy
+  subdomains -- see `CLAUDE.md`).
+- No SPA/UI work in this chain. The surface is API + CLI only.
+- Do NOT delete the dead SES fallback in `src/lib/relay.ts`; it is kept
+  deliberately as a revert path.
 
 ---
 
@@ -457,27 +548,136 @@ into `jq`.
 
 ---
 
-## 12. Phases
+## PHASES
 
-Each phase ends green: `bun run verify` (check + build + deploy dry-run), tests
-against the real-D1 helper in `test/helpers/d1.ts`.
+Every phase: tests live with the code (never "tests in a later phase"), files
+stay under ~200 lines, and the phase ends green on `bun run verify` and
+integrated into `main`. Tests use the real-D1 harness in `test/helpers/d1.ts`.
 
-| # | Phase | Done when |
-|---|---|---|
-| 1 | Schema + receiver CRUD + public endpoint (auth `none`) + `/h/*` route + CLI create/list/url | curl your own receiver, `drop hook-events` shows the body |
-| 2 | `webhook-verify.ts` + all presets + `hook-test` | signed GitHub/Stripe/Slack/Standard fixtures pass; a one-byte body edit rejects; rotation with two signatures passes |
-| 3 | Handshakes (meta/slack/zoom/echo/static) | fixture requests get the exact challenge back; handshakes never reach the verifier |
-| 4 | Pull queue: lease/ack/nack + CLI pull/ack/body | two concurrent pulls never hand out the same event; an expired lease is re-served exactly once |
-| 5 | Rules integration: channel `hook`, `RuleSubject` refactor, `passthrough` mode, `{slug}`/`{event_type}`, replay, `mirror_to_drops` | an inbound webhook re-delivers to a second URL with the original body, and a failing target retries with backoff |
-| 6 | Retention: reaper sweep, R2 lifecycle, per-receiver override. Docs: CLAUDE.md, README, the `agent-drop` skill | a 121-day-old event is gone after one cron tick, its R2 body with it |
+### Phase 1 -- Schema, receiver CRUD, and the public endpoint
 
-### Files touched
+The skeleton, end to end, with verification stubbed out (`auth_mode: none`).
+
+1. Migration `0009_webhook_receivers.sql`: both tables and all indexes exactly
+   as specified in §3, including `routing_key` and the partial unique dedupe
+   index.
+2. `/h/*` branch in `src/index.ts`, beside the existing `/f/` hosting branch,
+   plus `/h/*` added to `run_worker_first` in `wrangler.toml`.
+3. `src/lib/webhook-receive.ts` implementing §4's ordering: resolve receiver ->
+   method check -> size cap -> **read raw bytes and hash them** -> store ->
+   respond. Handshake and verify are call-outs to stubs this phase.
+4. `src/api/hooks.ts`: receiver CRUD under `asAdmin`, wired into the Tier-1
+   table by `prefix("/api/hooks")` (it sub-routes itself, like `/api/rules`).
+   Event *read* endpoints under `keyedReader`.
+5. CLI: `hooks`, `hook-create`, `hook-url`, `hook-update`, `hook-remove`,
+   `hook-events`, `hook-body`.
+
+**verify:** `bun run verify` green. Plus a RUNTIME check, not just tests: start
+`bun run dev`, create a receiver, `curl -X POST` a JSON body at
+`http://localhost:5173/h/{box}/{slug}`, and confirm `drop hook-events` shows it
+with the body byte-identical to what was sent. Record the round-trip in the
+phase log.
+
+**artifacts:** `migrations/0009_webhook_receivers.sql`,
+`src/lib/webhook-receive.ts`, `src/api/hooks.ts`, `src/index.ts`,
+`src/api/router.ts`, `src/types.ts`, `wrangler.toml`, `tools/agent-drop.ts`,
+`test/webhook-receive.test.ts`.
+
+### Phase 2 -- Verification
+
+`src/lib/webhook-verify.ts` with every preset in §5: `standard`, `github`,
+`stripe`, `slack`, `shopify`, `hmac`, `digest`, `bearer`, `basic`, `header`,
+`query`. Export `constantTimeEqual` from `src/lib/auth.ts` (or lift it into
+`src/lib/compare.ts`) rather than writing a second copy. Add the `hook-test`
+CLI command that fires a correctly-signed synthetic request at your own
+receiver.
+
+**verify:** `bun run verify` green, and the test file must cover, per preset:
+a known-good fixture passes; a **one-byte body change** rejects; a stale
+timestamp rejects where a replay window applies; and for `standard`/`stripe`,
+a header carrying **two** signatures (mid-rotation) passes on the second one.
+The `digest` preset must be proven against 17TRACK's shape
+`SHA256_hex(body + "/" + key)` -- and §13's flag applies: confirm that shape
+against 17TRACK's live docs before hardcoding it, and changelog the result.
+
+**artifacts:** `src/lib/webhook-verify.ts`, `src/lib/auth.ts`,
+`test/webhook-verify.test.ts`, `tools/agent-drop.ts`.
+
+### Phase 3 -- Handshakes
+
+`src/lib/webhook-handshake.ts` with `meta`, `slack`, `zoom`, `echo`, `static`
+per §6. Detection runs BEFORE verification and never falls through to it.
+
+**verify:** `bun run verify` green. Per mode, a fixture request gets the exact
+expected challenge back (Meta's `hub.challenge` as bare `text/plain`; Zoom's
+`encryptedToken` as the correct HMAC hex). A test proves a handshake request
+with a deliberately invalid signature still succeeds -- i.e. it never reached
+the verifier. Handshake requests are stored with `status='handshake'`.
+
+**artifacts:** `src/lib/webhook-handshake.ts`,
+`test/webhook-handshake.test.ts`.
+
+### Phase 4 -- The pull queue
+
+Lease/ack/nack per §7, the single `UPDATE ... RETURNING` with the subselect,
+`?since=` cursor, `?key=` routing-key filter, and CLI `hook-pull`, `hook-ack`,
+`hook-nack`, `hook-rotate`.
+
+**verify:** `bun run verify` green, and the test file must prove: two
+concurrent pulls never return the same event; an expired lease is re-served
+exactly once and bumps `lease_count`; `ack` is idempotent; `ack --delete`
+removes the R2 body too; `nack` returns the event immediately;
+`hook-rotate` changes the slug while every existing event stays reachable.
+
+**artifacts:** `src/api/hooks.ts`, `test/webhook-queue.test.ts`,
+`tools/agent-drop.ts`.
+
+### Phase 5 -- Onward delivery via the rules engine
+
+Per §8. Narrow `fireRules`' parameter from `Drop` to a `RuleSubject` interface
+both `Drop` and a webhook event satisfy; add the `hook` channel, the `{slug}`
+and `{event_type}` template variables, and `payload_mode` (`envelope` |
+`passthrough`). Add `hook-replay`, and the off-by-default `mirror_to_drops`.
+
+**verify:** `bun run verify` green. **Every existing test in
+`test/rules.test.ts` and `test/forward.test.ts` must pass unchanged** -- the
+refactor is a type narrowing, not a behaviour change; if it needs a test edited
+to stay green, stop and reconsider. New tests: an inbound webhook re-delivers
+to a second URL; `passthrough` mode sends the provider's original bytes and
+headers verbatim; a failing target retries with backoff and logs to
+`delivery_log`.
+
+**artifacts:** `src/lib/rules.ts`, `src/types.ts`, `src/api/hooks.ts`,
+`test/rules.test.ts`, `test/webhook-rules.test.ts`, `tools/agent-drop.ts`.
+
+### Phase 6 -- Retention, provisioning, and docs
+
+1. Reaper sweep per §9: delete expired events (500/run), R2 bodies first,
+   7-day retention for `rejected`. Extends `src/lib/reaper.ts`; must not
+   disturb the existing stale-`pending` sweep.
+2. `HOOK_RATE_LIMIT` binding + the per-receiver daily cap (§11).
+3. Out-of-band provisioning documented AND run: the R2 `hooks/` lifecycle rule
+   at 130 days, and migration `0009` applied remotely.
+4. Docs: `CLAUDE.md` (new section in the house style, plus the CLI table, the
+   endpoint list and the Project Structure tree), `README.md`, and the
+   `agent-drop` skill at `~/.claude/skills/agent-drop/`.
+
+**verify:** `bun run verify` green; a test proves an event past `expires_at` is
+deleted on a cron tick along with its R2 body, and that an unexpired one is
+not. Fire the cron locally against `bun run dev`:
+`curl "http://localhost:5173/cdn-cgi/handler/scheduled?cron=17+*+*+*+*"`.
+`CLAUDE.md` must describe what was actually built, not what this plan proposed.
+
+**artifacts:** `src/lib/reaper.ts`, `wrangler.toml`, `test/reaper.test.ts`,
+`CLAUDE.md`, `README.md`, the skill.
+
+### Files touched (whole chain)
 
 New: `migrations/0009_webhook_receivers.sql`, `src/lib/webhook-receive.ts`,
 `src/lib/webhook-verify.ts`, `src/lib/webhook-handshake.ts`,
-`src/api/hooks.ts`, `test/webhook-verify.test.ts`,
-`test/webhook-handshake.test.ts`, `test/webhook-queue.test.ts`,
-`test/webhook-receive.test.ts`.
+`src/api/hooks.ts`, `test/webhook-receive.test.ts`,
+`test/webhook-verify.test.ts`, `test/webhook-handshake.test.ts`,
+`test/webhook-queue.test.ts`, `test/webhook-rules.test.ts`.
 
 Modified: `src/index.ts` (the `/h/` branch), `src/api/router.ts`,
 `src/types.ts`, `src/lib/rules.ts` (`RuleSubject` + `hook` channel),
@@ -536,3 +736,33 @@ All four confirmed by Jonas. Nothing in this plan is open; build it as written.
    want the bookkeeping.
 4. **Execution: full chain, all six phases**, via the chain protocol, paired
    with `docs/WEBHOOKS-PLAN.STATE.md`.
+
+---
+
+## Changelog
+
+### v1 -- 2026-08-15 -- author: planning conversation
+
+Initial plan. Written against the actual source (`src/api/router.ts`,
+`src/lib/rules.ts`, `src/api/gates.ts`, `migrations/0001`+`0005`), not from
+memory. Two revisions folded in before the chain started, both from the
+`track-parcel` conversation relaying 17TRACK's real behaviour:
+
+- Header policy: "signature/auth headers replaced with `<redacted>`" ->
+  "complete header map stored; only true credentials (`Authorization`,
+  `Cookie`, `Proxy-Authorization`, and whatever `auth_config` names) redacted;
+  signature headers verbatim". The original was justified by a replay argument
+  that does not hold -- an HMAC proves one specific body came from the signer
+  and is worthless against any other request -- and it would have made
+  consumer-side verification impossible, which is the single thing a faithful
+  receiver exists to enable.
+- Body handling: "read the raw body once, as text" -> "read as bytes, hash the
+  bytes, decode to text only when valid UTF-8". The text-first form would have
+  mangled a non-UTF-8 body irrecoverably.
+- Added: the `digest` auth preset (plain SHA-256 over a template, not HMAC),
+  `routing_key` extraction + index + `--key` filter, body-hash dedupe with a
+  window for providers that send no message id, and `hook-rotate`.
+- Settled §14 from Jonas: `/h/{box}/{slug}`, separate surface from drops,
+  at-least-once leases, full six-phase chain.
+
+No GOAL change. No requirement was weakened.
