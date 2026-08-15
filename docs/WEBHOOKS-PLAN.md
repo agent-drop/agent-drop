@@ -1,5 +1,5 @@
 ---
-version: 8
+version: 9
 created: 2026-08-15
 ---
 
@@ -941,6 +941,70 @@ All four confirmed by Jonas. Nothing in this plan is open; build it as written.
 ---
 
 ## Changelog
+
+### v9 -- 2026-08-15 -- author: link 5 (phase 5)
+
+No GOAL change, nothing weakened. One pre-existing bug in the retry machinery
+this phase reuses, one pre-existing bug in the dry-run verb, and five decisions
+§8 implies but does not spell out.
+
+- **The retry backoff never escalated, and the delivery log never said so.**
+  `processWebhookBatch` read the attempt counter out of the message BODY, which
+  `retry()` re-enqueues unchanged -- so it was 0 on every delivery forever. The
+  documented `2s, 4s, 8s ... 20min` ladder was two seconds flat: a target down
+  for the full 24-hour window took roughly **43,200** requests instead of the
+  ~80 the ladder implies, from us, at a service already unhealthy. And
+  `delivery_log.attempts` reported 1 throughout, so the operator could not see it
+  either. The consumer now reads `Message.attempts`, the platform's own 1-based
+  counter, which is what it is for. Found at runtime -- the phase-5 verify block
+  asks for "a failing target retries with backoff", and watching it actually do
+  that is what exposed it. Card `bug-webhook-backoff-never-escalates`. The first
+  version of the test hid the bug by hand-mutating the attempt in the body; the
+  harness now models the platform counter instead, which is the part worth
+  keeping.
+- **`scopes: "all"` covers `hook`.** §8 adds the channel and does not say what
+  `all` means afterwards. It means all: a scope word that quietly excluded the
+  newest channel would be a lie in the data, and the one rule type that could
+  surprise an existing operator -- `forward` -- never fires on anything but email
+  anyway, so the blast radius is webhook rules that asked for everything.
+- **A webhook event publishes its OWN envelope**, `{"event":"hook.received",
+  "hook":{...}}`, not a `drop` object. §8 says `envelope` is "the same shape as
+  today" and today's shape is a drop; a webhook event has no subject, no sender
+  and no attachments, and it has a slug, a routing key and a verification verdict
+  that no drop has. Dressing one as the other would hand every consumer a `drop`
+  that is mostly nulls and hide the three fields it wanted. The drop envelope is
+  untouched.
+- **`passthrough` adds NO agent-drop headers.** §8's promise is that "your own
+  service still sees exactly what Stripe sent", and exactly does not survive an
+  extra `X-Drop-Id`, `X-Webhook-Attempt` and `User-Agent: AgentDrop/1.0`. It
+  sends the stored headers minus redacted credentials and hop-by-hop ones, plus
+  whatever the rule configured. Envelope mode keeps all three of ours. The body
+  is fetched from the stored event at DELIVERY time rather than carried in the
+  queue message, because a body may be a megabyte and a queue message may not --
+  and a source that has been destroyed fails permanently instead of retrying for
+  a day against bytes that no longer exist.
+- **`{routing_key}` was added alongside §8's `{slug}` and `{event_type}`.** §3
+  calls the routing key "the correlation handle" and §13 has 17TRACK echoing a
+  caller-supplied tag in every push; a rule targeting `https://x/{routing_key}`
+  is the archetypal use, and leaving it out is a gap somebody hits on day one.
+- **A hook rule pointed at this instance's own `/h/` URL is refused, logged
+  `failed`, and never queued.** Not in §8, but the `hook` channel is where the
+  loop closes -- event arrives, rule re-delivers to the same receiver, copy fires
+  the same rule -- with 24 hours of retries behind every hop. Drop rules are left
+  alone: a drop rule pointed at a receiver makes one event and stops.
+- **`rule-test` reported a forward as firing on `web`/`api`** -- the engine skips
+  a forward on anything but email, and the dry run did not model that, so it
+  claimed a delivery that was never attempted. Pre-existing, and a fourth channel
+  makes it lie more often. The prediction moved to `tools/lib/rule-preview.ts`
+  where it is testable, and the duplicated pattern matcher inside the command
+  went with it.
+- **A `handshake` or `rejected` event is never replayed**, by rules or by
+  `hook-replay`. This is v8's "a refusal is not a delivery" carried into onward
+  delivery exactly as v8 said phase 5 would have to: the receive path returns
+  before it fans out, `fanOutEvent` refuses a non-`queued` row on its own, and
+  `hook-replay` answers 409. All three are tested, including the middle one
+  directly -- a mutation showed it was unreachable belt-and-braces, which is how
+  a guard rots.
 
 ### v8 -- 2026-08-15 -- author: link 4 (phase 4)
 

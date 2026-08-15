@@ -1,11 +1,11 @@
 ---
 chain_id: webhooks-20260815-115712-c042
 plan_file: /Users/jonas/projects/agent-drop/docs/WEBHOOKS-PLAN.md
-plan_version: 8
+plan_version: 9
 status: in_progress
-current_phase: 5
-last_updated: 2026-08-15T12:20:00Z
-link_count: 4
+current_phase: 6
+last_updated: 2026-08-15T13:40:00Z
+link_count: 5
 ---
 
 # Agent Drop webhook-receiver chain state
@@ -63,7 +63,28 @@ link_count: 4
   - [x] 4j. RUNTIME check on `bun run dev` against the 17 real events (log below)
   - [x] 49 new tests; full suite 634 pass / 0 fail; `bun run verify` exit 0
   - [x] 4k. integrated into `main` at `d8e61b3`
-- [ ] 5. Onward delivery -- RuleSubject, hook channel, passthrough, replay
+- [x] 5. Onward delivery -- RuleSubject, hook channel, passthrough, replay (link 5)
+  - [x] 5a. `fireRules` narrowed from `Drop` to `RuleSubject` -- both suites pass UNCHANGED
+  - [x] 5b. `hook` channel in `findMatchingRules`/`fireRules`; `scopes: all` covers it
+  - [x] 5c. `{slug}`, `{event_type}` and `{routing_key}` template variables
+  - [x] 5d. `payload_mode` (migration `0010`), `envelope` default, `passthrough` verbatim
+  - [x] 5e. ONE stored-body reader (`webhook-load.ts`) and ONE header filter
+        (`webhook-headers.ts`), shared by `queue-body`, passthrough and `queue-replay`
+  - [x] 5f. The seam in `webhook-receive.ts`: accepted, non-duplicate events only
+  - [x] 5g. `hook-replay` (server side, queued + logged) beside `queue-replay` (client
+        side, one shot); both `--help` texts say which is which
+  - [x] 5h. `mirror_to_drops`, off by default, does not re-fire rules
+  - [x] 5i. Self-delivery loop refused on the `hook` channel and logged, never queued
+  - [x] 5j. **Bug found at runtime + fixed**: the retry backoff never escalated
+        (card `bug-webhook-backoff-never-escalates`)
+  - [x] 5k. **Second bug found + fixed**: `rule-test` reported forwards as firing on
+        non-email channels; prediction extracted to `tools/lib/rule-preview.ts`
+  - [x] 5l. **Third bug found by the new tests**: a rule header differing only in CASE
+        from a stored one was appended, not overridden (`User-Agent: Stripe/1.0, mine`)
+  - [x] 5m. Mutation-checked seven ways before trusting a clean run
+  - [x] 5n. RUNTIME check on `bun run dev`: envelope, passthrough, escalating backoff,
+        replay, loop refusal, mirror (log below)
+  - [x] 36 new tests; full suite 670 pass / 0 fail; `bun run verify` exit 0
 - [ ] 6. Retention, provisioning, deploy, docs
 
 ## Artifacts produced
@@ -148,6 +169,35 @@ Modified: `src/api/router.ts` (ten routes; `stats` deliberately BEFORE `:id`),
 learns the id without changing what a provider sees),
 `src/lib/webhook-store.ts` (the dedupe fix),
 `tools/agent-drop.ts` (ten verbs), `test/webhook-receive.test.ts` (+2).
+
+Phase 5 (link 5):
+
+| File | What |
+|---|---|
+| `migrations/0010_rule_payload_mode.sql` | `payload_mode` on `drop_rules`, default `envelope` |
+| `src/lib/rule-match.ts` | pattern matching + scope filtering, split out of `rules.ts` |
+| `src/lib/rule-payload.ts` | the two wire formats, `mergeHeaders`, `buildDelivery` |
+| `src/lib/rule-deliver.ts` | the retrying queue consumer (now on `Message.attempts`) |
+| `src/lib/webhook-headers.ts` | `replayableHeaders` -- the ONE redaction + hop-by-hop filter |
+| `src/lib/webhook-load.ts` | `loadStoredBody` -- the ONE inline-vs-R2 reader |
+| `src/lib/hook-fanout.ts` | fire rules + mirror, for an accepted event only |
+| `src/api/hook-replay.ts` | `POST .../:id/replay` -- server-side, through the queue |
+| `tools/lib/rule-preview.ts` | `rule-test`'s prediction, extracted so it is testable |
+| `test/webhook-rules.test.ts` | 36 tests: the channel, the envelopes, passthrough, replay, mirror |
+
+Modified: `src/types.ts` (`RuleSubject`, `RuleChannel`, the passthrough fields on
+`WebhookQueueMessage`, `attempt` deprecated), `src/lib/rules.ts` (firing only --
+matching, payload and delivery moved out), `src/lib/webhook-receive.ts` (the
+fan-out seam), `src/lib/webhook-store.ts` (`storeEvent` returns the row it wrote,
+bound from the same object it returns), `src/api/hook-queue.ts` (uses the shared
+body reader), `src/api/rules.ts` (`payloadMode` in + out), `src/api/hooks.ts` +
+`hook-config.ts` (`mirrorToDrops` at create), `src/api/router.ts` (the replay
+route), `tools/agent-drop.ts` (`hook-replay`, `--payload-mode`, `--mirror`,
+`--scope hook`, `rule-test --channel hook`), `test/webhook-receive.test.ts` (one
+count: two deferred tasks now, not one).
+
+`rules.ts` was 279 lines and would have been 526; it is 195 after the split, and
+every existing import of `lib/rules` still resolves through re-exports.
 
 ## Decisions
 
@@ -275,6 +325,38 @@ Phase 4 (link 4) -- all recorded in PLAN v8's changelog:
   unsigned injection into a signed receiver answers 401 and stores `rejected`,
   exactly as a real delivery would. There is no flag that writes `verified=1` for
   a signature nothing checked.
+
+Phase 5 (link 5) -- all recorded in PLAN v9's changelog:
+
+- **A counter that has to grow between retries cannot live in the message body.**
+  `retry()` re-enqueues the body unchanged, so `wh.attempt` read 0 forever: the
+  documented 2s/4s/8s ladder was 2 seconds flat (~43,200 requests at a dead
+  target over 24h instead of ~80) and `delivery_log.attempts` said 1 throughout.
+  `Message.attempts` is the platform's own and is what it is for. Card
+  `bug-webhook-backoff-never-escalates`. **Phase 6 note: `CLAUDE.md` describes
+  the ladder as if it worked -- it does now, so the text stands, but do not
+  copy the old `wh.attempt` shape into the reaper or anything else.**
+- **The first version of that test hid the bug.** It bumped `attempt` in the body
+  by hand between drains, which is exactly what the platform cannot do, and went
+  green against broken code. The harness now models `Message.attempts` instead.
+  A test that fakes the thing under test is worse than no test.
+- **A `RuleSubject` with mostly-optional fields is the honest shape.** An email
+  has a `from_addr` and no `slug`; a webhook event has a `slug` and no `subject`.
+  Making them optional is what lets both satisfy the interface structurally, so
+  no call site changed and both existing rule suites pass untouched.
+- **Case-insensitive header merging is not a nicety.** `{"User-Agent": x}` and
+  `{"user-agent": y}` are two keys to JavaScript and one header to HTTP: a plain
+  spread keeps both and `fetch` sends `User-Agent: x, y`. Nothing errors and the
+  target sees a header nobody wrote. Caught by a test written for the override
+  promise, not by the code review that wrote the promise.
+- **A mutation that bites nothing is a finding.** Removing `fanOutEvent`'s own
+  status guard broke no test, because the receive path returns first -- so the
+  guard was untested defence. It is tested directly now rather than deleted: it
+  is exported, and `hook-replay` proves a second caller shows up.
+- **The dry run has to model the engine's refusals, not just its matches.**
+  `rule-test` said a forward would fire on `web`/`api`; it never does. You check a
+  dry run precisely when you are unsure, and it answered with confidence either
+  way.
 
 ## Open questions / blockers
 
@@ -702,6 +784,137 @@ other receivers. Admin API key named `p4-runtime` (value not recorded; make your
 own with `drop key-create`). `AGENT_DROP_URL=http://localhost:5173`, exported
 AFTER `source ~/.secrets`.
 
+## Phase 5 runtime log -- onward delivery, proven on `bun run dev`
+
+Not tests: the real worker in workerd, the real local queue consumer, real local
+D1 and R2, driven by the real CLI against the receivers link 4 left. The target
+is a two-line `Bun.serve` sink on 4931 that prints what it actually received and
+hashes it, so "byte-identical" is checked at the far end rather than asserted at
+the near one.
+
+```
+$ drop rule-add "lisa" --webhook "http://localhost:4931/ingest" --scope hook
+  Rule created: lisa -> webhook -> http://localhost:4931/ingest
+
+$ SIGN=$(cat p5a.json <(printf '%s' '/123456ABCDEF') | shasum -a 256 | cut -d' ' -f1)
+$ curl -X POST localhost:5173/h/lisa/track-17-fnrq5n -H "sign: $SIGN" \
+    -H 'Authorization: Bearer must-not-travel' --data-binary @p5a.json
+{"ok":true,"id":"01m0248gsax2e84p7tm4rjaz6c"}
+
+SINK POST /ingest  1122 bytes
+  user-agent: AgentDrop/1.0
+  x-drop-id: 01m0248gsax2e84p7tm4rjaz6c
+  x-webhook-attempt: 1
+  body: {"event":"hook.received","hook":{"id":"01m0248gsax...","slug":"track-17-fnrq5n",
+         "event_type":null,"routing_key":"parcel-99","method":"POST",...
+                                          ^ extracted, and the envelope is a HOOK
+$ drop deliveries        -> webhook  success  http://localhost:4931/ingest
+```
+
+Passthrough, against a body chosen so a re-serialized copy could not survive it
+-- odd key order, an interior newline, and both a `é` escape and a literal
+`é`:
+
+```
+$ drop rule-update RULE --payload-mode passthrough --target http://localhost:4931/relay
+$ shasum -a 256 p5b.json
+24c197d2d365e5731da42af279de66d634160f1b28d8d8e9b7fb19a240e934fd  p5b.json
+
+SINK POST /relay  37 bytes
+  sign: 9f11a64921933357b07740ecc288f32a8c6bdb1f1f5a86787c5708f6155a8170
+                                       ^ VERBATIM -- the target verifies with it
+  user-agent: curl/8.7.1               <- the PROVIDER's, not AgentDrop/1.0
+  x-forwarded-weird: keep-me
+  content-type: application/json
+  sha256: 24c197d2d365e5731da42af279de66d634160f1b28d8d8e9b7fb19a240e934fd
+          ^ MATCHES the sent file, byte for byte
+  body: {"b":2,
+ "a":1,"u":"café café"}           <- key order, newline, both escapes intact
+
+  authorization:        (absent -- a redacted credential is not replayed)
+  x-drop-id:            (absent)
+  x-webhook-attempt:    (absent)       <- none of ours. that IS the mode
+```
+
+A refusal fires nothing, and the loop guard, live:
+
+```
+$ curl -X POST .../h/lisa/track-17-fnrq5n -H "sign: deadbeef" -d '{"x":1}'
+{"error":"signature verification failed"}   HTTP 401
+  delivery rows before=2 after=2            <- a rejected event is not a delivery
+
+$ drop rule-add "lisa" --webhook "https://frst.dev/h/lisa/track-17-fnrq5n" --scope hook
+$ curl -X POST .../h/lisa/track-17-fnrq5n -H "sign: $SIGN" --data-binary @p5e.json
+{"ok":true,"id":"01m024k77p4e1a9exjgqcb84mg"}
+$ drop deliveries --status failed
+  just now  webhook  failed  https://frst.dev/h/lisa/track-17-fnrq5n
+     refused: target is this instance's own webhook receiver (delivery loop)
+```
+
+**The bug this phase found**, and the reason it needed a live worker rather than
+a test: the backoff ladder, watched against a sink told to answer 503 for 45
+seconds. Before the fix `attempts` sat at 1 forever and every gap was 2s.
+
+```
+$ curl "http://localhost:4931/fail-for?s=45"
+$ curl -X POST .../h/lisa/track-17-fnrq5n -H "sign: $SIGN" --data-binary @p5d.json
+
+  t+6s    queued     attempts 0
+  t+12s   retrying   attempts 1        <- 2s
+  t+24s   retrying   attempts 2        <- 4s
+  t+36s   retrying   attempts 3        <- 8s
+  t+54s   success    attempts 4        <- 16s, then the sink recovered
+                              ^ climbs. before the fix: 1, 1, 1, 1, ...
+```
+
+`hook-replay`, the server-side sibling, and the mirror:
+
+```
+$ drop hook-replay lisa 01m024gwvdwb5k14j6zsxcr0ee --to http://localhost:4931/replayed \
+    --mode passthrough
+  Queued 01m024gwvdwb5k14j6zsxcr0ee -> http://localhost:4931/replayed
+  mode passthrough  delivery 01m024k44c8wkf99a1xtc7x7at
+
+SINK POST /replayed  73 bytes
+  sign: 080943eb45c9d4c25b8547c621cc32328cab7d8845e8ac0bec1360aeb1c8e12c
+        ^ through the QUEUE, with retries and a delivery_log row --
+          `queue-replay` POSTs the same bytes from the client with neither
+
+$ drop hook-replay lisa EVENT_ID            # no --to: re-fire what matches NOW
+  success   http://localhost:4931/relay
+  failed    https://frst.dev/h/lisa/track-17-fnrq5n
+
+$ drop hook-create lisa mirror-demo --mirror
+$ curl -X POST .../h/lisa/mirror-demo-t12115 -d '{"type":"demo.event","id":"m-1"}'
+$ drop inbox lisa --limit 2
+  * just now   hook  mirror-demo-t12115 <mirror-demo-t12115@webhook>
+  * 2026-08-01 web   confirm-probe.pdf [1 files]
+      ^ a fourth channel in `drops`, and only because --mirror asked for it
+```
+
+`rule-test` on the hook channel, including the forward bug fixed this phase:
+
+```
+$ drop rule-test lisa --channel hook
+  > lisa -> webhook -> http://localhost:4931/relay [passthrough]
+  > lisa -> webhook -> https://frst.dev/h/lisa/track-17-fnrq5n
+  ~ lisa -> pattern matches but forwards only fire on the email channel
+                                 ^ before the fix this said it would fire
+$ drop rule-test lisa --channel email
+  ~ lisa -> pattern matches but scope "hook" excludes "email"   (x2)
+  > lisa -> forward -> jonas+p5@duplo.org
+```
+
+Left behind in the LOCAL dev D1 for phase 6: 21 events on `lisa` across
+`queued` / `rejected` / `handshake`, eight receivers (the seven from link 4 plus
+`lisa/mirror-demo-t12115`, which has `mirror_to_drops = 1`), one mirrored drop,
+and **no rules** -- every demo rule was removed, so phase 6 starts from a clean
+rules table. Migration `0010` is applied locally, NOT remotely. Admin API key
+named `p5-runtime` (value not recorded; make your own with `drop key-create`).
+`AGENT_DROP_URL=http://localhost:5173`, exported AFTER `source ~/.secrets`, and
+note `drop key-create` needs the real `AGENT_DROP_ADMIN_KEY` from `~/.secrets`
+-- the `ad_` key it hands back is for the keyed routes only.
+
 ## Log
 
 - 2026-08-15T04:57:12Z [link 1] chain started at plan v3, phase 1
@@ -799,3 +1012,46 @@ AFTER `source ~/.secrets`.
   query. 49 new tests, full suite 634 pass / 0 fail, `bun run verify` exit 0.
   Runtime round trip transcribed above against the 17 real events link 3 left.
   Plan v7 -> v8.
+- 2026-08-15T13:05:00Z [link 5] **off-mission bug found and fixed**, card
+  `bug-webhook-backoff-never-escalates`: the webhook retry backoff never
+  escalated. `processWebhookBatch` took its attempt counter from the message
+  BODY, which `retry()` re-enqueues unchanged, so it read 0 on every delivery --
+  the documented `2s, 4s, 8s ... 20min` ladder was two seconds flat (~43,200
+  requests at a dead target over the 24h window instead of ~80) and
+  `delivery_log.attempts` reported 1 throughout, hiding it from the operator too.
+  Pre-existing since the rules engine was written. Now reads `Message.attempts`,
+  the platform's own 1-based counter. Found at runtime while proving phase 5's
+  own "a failing target retries with backoff" claim; RED first, and the first
+  version of the test HID the bug by hand-mutating the body between drains, which
+  is precisely what the platform cannot do.
+- 2026-08-15T12:55:00Z [link 5] **second bug found and fixed**: `rule-test`
+  reported a `forward` rule as firing on `web`/`api` (and would have on `hook`),
+  but `fireRules` skips a forward on anything but email. A dry run you consult
+  when unsure, answering wrong with confidence. The prediction moved to
+  `tools/lib/rule-preview.ts` -- testable, and it took the command's duplicated
+  copy of `matchPattern` with it. RED proven by mutation.
+- 2026-08-15T12:40:00Z [link 5] **third bug, found by a new test rather than at
+  runtime**: a rule header differing only in CASE from a stored one was appended
+  instead of overriding it -- `{"User-Agent": "Stripe/1.0"}` plus
+  `{"user-agent": "mine"}` are two object keys and one HTTP header, so `fetch`
+  sent `User-Agent: Stripe/1.0, mine`. Nothing errors and the target sees a value
+  nobody wrote. Envelope mode had the same shape of bug pre-existing (a rule
+  `content-type` would append to ours). One `mergeHeaders` now folds case for
+  both.
+- 2026-08-15T13:20:00Z [link 5] mutation-checked the phase's suites seven ways
+  before trusting a clean run: `all` not covering hook (16 red, and
+  `rules.test.ts` stayed green), passthrough dropping the stored headers, the
+  fan-out status guard, a rejected event falling through to the fan-out, the
+  self-delivery guard, the dry-run forward guard, mirror always on, and a
+  permanent failure being retried. Each bit exactly what it should -- except the
+  fan-out guard, which bit NOTHING and turned out to be untested defence; it has
+  a direct test now rather than a deletion.
+- 2026-08-15T13:40:00Z [link 5] **phase 5 complete.** `fireRules` narrowed from
+  `Drop` to `RuleSubject` with **every existing test in `test/rules.test.ts` and
+  `test/forward.test.ts` passing unchanged** -- the phase's own gate. The `hook`
+  channel, `{slug}`/`{event_type}`/`{routing_key}`, `payload_mode`
+  (`envelope`|`passthrough`), `hook-replay`, and `mirror_to_drops` off by
+  default. 36 new tests, full suite 670 pass / 0 fail, `bun run verify` exit 0.
+  Runtime round trip transcribed above: the sink's own sha256 of the passthrough
+  body matches the sent file byte for byte, with the signature header verbatim
+  and none of agent-drop's own headers added. Plan v8 -> v9.
