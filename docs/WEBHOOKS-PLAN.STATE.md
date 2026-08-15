@@ -1,11 +1,11 @@
 ---
 chain_id: webhooks-20260815-115712-c042
 plan_file: /Users/jonas/projects/agent-drop/docs/WEBHOOKS-PLAN.md
-plan_version: 9
-status: in_progress
+plan_version: 10
+status: completed
 current_phase: 6
-last_updated: 2026-08-15T13:40:00Z
-link_count: 5
+last_updated: 2026-08-15T15:10:00Z
+link_count: 6
 ---
 
 # Agent Drop webhook-receiver chain state
@@ -86,7 +86,7 @@ link_count: 5
         replay, loop refusal, mirror (log below)
   - [x] 36 new tests; full suite 670 pass / 0 fail; `bun run verify` exit 0
   - [x] 5o. integrated into `main` at `e462dd0`
-- [>] 6. Retention, provisioning, deploy, docs (link 6, IN PROGRESS)
+- [x] 6. Retention, provisioning, deploy, docs (link 6)
   - [x] 6a. `hook-reaper.ts` -- expired events, 500/run, R2 bodies before rows
   - [x] 6b. `runSweeps` -- both sweeps settled, neither can cancel the other
   - [x] 6c. Every existing test in `test/reaper.test.ts` passes UNCHANGED (file untouched)
@@ -99,7 +99,7 @@ link_count: 5
   - [x] 6j. R2 lifecycle `hooks-130d` added and verified
   - [x] 6k. LIVE smoke test on `https://frst.dev/h/...` (log below)
   - [x] 6l. Docs: `CLAUDE.md`, `README.md`, the `agent-drop` skill
-  - [x] 6m. Integrated into `main`
+  - [x] 6m. integrated into `main` at `37013cc`
 
 ## Artifacts produced
 
@@ -1304,3 +1304,19 @@ rule was verified by `lifecycle list` afterwards -- four rules now, `hooks/` at
   envelope, `payload_mode`, the `hook` channel and ~30 new files in the tree;
   `README.md` gained the fourth ingest channel; the `agent-drop` skill gained the
   webhook vocabulary. Plan v9 -> v10.
+- 2026-08-15T15:10:00Z [link 6] phase 6 integrated into `main` at `37013cc`.
+- 2026-08-15T15:10:00Z [link 6] **CHAIN COMPLETE.** All six phases done, status
+  `completed`. The feature is deployed and answering on `https://frst.dev/h/`.
+  Six phases, 700 tests, and six pre-existing bugs found and fixed along the way
+  (biome linting assets, the deploy guard's silent exit, the redacted signature
+  header, the plaintext query secret, the rejected row blocking its own retry,
+  the retry backoff that never escalated, the dry run that lied about forwards,
+  the case-folded header merge). One doc bug in phase 6.
+
+### A note for whoever picks this up next
+
+`CLAUDE.md` is updated on disk but is **NOT in git** -- Jonas's global
+`~/.gitignore` excludes `CLAUDE.md` everywhere, and it has never been tracked in
+this repo. `README.md` links to `./CLAUDE.md`, so that link is dangling for
+anyone who clones. Pre-existing, not this chain's to decide, and flagged rather
+than force-added.
