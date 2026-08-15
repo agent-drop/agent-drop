@@ -133,7 +133,26 @@ export async function storeEvent(
 	env: Env,
 	input: StoreInput,
 ): Promise<{ id: string; duplicate: false } | { id: string; duplicate: true }> {
-	const existing = await findDuplicate(env, input.receiver.id, input.extracted, input.now);
+	// A dedupe key describes an event that ENTERED THE QUEUE. A refusal did not:
+	// it is evidence kept for 7 days (§9), not a queue member, so it neither
+	// dedupes against a real event nor blocks one. Both directions matter.
+	//
+	// Blocking one is the expensive half: wrong secret -> 401, stored `rejected`
+	// -> operator fixes the secret -> the provider retries the same bytes -> we
+	// answer `200 {"duplicate":true}` and store nothing. The provider stops, and
+	// the only row left is one no lease will ever hand out. We told the sender we
+	// had an event we had thrown away. (The unique index enforces the same thing
+	// one layer down, so carrying the key on a rejected row would turn that retry
+	// into a 503 rather than a lost event -- still wrong, just louder.)
+	//
+	// The other direction: a refusal must answer 401 even when an accepted copy is
+	// already stored. Deduping it would 200 a request we did not accept.
+	const dedupes = input.status !== "rejected";
+	const dedupeKey = dedupes ? input.extracted.dedupeKey : null;
+
+	const existing = dedupes
+		? await findDuplicate(env, input.receiver.id, input.extracted, input.now)
+		: null;
 	if (existing) return { id: existing, duplicate: true };
 
 	const id = generateId();
@@ -165,7 +184,7 @@ export async function storeEvent(
 				input.method,
 				input.extracted.eventType,
 				input.extracted.routingKey,
-				input.extracted.dedupeKey,
+				dedupeKey,
 				JSON.stringify(input.headers),
 				JSON.stringify(input.query),
 				input.contentType,
@@ -186,7 +205,9 @@ export async function storeEvent(
 		if (bodyKey) await env.BUCKET.delete(bodyKey).catch(() => {});
 		// Lost a race against a concurrent copy of the same delivery. The other one
 		// stored; this one is the duplicate.
-		const raced = await findDuplicate(env, input.receiver.id, input.extracted, input.now);
+		const raced = dedupes
+			? await findDuplicate(env, input.receiver.id, input.extracted, input.now)
+			: null;
 		if (raced) return { id: raced, duplicate: true };
 		throw err;
 	}

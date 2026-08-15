@@ -6,6 +6,7 @@ import {
 	makeCtx,
 	makeEnv,
 	seedReceiver,
+	sha256Hex,
 	type TestCtx,
 	type TestEnv,
 } from "./helpers/env";
@@ -486,6 +487,60 @@ describe("extraction and dedupe", () => {
 		expect(await later.json()).not.toMatchObject({ duplicate: true });
 		expect(rows("SELECT * FROM webhook_events").length).toBe(2);
 		expect(first.status).toBe(200);
+	});
+
+	test("a rejected delivery does not dedupe against its own valid retry", async () => {
+		// The scenario this exists for: the secret is wrong, the provider's push is
+		// stored `rejected` and answered 401, the operator fixes the secret, and the
+		// provider retries the SAME bytes. Deduping that against the rejection would
+		// answer 200 {"duplicate":true} and store nothing -- so the provider stops,
+		// and the only row is one no lease will ever hand out. The event is gone, and
+		// we told the sender we had it.
+		await seedReceiver(env, {
+			inbox: "lisa",
+			slug: "sig",
+			authMode: "digest",
+			authConfig: { secret: "right-key", header: "sign", template: "{body}/{secret}" },
+			extract: { dedupe: "body-hash", dedupeWindowMs: 3_600_000 },
+		});
+		const body = '{"event":"TRACKING_UPDATED"}';
+		const sign = await sha256Hex(`${body}/right-key`);
+
+		const rejected = await serve(post("/h/lisa/sig", body, { headers: { sign: "deadbeef" } }));
+		const retry = await serve(post("/h/lisa/sig", body, { headers: { sign } }));
+
+		expect(rejected.status).toBe(401);
+		expect(retry.status).toBe(200);
+		expect(await retry.json()).not.toMatchObject({ duplicate: true });
+		const stored = rows(
+			"SELECT status, verified, dedupe_key FROM webhook_events ORDER BY status",
+		) as { status: string; verified: number; dedupe_key: string | null }[];
+		expect(stored.map((r) => r.status)).toEqual(["queued", "rejected"]);
+		// The mechanism: a refusal carries no dedupe key at all, so it cannot block
+		// the retry through the lookup OR through the unique index.
+		expect(stored[1].dedupe_key).toBeNull();
+		expect(stored[0].dedupe_key).not.toBeNull();
+	});
+
+	test("but an accepted delivery still dedupes a genuine retry", async () => {
+		// The other direction, so the fix above cannot be "stop deduping". A retry of
+		// something we KEPT is still one event, which is the whole reason the unique
+		// index exists.
+		await seedReceiver(env, {
+			inbox: "lisa",
+			slug: "sig2",
+			authMode: "digest",
+			authConfig: { secret: "right-key", header: "sign", template: "{body}/{secret}" },
+			extract: { dedupe: "body-hash", dedupeWindowMs: 3_600_000 },
+		});
+		const body = '{"event":"TRACKING_UPDATED"}';
+		const sign = await sha256Hex(`${body}/right-key`);
+
+		await serve(post("/h/lisa/sig2", body, { headers: { sign } }));
+		const again = await serve(post("/h/lisa/sig2", body, { headers: { sign } }));
+
+		expect(await again.json()).toMatchObject({ duplicate: true });
+		expect(rows("SELECT * FROM webhook_events").length).toBe(1);
 	});
 
 	test("a malformed extraction path is not fatal -- the event still stores", async () => {
