@@ -9,10 +9,15 @@
 		"ignoreUnknown": true,
 		// *.css is excluded because Biome's CSS parser rejects Tailwind v4
 		// at-rules (@theme, @plugin, @custom-variant) as syntax errors.
+		// `assets` is excluded because it holds exported design artifacts -- icon
+		// SVGs with embedded C2PA metadata blobs, logos, fonts -- not source. Biome
+		// applied `a11y/noSvgWithoutTitle` to them and turned `bun run check` red
+		// over three icon candidates that are never rendered inline anywhere.
 		"includes": [
 			"**",
 			"!web/dist",
 			"!.claude",
+			"!assets",
 			"!worker-configuration.d.ts",
 			"!bun.lock",
 			"!**/*.css"
