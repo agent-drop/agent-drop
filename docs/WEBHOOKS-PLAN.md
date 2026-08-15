@@ -1,5 +1,5 @@
 ---
-version: 1
+version: 3
 created: 2026-08-15
 ---
 
@@ -250,8 +250,8 @@ pulling every body to find the three you wanted.
 
 Order matters and is not negotiable:
 
-1. Resolve `{box}/{slug}` -> receiver row. Unknown or disabled -> `404`, with no
-   hint about which of the two it was.
+1. Resolve `{box}/{slug}` -> receiver row. Unregistered, disabled and expired
+   are three DIFFERENT answers -- see the status table below.
 2. Method check against `allowed_methods` -> `405`.
 3. `Content-Length` vs `max_body_bytes` -> `413` before reading a byte.
 4. **Read the raw body once, as bytes** (`arrayBuffer()`), and hash those bytes.
@@ -278,6 +278,36 @@ Order matters and is not negotiable:
 **An unparseable or unrecognised body is a successful receive**, not an error.
 Unknown event types, dashboard "test" pings and malformed JSON all store and
 return 200. The receiver's job is to preserve, not to understand.
+
+### Status codes -- the full table
+
+Every one of these is a decision, because the provider on the other end reacts
+to the number: a 2xx makes it stop, a 4xx usually makes it stop and show an
+error in its dashboard, a 5xx makes it retry.
+
+| Situation | Status | Body | Why |
+|---|---|---|---|
+| Stored (or handshake answered) | `200` | `{"ok":true,"id":...}` or the challenge | |
+| Duplicate of a stored `dedupe_key` | `200` | `{"ok":true,"duplicate":true}` | Never 409 -- a 4xx makes the provider retry the thing we deliberately discarded |
+| **Slug was never registered** | **`404`** | `{"error":"no such receiver"}` | see below |
+| Receiver exists but is **disabled** | `403` | `{"error":"receiver disabled"}` | It IS registered; the operator turned it off |
+| Receiver exists but is **expired** | `410` | `{"error":"receiver expired"}` | Gone permanently, stop sending |
+| Receiver exists, old slug inside its `--grace` window | `200` | normal | Rotation must not drop traffic mid-cutover |
+| Method not in `allowed_methods` | `405` | `{"error":...}` + `Allow:` header | |
+| Body over `max_body_bytes` | `413` | | Checked on `Content-Length` first |
+| Signature/secret wrong | `401` | `{"error":"signature verification failed"}` | Stored as `rejected`, burns a rate-limit token |
+| Per-receiver rate limit or daily cap hit | `429` | + `Retry-After` | |
+| Our own failure (D1/R2 down) | `503` | | The ONLY case that should make a provider retry. Never return 5xx for a caller mistake |
+
+**Why unregistered stays `404` and not `403`.** They must be distinguishable --
+collapsing them destroys the single most useful diagnostic when a provider
+reports "your endpoint is failing", which is *did it reach a receiver at all*.
+But the direction matters: `403` means "this exists, and you may not have it",
+which **confirms the slug is real** to anyone probing. For a receiver whose URL
+*is* its credential (§11), that hands an enumerator a yes/no oracle. `404` for
+an unregistered slug leaks nothing; `403` for a disabled one leaks nothing
+either, because the only way to see it is to already hold the exact URL. So:
+`404` unknown, `403` disabled, `410` expired.
 
 ### Header storage: preserve, don't curate
 
@@ -386,26 +416,44 @@ implementation time -- their validation rules changed once already.
 
 ## 7. Pull-queue API
 
+Endpoints mirror the CLI verbs one-for-one (§10), so there is never a question
+of which does what.
+
 ```
-GET    /api/hooks/receivers            list all (admin)
+                                       -- receivers --
 POST   /api/hooks/receivers            create
+GET    /api/hooks/receivers            list all (admin)
 GET    /api/hooks/receivers/:box       list for a box
+GET    /api/hooks/receivers/:id        get one: config, URL, counters
 PATCH  /api/hooks/receivers/:id        update / enable / disable / rotate secret
 POST   /api/hooks/receivers/:id/rotate rotate the SLUG, keep the row + history
-DELETE /api/hooks/receivers/:id        delete (purges its events + R2 bodies)
+DELETE /api/hooks/receivers/:id        delete (?purge=1 also destroys its messages)
 
-GET    /api/hooks/events/:box          list (?receiver= ?status= ?key= ?since= ?limit=)
-GET    /api/hooks/events/:box/:id      one event, full body inlined
-GET    /api/hooks/events/:box/:id/body raw bytes, original content-type
-POST   /api/hooks/pull/:box            lease N events and return them
-POST   /api/hooks/ack/:box             {ids, delete?}
-POST   /api/hooks/nack/:box            {ids} -- release the lease now
-DELETE /api/hooks/events/:box/:id      hard delete
+                                       -- messages --
+GET    /api/hooks/queue/:box           list  (?receiver= ?status= ?key= ?since= ?limit=)
+GET    /api/hooks/queue/:box/:id       peek one -- NO lease taken
+GET    /api/hooks/queue/:box/:id/body  raw bytes, original content-type, NO lease
+POST   /api/hooks/queue/:box/peek      peek N -- NO lease taken
+POST   /api/hooks/queue/:box/get       lease N and return them
+POST   /api/hooks/queue/:box/put       inject a message as if a provider sent it
+POST   /api/hooks/queue/:box/remove    {ids} -- off the queue, row kept
+POST   /api/hooks/queue/:box/return    {ids} -- release the lease now
+POST   /api/hooks/queue/:box/extend    {ids, leaseSeconds}
+POST   /api/hooks/queue/:box/requeue   {ids} -- removed/rejected -> queued
+POST   /api/hooks/queue/:box/delete    {ids} | {removed:true} | {before:<id>} -- bulk destroy
+DELETE /api/hooks/queue/:box/:id       destroy one
+GET    /api/hooks/queue/:box/stats     counts by status, bytes, last arrival
 ```
 
+**Peek is a GET and takes no lease; get is a POST and does.** That is not
+decoration -- it means a peek is safe to retry, cache, and hand to a read-only
+credential, and it means you cannot consume a queue by accident with a browser
+or a `curl` you meant as a look.
+
 Receiver CRUD -> `asAdmin` (Tier 1, prefix-matched, like `/api/rules`).
-Event read -> `keyedReader`. Pull/ack/nack -> `keyedWriter`. Same gates as
-everything else; no new auth concepts.
+`queue-list` / `peek` / `body` / `stats` -> `keyedReader`. Everything that
+leases, mutates or destroys -> `keyedWriter`. Same gates as everything else;
+no new auth concepts.
 
 ### Lease semantics
 
@@ -499,33 +547,97 @@ wrangler r2 bucket lifecycle add agent-drop-storage hooks-130d "hooks/" --expire
 
 ## 10. CLI
 
+Two nouns, one verb vocabulary each. `hook` is the receiver (the registered
+URL); `queue` is the messages sitting in it. House style in this CLI is flat
+`noun-verb` (`rule-add`, `mask-create`), so these follow it.
+
+### Receivers -- `hook-*`
+
 ```bash
-drop hooks                                    # all receivers (admin)
-drop hooks lisa                               # receivers for a box
 drop hook-create lisa stripe-prod --auth stripe --secret whsec_...
 drop hook-create lisa meta --handshake meta --handshake-secret TOKEN
-drop hook-url lisa stripe-prod                # the URL to paste into the provider
-drop hook-update ID --disable | --enable | --secret ... | --retention 90
-drop hook-rotate ID [--grace 24h]             # new slug, same history
-drop hook-remove ID
-
-drop hook-events lisa [--receiver x] [--status queued] [--key TAG] [--since ID] [--limit 20]
-drop hook-pull lisa [--receiver x] [--limit 10] [--lease 60] [--ack] [--json]
-drop hook-ack ID...  [--delete]
-drop hook-nack ID...
-drop hook-body EVENT_ID [-o file]             # raw bytes to stdout or file
-drop hook-replay EVENT_ID --to URL            # manual re-delivery
-drop hook-test lisa stripe-prod               # send a correctly-signed synthetic
-                                              # request at your own receiver
+drop hook-list [lisa]                    # all receivers, or one box's. alias: `drop hooks`
+drop hook-get ID|lisa/stripe-prod        # full config, URL, counters, last event
+drop hook-update ID --disable | --enable | --secret ... | --retention 90 | --label ...
+drop hook-rotate ID [--grace 24h]        # new slug, same row, history intact
+drop hook-delete ID [--purge]            # --purge also destroys its queued messages
+drop hook-url ID                         # just the URL, for piping into a clipboard
+drop hook-test ID                        # fire a correctly-signed synthetic request at it
 ```
 
-`hook-test` is the one that saves the most time: it proves the secret, the
-signing scheme and the URL agree, without waiting on the provider's console.
+`hook-get` accepts either the id or the human `box/slug` pair, because the id
+is what the API returns and the pair is what you remember.
 
-`--json` emits `{"events":[{..., "body": <parsed>}]}` so an agent pipes straight
-into `jq`.
+### Messages -- `queue-*`
 
----
+```bash
+drop queue-list lisa [--receiver x] [--status queued] [--key TAG] [--since ID] [--limit 20]
+drop queue-peek lisa [--limit 5]         # read WITHOUT leasing -- pure debugging
+drop queue-peek EVENT_ID                 # one message, full detail + headers, no lease
+drop queue-get lisa [--limit 10] [--lease 60] [--json]
+                    [--remove | --delete-on-success]
+drop queue-put lisa --receiver stripe-prod --body @file.json [--header k:v]
+drop queue-remove ID...                  # off the queue, row kept (the ack)
+drop queue-delete ID...                  # destroyed, R2 body too
+drop queue-delete lisa --removed         # bulk: everything already removed
+drop queue-delete lisa --before EVENT_ID # bulk: everything older than a cursor
+drop queue-body EVENT_ID [-o file]       # raw bytes, unmodified, to stdout or file
+drop queue-return ID...                  # release a lease immediately (the nack)
+drop queue-extend ID... --lease 300      # hold a lease longer mid-work
+drop queue-requeue ID...                 # removed/rejected -> queued again
+drop queue-stats [lisa]                  # counts by status, bytes, last arrival
+drop queue-replay EVENT_ID --to URL      # manual re-delivery to an arbitrary target
+```
+
+### `peek` vs `get` -- the distinction that matters
+
+`queue-get` **takes a lease**: the message is handed to you and hidden from
+every other consumer until you `queue-remove` it or the lease expires. That is
+the consuming path.
+
+`queue-peek` takes **no lease and changes nothing**. It is for looking: what is
+in there, what does that body actually contain, why did that one get rejected.
+Peeking a leased message shows it, and says who holds the lease and for how
+long. You can peek the same message a hundred times and the queue is exactly as
+it was -- which is the entire point when you are debugging a provider at 2am.
+
+### `remove` vs `delete` -- also not the same
+
+| Verb | Row after | Use |
+|---|---|---|
+| `queue-remove ID` | kept, `acked_at` set, out of the queue, still readable and replayable until `expires_at` | the default "I processed this" |
+| `queue-get --remove` | same, but removed at handout | at-most-once; caller does not want lease bookkeeping |
+| `queue-get --delete-on-success` | **destroyed**, R2 body too, per message as it is written out | the consumer is the archive; keep nothing here |
+| `queue-delete ID` | **destroyed**, R2 body too | junk, test pings, a misconfigured provider's noise |
+
+`--delete-on-success` destroys each message only after it has been written to
+the caller's output without error; a pull that dies halfway leaves the
+remainder leased, not destroyed.
+
+`queue-delete` is a first-class verb, not a flag on remove, because destroying
+something you never processed is a normal want and should not require
+pretending to process it first. The bulk forms print what they will destroy and
+need `--yes` to skip the confirmation.
+
+### `queue-put`
+
+Injects a message as if a provider had sent it -- the same code path, so it
+exercises storage, extraction and rule firing. This is how you reproduce a
+provider's payload from a saved body without waiting for them to send another,
+and how the tests drive the queue without going through HTTP.
+
+### Completeness gate
+
+Before phase 4 closes, walk this matrix and confirm every cell has a verb. No
+cell may require a raw `curl` or a D1 query.
+
+| | create | list | inspect | modify | rotate | disable | remove | destroy |
+|---|---|---|---|---|---|---|---|---|
+| **hook** | `hook-create` | `hook-list` | `hook-get` | `hook-update` | `hook-rotate` | `hook-update --disable` | -- | `hook-delete` |
+| **queue** | `queue-put` | `queue-list` | `queue-peek` / `queue-body` | `queue-extend`, `queue-requeue` | -- | `queue-return` | `queue-remove` | `queue-delete` |
+
+`--json` on any read verb emits machine-shaped output (`{"events":[...]}`, body
+parsed when it is JSON) so an agent pipes straight into `jq`.
 
 ## 11. Security notes worth stating
 
@@ -569,8 +681,9 @@ The skeleton, end to end, with verification stubbed out (`auth_mode: none`).
 4. `src/api/hooks.ts`: receiver CRUD under `asAdmin`, wired into the Tier-1
    table by `prefix("/api/hooks")` (it sub-routes itself, like `/api/rules`).
    Event *read* endpoints under `keyedReader`.
-5. CLI: `hooks`, `hook-create`, `hook-url`, `hook-update`, `hook-remove`,
-   `hook-events`, `hook-body`.
+5. CLI, receiver side plus the read-only queue verbs: `hook-create`,
+   `hook-list`, `hook-get`, `hook-url`, `hook-update`, `hook-delete`,
+   `queue-list`, `queue-peek`, `queue-body`.
 
 **verify:** `bun run verify` green. Plus a RUNTIME check, not just tests: start
 `bun run dev`, create a receiver, `curl -X POST` a JSON body at
@@ -619,15 +732,25 @@ the verifier. Handshake requests are stored with `status='handshake'`.
 
 ### Phase 4 -- The pull queue
 
-Lease/ack/nack per §7, the single `UPDATE ... RETURNING` with the subselect,
-`?since=` cursor, `?key=` routing-key filter, and CLI `hook-pull`, `hook-ack`,
-`hook-nack`, `hook-rotate`.
+The full message vocabulary per §7 and §10: the single `UPDATE ... RETURNING`
+with the subselect for leasing, the `?since=` cursor, the `?key=` routing-key
+filter, and CLI `queue-get`, `queue-remove`, `queue-return`, `queue-delete`,
+`queue-put`, `queue-extend`, `queue-requeue`, `queue-stats`, plus
+`hook-rotate`. **The completeness gate in §10 is a phase-4 exit condition** --
+walk the matrix, every cell has a verb, nothing requires a raw curl.
 
 **verify:** `bun run verify` green, and the test file must prove: two
-concurrent pulls never return the same event; an expired lease is re-served
-exactly once and bumps `lease_count`; `ack` is idempotent; `ack --delete`
-removes the R2 body too; `nack` returns the event immediately;
-`hook-rotate` changes the slug while every existing event stays reachable.
+concurrent `queue-get`s never return the same message; an expired lease is
+re-served exactly once and bumps `lease_count`; `queue-remove` is idempotent;
+`queue-delete` removes the R2 body too; `queue-return` frees the lease
+immediately; `queue-extend` pushes `leased_until` out without changing
+ownership; **`queue-peek` never mutates a single column** -- assert the whole
+row is byte-identical before and after, including on a leased message;
+`--delete-on-success` leaves the un-emitted remainder leased rather than
+destroyed when the output fails partway; the `--removed` and `--before` bulk
+deletes touch exactly the intended rows and nothing else; `queue-put` lands a
+message through the same path a real provider would; `hook-rotate` changes the
+slug while every existing message stays reachable.
 
 **artifacts:** `src/api/hooks.ts`, `test/webhook-queue.test.ts`,
 `tools/agent-drop.ts`.
@@ -656,17 +779,28 @@ headers verbatim; a failing target retries with backoff and logs to
    7-day retention for `rejected`. Extends `src/lib/reaper.ts`; must not
    disturb the existing stale-`pending` sweep.
 2. `HOOK_RATE_LIMIT` binding + the per-receiver daily cap (§11).
-3. Out-of-band provisioning documented AND run: the R2 `hooks/` lifecycle rule
-   at 130 days, and migration `0009` applied remotely.
+3. Out-of-band provisioning documented AND run, in this order:
+   ```bash
+   wrangler d1 migrations apply agent-drop-db --remote      # 0009 -- BEFORE the deploy
+   bun run deploy
+   wrangler r2 bucket lifecycle add agent-drop-storage hooks-130d "hooks/" --expire-days 130
+   ```
+   **Jonas gave an explicit green light to deploy** (2026-08-15), so this phase
+   ships it -- do not halt to ask. Migration first: the receive path INSERTs
+   into tables that will not exist yet otherwise.
 4. Docs: `CLAUDE.md` (new section in the house style, plus the CLI table, the
    endpoint list and the Project Structure tree), `README.md`, and the
    `agent-drop` skill at `~/.claude/skills/agent-drop/`.
+5. **Live smoke test against the deployed worker**, not localhost: create a
+   receiver, POST at its real `https://frst.dev/h/...` URL, pull it back, delete
+   it. Paste the transcript into the phase log.
 
 **verify:** `bun run verify` green; a test proves an event past `expires_at` is
 deleted on a cron tick along with its R2 body, and that an unexpired one is
 not. Fire the cron locally against `bun run dev`:
 `curl "http://localhost:5173/cdn-cgi/handler/scheduled?cron=17+*+*+*+*"`.
 `CLAUDE.md` must describe what was actually built, not what this plan proposed.
+The phase is NOT done until the live round trip in step 5 is in the log.
 
 **artifacts:** `src/lib/reaper.ts`, `wrangler.toml`, `test/reaper.test.ts`,
 `CLAUDE.md`, `README.md`, the skill.
@@ -740,6 +874,63 @@ All four confirmed by Jonas. Nothing in this plan is open; build it as written.
 ---
 
 ## Changelog
+
+### v3 -- 2026-08-15 -- author: planning conversation
+
+Jonas specified the verb vocabulary directly: `get/inspect/create/delete/update`
+for a hook, `list/remove/put/delete/get/peek` for messages in its queue, with
+"peek == get with no lease". Section 10 rewritten to it, and section 7's
+endpoints re-cut to mirror the CLI one-for-one. No GOAL change; this is a
+naming and completeness change, and it ADDS three capabilities the plan did not
+have.
+
+- Two nouns with their own flat `noun-verb` families, matching this CLI's
+  existing house style (`rule-add`, `mask-create`): `hook-*` for the receiver,
+  `queue-*` for the messages in it. The previous single `hook-*` family had
+  been quietly doing both jobs.
+- `queue-peek` added: read with **no lease**, changes nothing, safe to repeat.
+  `queue-get` is the leasing/consuming path. Peek is a GET, get is a POST --
+  so a peek is retry-safe, cacheable, servable to a read-only credential, and
+  you cannot consume a queue by accident with a curl you meant as a look.
+  Phase 4 must assert the row is byte-identical before and after a peek.
+- `queue-put` added: inject a message through the same path a real provider
+  would, for reproducing a saved payload without waiting on the provider.
+- `remove` and `delete` are now distinct verbs rather than a verb and a flag,
+  which is exactly the tombstone-vs-destroy split the plan already had:
+  `queue-remove` = off the queue, row kept, replayable; `queue-delete` =
+  destroyed with its R2 body. Renames `ack`/`nack` to `remove`/`return`.
+- `queue-extend`, `queue-requeue`, `queue-stats`, `hook-get` fill the
+  remaining empty cells; the completeness matrix in section 10 is now an
+  explicit phase-4 exit condition.
+
+### v2 -- 2026-08-15 -- author: planning conversation
+
+Three additions from Jonas, before link 1 spawned. No GOAL change, nothing
+weakened -- all three widen the surface.
+
+- Queue exit paths split three ways instead of two: `hook-ack` (tombstone,
+  default), `hook-pull --delete-on-success` (delete as each event is handed
+  over, only after it is written out without error), and `hook-delete` as a
+  first-class verb plus `--acked` / `--before` bulk forms. Deleting an event
+  you never acked -- a junk ping, a misconfigured provider's noise -- is a
+  normal want and should not require pretending to process it first.
+- Management completeness is now an explicit phase-4 gate: a create/list/
+  inspect/modify/rotate/disable/delete matrix over both objects (receiver and
+  queued message), with `hook-stats`, `hook-show`, `hook-requeue` and
+  `hook-extend` added to fill the empty cells. No cell may require a raw curl
+  or a D1 query.
+- Full status-code table added to section 4. Jonas asked for 403 on an
+  unregistered hook; the plan splits it instead -- `404` unregistered, `403`
+  disabled, `410` expired, `401` bad signature, `429` throttled, `503` reserved
+  for OUR failures only (the sole case where a provider should retry). The
+  three receiver-state cases must stay distinguishable because "did it reach a
+  receiver at all" is the one diagnostic that matters when a provider reports
+  a failing endpoint -- but `403` on an unregistered slug would confirm the
+  slug is real, handing an enumerator a yes/no oracle against a URL that IS
+  the credential. So unknown stays `404`.
+- Recorded Jonas's explicit green light to deploy (2026-08-15) in phase 6, so
+  the final link ships rather than halting to ask, and added a live smoke test
+  against the deployed worker as a phase-6 completion condition.
 
 ### v1 -- 2026-08-15 -- author: planning conversation
 
