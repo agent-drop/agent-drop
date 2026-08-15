@@ -9,8 +9,11 @@
  */
 
 import { normalizeInbox, normalizeSlug } from "../lib/normalize";
+import { jsonConfig } from "../lib/webhook-body";
 import {
 	type CreateBody,
+	handshakeConfigError,
+	methodsForHandshake,
 	normalizeMethods,
 	planPatch,
 	slugFor,
@@ -58,6 +61,8 @@ async function create(request: Request, env: Env): Promise<Response> {
 	if (!slug) return bad("invalid slug (a-z, 0-9, hyphens)");
 	const denied = unsupportedMode(body);
 	if (denied) return bad(denied);
+	const misconfigured = handshakeConfigError(body.handshakeMode || "none", body.handshakeConfig);
+	if (misconfigured) return bad(misconfigured);
 
 	const id = crypto.randomUUID();
 	try {
@@ -82,7 +87,7 @@ async function create(request: Request, env: Env): Promise<Response> {
 				body.responseStatus ?? 200,
 				body.responseBody ?? null,
 				body.responseContentType ?? null,
-				normalizeMethods(body.methods),
+				methodsForHandshake(normalizeMethods(body.methods), body.handshakeMode),
 				body.maxBodyBytes ?? 1_048_576,
 				body.retentionDays ?? 120,
 				body.dailyCap ?? null,
@@ -125,6 +130,33 @@ async function update(request: Request, env: Env, receiver: WebhookReceiver): Pr
 	const plan = planPatch(body);
 	if (typeof plan === "string") return bad(plan);
 	if (!plan.sets.length) return bad("nothing to update");
+
+	// Validated against the row as it will BE, not as either half of the patch
+	// arrives: switching a receiver to `zoom` without a secret and adding the
+	// secret in the same breath are both legal, and so is doing them separately.
+	const mode = body.handshakeMode !== undefined ? String(body.handshakeMode) : "";
+	const nextMode = mode || receiver.handshake_mode || "none";
+	const nextConfig =
+		body.handshakeConfig !== undefined
+			? body.handshakeConfig
+			: jsonConfig<Record<string, unknown>>(receiver.handshake_config);
+	const misconfigured = handshakeConfigError(nextMode, nextConfig);
+	if (misconfigured) return bad(misconfigured);
+
+	// Turning a live receiver into a `meta` one needs GET just as much as creating
+	// it that way did, and the patch may not have mentioned methods at all.
+	const methodIndex = plan.sets.indexOf("allowed_methods = ?");
+	const current = String(
+		methodIndex >= 0 ? plan.params[methodIndex] : receiver.allowed_methods || "POST",
+	);
+	const widened = methodsForHandshake(current, nextMode);
+	if (widened !== current) {
+		if (methodIndex >= 0) plan.params[methodIndex] = widened;
+		else {
+			plan.sets.push("allowed_methods = ?");
+			plan.params.push(widened);
+		}
+	}
 
 	await env.DB.prepare(`UPDATE webhook_receivers SET ${plan.sets.join(", ")} WHERE id = ?`)
 		.bind(...plan.params, receiver.id)

@@ -9,6 +9,7 @@
 
 import { normalizeSlug } from "../lib/normalize";
 import { isKnownPreset, presetNames } from "../lib/webhook-extract";
+import type { HandshakeConfig } from "../lib/webhook-handshake";
 import {
 	hookUrl,
 	slugSuffix,
@@ -94,6 +95,41 @@ export function unsupportedMode(body: {
 		return `unknown preset '${body.preset}' (have: ${presetNames().join(", ")})`;
 	}
 	return null;
+}
+
+/**
+ * A handshake mode that cannot answer is refused at registration.
+ *
+ * The alternative is a receiver that looks configured, gets pasted into a
+ * provider's dashboard, and fails its validation with an error only our logs
+ * carry -- days later for Zoom, which re-runs its check every 72 hours. Same
+ * fail-closed posture as the mode gate above: the two halves of a promise that
+ * cannot be kept are refused together.
+ */
+export function handshakeConfigError(mode: string, config: unknown): string | null {
+	const cfg = (config ?? {}) as HandshakeConfig;
+	if (mode === "meta" && !(cfg.token || cfg.secret)) {
+		return "handshake_mode 'meta' needs a verify token -- the string you typed into the provider's dashboard";
+	}
+	if (mode === "zoom" && !(cfg.secret || cfg.token)) {
+		return "handshake_mode 'zoom' needs the webhook secret token -- its CRC answer is an HMAC keyed by it";
+	}
+	if (mode === "static" && !Object.keys(cfg.when ?? {}).length) {
+		return "handshake_mode 'static' needs a `when` predicate -- an empty one matches nothing, on purpose";
+	}
+	return null;
+}
+
+/**
+ * Meta's verification request is a GET, so a POST-only receiver 405s before the
+ * handshake ever runs -- and the operator sees "verification failed" with no clue
+ * that a method list is the reason. Widening it is one line here versus a bad
+ * afternoon there.
+ */
+export function methodsForHandshake(methods: string, mode: string | undefined): string {
+	if (mode !== "meta") return methods;
+	const list = methods.split(",");
+	return list.includes("GET") ? methods : [...list, "GET"].join(",");
 }
 
 /** Body field -> column, for the fields a PATCH may set directly. */

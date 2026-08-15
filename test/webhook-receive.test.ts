@@ -211,6 +211,46 @@ describe("header storage", () => {
 		expect(event.subpath).toBe("orders/created");
 		expect(JSON.parse(event.query)).toEqual({ tag: "abc", x: "1" });
 	});
+
+	// A shared secret is no less a credential for arriving in a `?token=`. The
+	// header map has been redacted since phase 1; the query string was copied
+	// through untouched until `auth_mode: query` gave a parameter that meaning.
+	test("a query-mode receiver's token is redacted, like the header would be", async () => {
+		await seedReceiver(env, {
+			inbox: "lisa",
+			slug: "gate",
+			authMode: "query",
+			authConfig: { param: "token", secret: "s3cr3t" },
+		});
+
+		await serve(post("/h/lisa/gate?token=s3cr3t&tag=abc", "{}"));
+
+		const query = JSON.parse(onlyEvent().query);
+		expect(query.token).toBe("<redacted>");
+		// And only that one -- redaction that creeps costs a consumer its context.
+		expect(query.tag).toBe("abc");
+	});
+
+	test("the default parameter name is covered when none is configured", async () => {
+		await seedReceiver(env, {
+			inbox: "lisa",
+			slug: "gate",
+			authMode: "query",
+			authConfig: { secret: "s3cr3t" },
+		});
+
+		await serve(post("/h/lisa/gate?token=s3cr3t", "{}"));
+
+		expect(JSON.parse(onlyEvent().query).token).toBe("<redacted>");
+	});
+
+	test("a receiver that names no secret keeps its whole query string", async () => {
+		await seedReceiver(env, { inbox: "lisa", slug: "open" });
+
+		await serve(post("/h/lisa/open?token=not-a-secret-here", "{}"));
+
+		expect(JSON.parse(onlyEvent().query).token).toBe("not-a-secret-here");
+	});
 });
 
 describe("the status table", () => {

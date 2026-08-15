@@ -18,8 +18,16 @@
 
 import { normalizeInbox, normalizeSlug } from "./normalize";
 import { recordAuthFailure } from "./ratelimit";
-import { decodeUtf8, jsonConfig, parseJson, secretHeaders, sha256Hex } from "./webhook-body";
+import {
+	decodeUtf8,
+	jsonConfig,
+	parseJson,
+	secretHeaders,
+	secretParams,
+	sha256Hex,
+} from "./webhook-body";
 import { extractFields, type ExtractConfig } from "./webhook-extract";
+import { detectHandshake } from "./webhook-handshake";
 import { bumpReceiverCounters, collectHeaders, collectQuery, storeEvent } from "./webhook-store";
 import { verifyWebhook } from "./webhook-verify";
 import type { Env, WebhookReceiver } from "../types";
@@ -147,9 +155,66 @@ async function receive(
 	const sha256 = await sha256Hex(bytes);
 	const text = decodeUtf8(bytes);
 	const contentType = request.headers.get("Content-Type");
+	const subpath = segs.length > 3 ? segs.slice(3).join("/") : null;
 
-	// Handshake (phase 3) runs BEFORE verification and never falls through to it.
-	//
+	// Everything a stored event needs regardless of what we decide the request was.
+	// Redaction reaches the query string as well as the headers, because a shared
+	// secret is no less a credential for arriving in a `?token=`.
+	const envelope = {
+		receiver,
+		method: request.method,
+		subpath,
+		headers: collectHeaders(request.headers, secretHeaders(receiver)),
+		query: collectQuery(url, secretParams(receiver)),
+		contentType,
+		bytes,
+		text,
+		sha256,
+		remoteIp: request.headers.get("CF-Connecting-IP"),
+		country: request.headers.get("CF-IPCountry"),
+		userAgent: request.headers.get("User-Agent"),
+		now,
+	};
+
+	// The handshake runs BEFORE verification and NEVER falls through to it. A
+	// provider sends its challenge before any secret has been agreed, so a
+	// handshake that had to pass a signature check first would be a receiver that
+	// can never be set up.
+	const handshake = await detectHandshake({
+		receiver,
+		headers: request.headers,
+		url,
+		method: request.method,
+		subpath,
+		bytes,
+		text,
+		contentType,
+	});
+	if (handshake) {
+		// Stored because "the provider says my URL failed validation" is the number
+		// one thing you will need to debug and this request is the only evidence --
+		// but never deduped, so a Zoom re-validation 72 hours later is its own row.
+		//
+		// A storage failure does NOT fail the handshake. Everywhere else a write we
+		// could not complete has to become a 503, because the provider is trusting
+		// us to have kept its event. Here there is no event to keep: the answer is
+		// the entire product, it does not depend on the row, and losing an operator's
+		// endpoint validation because the audit log hiccuped helps nobody.
+		await storeEvent(env, {
+			...envelope,
+			extracted: {
+				eventType: handshake.eventType,
+				routingKey: null,
+				dedupeKey: null,
+				dedupeAlternates: [],
+				dedupeWindowMs: null,
+			},
+			verified: null,
+			status: "handshake",
+		}).catch((err: unknown) => console.error("handshake event not stored:", err));
+		return handshake.response;
+	}
+
 	// Verification reads `bytes` -- the same array that was hashed above, never the
 	// decoded text and never a re-encode of it. `verified` is three-valued: 1 pass,
 	// 0 fail, null for a receiver that asked for nothing.
@@ -181,22 +246,10 @@ async function receive(
 	// returns -- the ONE case where a provider should retry. Every caller mistake
 	// above answered 4xx instead, so it stops and shows an error in its dashboard.
 	const stored = await storeEvent(env, {
-		receiver,
-		method: request.method,
-		subpath: segs.length > 3 ? segs.slice(3).join("/") : null,
-		headers: collectHeaders(request.headers, secretHeaders(receiver)),
-		query: collectQuery(url),
-		contentType,
-		bytes,
-		text,
-		sha256,
+		...envelope,
 		extracted,
 		verified: verdict.verified,
 		status,
-		remoteIp: request.headers.get("CF-Connecting-IP"),
-		country: request.headers.get("CF-IPCountry"),
-		userAgent: request.headers.get("User-Agent"),
-		now,
 	});
 
 	if (status === "rejected") {

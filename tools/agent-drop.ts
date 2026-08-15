@@ -2043,6 +2043,37 @@ function withAuthOptions(command: Command): Command {
 		.option("--auth-tolerance <seconds>", "Replay window; 0 turns it off");
 }
 
+/**
+ * The setup handshake is configured separately from the signature, because it is
+ * a separate secret: Meta's verify token and Zoom's secret token are not the
+ * thing that signs later deliveries, and a receiver commonly needs both.
+ */
+function handshakeConfigFromOpts(opts: any): Record<string, unknown> | undefined {
+	const config: Record<string, unknown> = {};
+	if (opts.handshakeSecret) config.secret = opts.handshakeSecret;
+	if (opts.handshakeToken) config.token = opts.handshakeToken;
+	if (opts.handshakeStatus) config.status = parseInt(opts.handshakeStatus, 10);
+	if (opts.handshakeBody) config.body = opts.handshakeBody;
+	if (opts.handshakeWhen) {
+		try {
+			config.when = JSON.parse(opts.handshakeWhen);
+		} catch {
+			throw new Error(`--handshake-when must be JSON, e.g. '{"method":"GET","subpath":"setup"}'`);
+		}
+	}
+	return Object.keys(config).length ? config : undefined;
+}
+
+function withHandshakeOptions(command: Command): Command {
+	return command
+		.option("--handshake <mode>", "Setup handshake: meta | slack | zoom | echo | static")
+		.option("--handshake-secret <secret>", "Zoom's secret token (or Meta's verify token)")
+		.option("--handshake-token <token>", "Meta's hub.verify_token")
+		.option("--handshake-when <json>", "static: JSON predicate, e.g. {method:GET} as JSON")
+		.option("--handshake-body <text>", "static: the fixed body to answer with")
+		.option("--handshake-status <code>", "static: the fixed status to answer with");
+}
+
 function extractFromOpts(opts: any): Record<string, unknown> | undefined {
 	const extract: Record<string, unknown> = {};
 	if (opts.routingKey) extract.routingKeyPath = opts.routingKey;
@@ -2054,18 +2085,19 @@ function extractFromOpts(opts: any): Record<string, unknown> | undefined {
 	return Object.keys(extract).length ? extract : undefined;
 }
 
-withAuthOptions(
-	program
-		.command("hook-create <box> [name]")
-		.description("Register a webhook receiver; prints the URL to paste into the provider")
-		.option("--slug <slug>", "Exact slug (no random suffix -- you are on your own for entropy)")
-		.option("--label <text>", "Human note")
-		.option(
-			"--auth <mode>",
-			"standard | github | stripe | slack | shopify | hmac | digest | bearer | basic | header | query",
-		),
+withHandshakeOptions(
+	withAuthOptions(
+		program
+			.command("hook-create <box> [name]")
+			.description("Register a webhook receiver; prints the URL to paste into the provider")
+			.option("--slug <slug>", "Exact slug (no random suffix -- you are on your own for entropy)")
+			.option("--label <text>", "Human note")
+			.option(
+				"--auth <mode>",
+				"standard | github | stripe | slack | shopify | hmac | digest | bearer | basic | header | query",
+			),
+	),
 )
-	.option("--handshake <mode>", "Setup handshake (phase 3; only 'none' works today)")
 	.option("--preset <name>", "Extraction preset: github, stripe, standard, slack, shopify")
 	.option("--routing-key <path>", "Dotted body path to index as the correlation key")
 	.option("--event-path <path>", "Dotted body path holding the event type")
@@ -2088,6 +2120,7 @@ withAuthOptions(
 				authMode: opts.auth,
 				authConfig: authConfigFromOpts(opts),
 				handshakeMode: opts.handshake,
+				handshakeConfig: handshakeConfigFromOpts(opts),
 				preset: opts.preset,
 				extract: extractFromOpts(opts),
 				methods: opts.methods,
@@ -2103,6 +2136,12 @@ withAuthOptions(
 			console.log(
 				chalk.dim(`  id ${hook.id}  ${hook.allowed_methods}  keeps ${hook.retention_days}d`),
 			);
+			if (hook.handshake_mode && hook.handshake_mode !== "none") {
+				// Meta verifies over GET, so the method list was widened for it. Say so
+				// rather than letting it look like the flag was ignored.
+				const widened = hook.handshake_mode === "meta" ? ", GET added for it" : "";
+				console.log(chalk.dim(`  handshake ${hook.handshake_mode}${widened}`));
+			}
 			if (!hook.secret_set) {
 				// The URL is the credential when nothing is signed. Say so out loud
 				// rather than letting an operator discover it later.
@@ -2177,7 +2216,10 @@ program
 				["label", h.label || chalk.dim("(none)")],
 				["enabled", h.enabled ? chalk.green("yes") : chalk.red("no")],
 				["auth", `${h.auth_mode}${h.secret_set ? chalk.dim(" (secret set)") : ""}`],
-				["handshake", h.handshake_mode],
+				[
+					"handshake",
+					`${h.handshake_mode}${h.handshake_secret_set ? chalk.dim(" (secret set)") : ""}`,
+				],
 				["preset", h.preset || chalk.dim("(none)")],
 				["extract", h.extract_config ? JSON.stringify(h.extract_config) : chalk.dim("(none)")],
 				["methods", h.allowed_methods],
@@ -2298,16 +2340,19 @@ program
 		}
 	});
 
-withAuthOptions(
-	program
-		.command("hook-update <ref>")
-		.description("Update a receiver. REF is its id or box/slug")
-		.option("--enable", "Resume accepting requests")
-		.option("--disable", "Stop accepting requests (answers 403, keeps history)")
-		.option("--label <text>", "New label")
-		.option("--auth <mode>", "Change the signature scheme"),
+withHandshakeOptions(
+	withAuthOptions(
+		program
+			.command("hook-update <ref>")
+			.description("Update a receiver. REF is its id or box/slug")
+			.option("--enable", "Resume accepting requests")
+			.option("--disable", "Stop accepting requests (answers 403, keeps history)")
+			.option("--label <text>", "New label")
+			.option("--auth <mode>", "Change the signature scheme"),
+	),
 )
 	.option("--preset <name>", "New extraction preset")
+	.option("--handshake-clear", "Drop the handshake entirely (back to 'none')")
 	.option("--routing-key <path>", "New routing-key path")
 	.option("--methods <list>", "New comma-separated method list")
 	.option("--max-body <bytes>", "New body size cap")
@@ -2325,6 +2370,13 @@ withAuthOptions(
 			// working the moment the new one lands.
 			const authConfig = authConfigFromOpts(opts);
 			if (authConfig) body.authConfig = authConfig;
+			if (opts.handshake) body.handshakeMode = opts.handshake;
+			if (opts.handshakeClear) {
+				body.handshakeMode = "none";
+				body.handshakeConfig = null;
+			}
+			const handshakeConfig = handshakeConfigFromOpts(opts);
+			if (handshakeConfig) body.handshakeConfig = handshakeConfig;
 			if (opts.preset) body.preset = opts.preset;
 			if (opts.methods) body.methods = opts.methods;
 			if (opts.maxBody) body.maxBodyBytes = parseInt(opts.maxBody, 10);

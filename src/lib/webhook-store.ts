@@ -49,9 +49,15 @@ export function collectHeaders(
 	return out;
 }
 
-export function collectQuery(url: URL): Record<string, string> {
+/**
+ * The query string, with whatever this receiver's config names as a secret
+ * replaced. Same treatment as the headers, for the same reason: a shared secret
+ * that arrives in a `?token=` is still a shared secret.
+ */
+export function collectQuery(url: URL, extraRedact: string[] = []): Record<string, string> {
+	const redact = new Set(extraRedact);
 	const out: Record<string, string> = {};
-	for (const [key, value] of url.searchParams) out[key] = value;
+	for (const [key, value] of url.searchParams) out[key] = redact.has(key) ? REDACTED : value;
 	return out;
 }
 

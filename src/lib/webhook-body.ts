@@ -79,13 +79,56 @@ export function jsonConfig<T>(raw: string | null): T | null {
  */
 const SIGNATURE_HEADER_MODES = new Set(["hmac", "digest"]);
 
+interface AuthNames {
+	header?: string;
+	param?: string;
+}
+
+interface HandshakeNames {
+	when?: { header?: Record<string, string>; query?: Record<string, string> };
+}
+
 export function secretHeaders(receiver: WebhookReceiver): string[] {
-	const cfg = jsonConfig<{ header?: string }>(receiver.auth_config);
+	const cfg = jsonConfig<AuthNames>(receiver.auth_config);
 	const names: string[] = [];
 	if (receiver.auth_mode === "bearer" || receiver.auth_mode === "basic")
 		names.push("authorization");
 	// Anything else that names a header means a secret. Only these two mean a
 	// signature -- so the default stays "redact", and the exception is narrow.
 	if (cfg?.header && !SIGNATURE_HEADER_MODES.has(receiver.auth_mode)) names.push(cfg.header);
+	// A `static` handshake predicate compares a header against a configured value,
+	// which makes that value a shared secret whatever the operator called it.
+	if (receiver.handshake_mode === "static") {
+		const when = jsonConfig<HandshakeNames>(receiver.handshake_config)?.when;
+		names.push(...Object.keys(when?.header ?? {}));
+	}
+	return names;
+}
+
+/**
+ * Query parameters this receiver's own config turns into credentials.
+ *
+ * A shared secret is no less a credential for arriving in a `?token=` than in a
+ * header: it rides every request unchanged, so anyone who reads one replays it
+ * forever, and these rows are readable for 120 days by any key with read on the
+ * box. `collectQuery` used to copy the whole query string through untouched,
+ * which was harmless only for as long as nothing named a parameter as a secret.
+ *
+ * The `hmac`/`digest` carve-out above does NOT extend here. No provider on the
+ * list puts a signature in the query string; if one ever does it earns its own
+ * line rather than a blanket exception.
+ */
+export function secretParams(receiver: WebhookReceiver): string[] {
+	const names: string[] = [];
+	if (receiver.auth_mode === "query") {
+		names.push(jsonConfig<AuthNames>(receiver.auth_config)?.param ?? "token");
+	}
+	// Meta's verify token is the whole credential of its handshake, and it arrives
+	// in the URL. `hub.mode` and `hub.challenge` are not secrets and stay readable.
+	if (receiver.handshake_mode === "meta") names.push("hub.verify_token");
+	if (receiver.handshake_mode === "static") {
+		const when = jsonConfig<HandshakeNames>(receiver.handshake_config)?.when;
+		names.push(...Object.keys(when?.query ?? {}));
+	}
 	return names;
 }

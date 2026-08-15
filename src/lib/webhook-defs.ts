@@ -5,6 +5,7 @@
  */
 
 import { generateId } from "./id";
+import { HANDSHAKE_MODES } from "./webhook-handshake";
 import { VERIFIER_MODES } from "./webhook-verify";
 import type { Env } from "../types";
 
@@ -16,15 +17,14 @@ export const HOOK_PREFIX = "h";
  * anything else, rather than letting an operator believe a signature is being
  * checked when it is not.
  *
- * The auth list is DERIVED from the verifier's own dispatch table rather than
- * typed out again here, so the two cannot drift: a preset that exists only in
- * this array would be registerable and then rejected on every delivery, and one
+ * Both lists are DERIVED from the dispatch table that implements them rather
+ * than typed out again here, so the two cannot drift: a mode that existed only
+ * in one of these arrays would be registerable and then never honoured, and one
  * missing from it would be dead code nobody could reach.
  */
 export const SUPPORTED_AUTH_MODES = ["none", ...VERIFIER_MODES];
 
-/** Phase 3 fills this in the same way, from the handshake dispatch table. */
-export const SUPPORTED_HANDSHAKE_MODES = ["none"];
+export const SUPPORTED_HANDSHAKE_MODES = ["none", ...HANDSHAKE_MODES];
 
 export function hookUrl(env: Env, inbox: string, slug: string): string {
 	return `https://${env.DOMAIN}/${HOOK_PREFIX}/${inbox}/${slug}`;

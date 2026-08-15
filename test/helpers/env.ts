@@ -253,6 +253,7 @@ export interface SeedReceiver {
 	authMode?: string;
 	authConfig?: Record<string, unknown> | null;
 	handshakeMode?: string;
+	handshakeConfig?: Record<string, unknown> | null;
 	preset?: string | null;
 	extract?: Record<string, unknown> | null;
 	methods?: string;
@@ -272,11 +273,11 @@ export async function seedReceiver(env: TestEnv, opts: SeedReceiver): Promise<st
 	const id = opts.id ?? crypto.randomUUID();
 	await env.DB.prepare(
 		`INSERT INTO webhook_receivers (
-			id, inbox, slug, auth_mode, auth_config, handshake_mode, preset, extract_config,
-			allowed_methods, max_body_bytes, retention_days, response_status, response_body,
-			response_content_type, enabled, expires_at, previous_slug, previous_slug_expires_at,
-			created_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			id, inbox, slug, auth_mode, auth_config, handshake_mode, handshake_config, preset,
+			extract_config, allowed_methods, max_body_bytes, retention_days, response_status,
+			response_body, response_content_type, enabled, expires_at, previous_slug,
+			previous_slug_expires_at, created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 	)
 		.bind(
 			id,
@@ -285,6 +286,7 @@ export async function seedReceiver(env: TestEnv, opts: SeedReceiver): Promise<st
 			opts.authMode ?? "none",
 			opts.authConfig ? JSON.stringify(opts.authConfig) : null,
 			opts.handshakeMode ?? "none",
+			opts.handshakeConfig ? JSON.stringify(opts.handshakeConfig) : null,
 			opts.preset ?? null,
 			opts.extract ? JSON.stringify(opts.extract) : null,
 			opts.methods ?? "POST",
