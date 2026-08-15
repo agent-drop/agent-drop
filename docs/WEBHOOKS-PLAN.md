@@ -1,5 +1,5 @@
 ---
-version: 4
+version: 5
 created: 2026-08-15
 ---
 
@@ -165,14 +165,20 @@ Both tables in one migration; they are one feature.
 | `auth_config` | TEXT | JSON: secret, header name, encoding, tolerance |
 | `handshake_mode` | TEXT NOT NULL DEFAULT 'none' | see §6 |
 | `handshake_config` | TEXT | JSON: verify token, static response |
+| `preset` | TEXT | extraction preset: `github`/`stripe`/`standard`/... (§4) |
+| `extract_config` | TEXT | JSON: per-receiver overrides of the preset (§4) |
 | `response_status` | INTEGER DEFAULT 200 | what we answer the provider with |
 | `response_body` | TEXT | |
 | `response_content_type` | TEXT | |
 | `allowed_methods` | TEXT DEFAULT 'POST' | comma-separated |
 | `max_body_bytes` | INTEGER DEFAULT 1048576 | hard cap, enforced before the read |
 | `retention_days` | INTEGER DEFAULT 120 | |
+| `daily_cap` | INTEGER | per-receiver daily event cap (§11); null = none |
 | `mirror_to_drops` | INTEGER DEFAULT 0 | Phase 5 |
 | `enabled` | INTEGER DEFAULT 1 | |
+| `previous_slug` | TEXT | the pre-rotation slug, still answering (§7) |
+| `previous_slug_expires_at` | INTEGER | end of the `--grace` window |
+| `expires_at` | INTEGER | unix ms; null = never. `410` past it (§4) |
 | `created_at` | INTEGER NOT NULL | |
 | `last_event_at` | INTEGER | |
 | `event_count` | INTEGER DEFAULT 0 | |
@@ -921,6 +927,45 @@ All four confirmed by Jonas. Nothing in this plan is open; build it as written.
 ---
 
 ## Changelog
+
+### v5 -- 2026-08-15 -- author: link 1 (phase 1)
+
+Six columns §3's table did not list, but which §4, §7 and §11 require. Building
+phase 1 exactly as written would have made three specified behaviours
+unimplementable, so this is the "factually wrong about the codebase" case in the
+Context section: a version bump, not a silent improvisation. No GOAL change,
+nothing weakened -- every column serves a behaviour the plan already demanded.
+
+- `webhook_receivers.expires_at` -- §4's status table promises `410` for a
+  receiver that is "expired", and nothing in §3 could express expiry.
+- `webhook_receivers.previous_slug` + `previous_slug_expires_at` -- §7's
+  `hook-rotate --grace <duration>` keeps the old slug answering during a
+  dashboard cutover. Rotation is phase 4; the columns ship in the one migration
+  because §3 says both tables ship together and a second migration for one
+  feature is worse.
+- `webhook_receivers.preset` + `extract_config` -- §4's extraction table is
+  "preset defaults, overridable per receiver", and §3 stored neither the preset
+  nor the override. Without them `routing_key` (which §3 calls the correlation
+  handle and indexes) can never be populated.
+- `webhook_receivers.daily_cap` -- §11's per-receiver daily event cap, which
+  backs the fail-open rate limiter. Phase 6 enforces it; the column is here so
+  phase 6 needs no migration of its own.
+
+Two implementation facts worth recording, neither a plan change:
+
+- **Body-hash dedupe is bucketed.** §3 asks for a windowed body-hash dedupe, but
+  the unique index is on `(receiver_id, dedupe_key)` with no time component, so a
+  literal hash as the key would block the same bytes forever rather than for a
+  window. The key is `{sha256}.{floor(now/window)}` and the previous bucket is
+  checked as an alternate, so a retry landing just past a boundary is still
+  caught. Behaviour matches what §3 specifies, including "this narrows the
+  window, it does not close it".
+- **`?since=` orders by arrival MILLISECOND, not arrival.** §7 calls the ULID
+  cursor "monotonic"; within a single millisecond the random tail decides, so two
+  events that landed together may sort either way and a cursor walk can miss the
+  lower one. The lease queue is the crash-safe path and §7 already says the
+  cursor is for browsing and replay -- this records the limit rather than
+  overclaiming it. `src/api/hook-queue.ts` documents it at the query.
 
 ### v4 -- 2026-08-15 -- author: planning conversation
 

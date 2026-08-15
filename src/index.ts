@@ -5,6 +5,7 @@ import { processRelayMessage } from "./lib/relay";
 import { serveHostedSite, HOST_PREFIX } from "./lib/hosting";
 import { processR2EventBatch, R2_EVENT_QUEUE, type R2EventNotification } from "./lib/r2-events";
 import { runScheduled } from "./lib/reaper";
+import { HOOK_PREFIX, serveWebhook } from "./lib/webhook-receive";
 import type { Env, QueueMessage } from "./types";
 
 export default {
@@ -20,6 +21,15 @@ export default {
 		// app's own pages or any other route.
 		if (url.pathname === `/${HOST_PREFIX}` || url.pathname.startsWith(`/${HOST_PREFIX}/`)) {
 			return serveHostedSite(request, env, url);
+		}
+
+		// Public webhook receivers at {domain}/h/{box}/{slug}[/...]. Scoped to the
+		// /h/ prefix (in run_worker_first) for the same reason /f/ is: it stays out
+		// of the /api/ namespace, whose invariant is "unknown path answers 401, not
+		// 404" -- and a fully public, unauthenticated, body-swallowing endpoint has
+		// no business inside that.
+		if (url.pathname === `/${HOOK_PREFIX}` || url.pathname.startsWith(`/${HOOK_PREFIX}/`)) {
+			return serveWebhook(request, env, url, ctx);
 		}
 
 		return env.ASSETS.fetch(request);

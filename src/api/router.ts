@@ -34,6 +34,8 @@ import {
 	type OpenRoute,
 	type RequestScope,
 } from "./gates";
+import { handleQueueBody, handleQueueList, handleQueueOne, handleQueuePeek } from "./hook-queue";
+import { handleHookReceivers } from "./hooks";
 import { handleHostDelete, handleHostFinalize, handleHostList, handleHostPresign } from "./host";
 import { handleInbox } from "./inbox";
 import { handleKeys } from "./keys";
@@ -95,6 +97,12 @@ const OPEN_ROUTES: Route<OpenRoute>[] = [
 	{
 		match: prefix("/api/targets"),
 		run: asAdmin(({ request, env, url }) => handleTargets(request, env, url)),
+	},
+	// Receiver CRUD only. The queue those receivers fill is a separate surface in
+	// the second tier -- reading it needs a scoped API key, not the admin key.
+	{
+		match: prefix("/api/hooks/receivers"),
+		run: asAdmin(({ request, env, url }) => handleHookReceivers(request, env, url)),
 	},
 
 	{
@@ -186,6 +194,29 @@ const KEYED_ROUTES: Route<KeyedRoute>[] = [
 		method: "GET",
 		match: segmentsThenRest("/api/inbox/:inbox"),
 		run: keyedReader((s, inbox, params) => handleInbox(s.env, inbox, params.rest, s.url)),
+	},
+
+	// The webhook queue. Every route here is a read that takes no lease; the
+	// leasing and destroying verbs arrive in phase 4 as POSTs under keyedWriter.
+	{
+		method: "GET",
+		match: segments("/api/hooks/queue/:inbox"),
+		run: keyedReader((s, inbox) => handleQueueList(s.env, inbox, s.url)),
+	},
+	{
+		method: "POST",
+		match: segments("/api/hooks/queue/:inbox/peek"),
+		run: keyedReader((s, inbox) => handleQueuePeek(s.env, inbox, s.url)),
+	},
+	{
+		method: "GET",
+		match: segments("/api/hooks/queue/:inbox/:id/body"),
+		run: keyedReader((s, inbox, params) => handleQueueBody(s.env, inbox, params.id)),
+	},
+	{
+		method: "GET",
+		match: segments("/api/hooks/queue/:inbox/:id"),
+		run: keyedReader((s, inbox, params) => handleQueueOne(s.env, inbox, params.id)),
 	},
 ];
 

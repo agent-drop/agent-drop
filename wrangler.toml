@@ -19,7 +19,7 @@ head_sampling_rate = 1
 [assets]
 binding = "ASSETS"
 not_found_handling = "single-page-application"
-run_worker_first = ["/api/*", "/f/*"]
+run_worker_first = ["/api/*", "/f/*", "/h/*"]
 
 [[routes]]
 pattern = "example.com/*"

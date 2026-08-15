@@ -43,6 +43,32 @@ export function normalizeInbox(raw: string): string | null {
 	return name;
 }
 
+/**
+ * Normalize a webhook receiver slug: lowercase, kebab, a-z0-9 and hyphens.
+ * Unlike an inbox name, a leading digit is fine (`2024-campaign`) -- a slug is a
+ * path segment, not an email local part.
+ *
+ * Returns null if nothing usable is left, which the caller answers with a 400
+ * (or, on the public receive path, a 404 -- an unusable slug cannot name a row).
+ */
+export function normalizeSlug(raw: string): string | null {
+	let slug: string;
+	try {
+		slug = decodeURIComponent(raw);
+	} catch {
+		return null;
+	}
+	slug = slug
+		.toLowerCase()
+		.trim()
+		.replace(/[\s_]+/g, "-")
+		.replace(/[^a-z0-9-]/g, "")
+		.replace(/-{2,}/g, "-")
+		.replace(/^-+|-+$/g, "");
+	if (slug.length < 1 || slug.length > 64) return null;
+	return slug;
+}
+
 // Romanize unicode characters (umlauts, accents, etc)
 const CHAR_MAP: Record<string, string> = {
 	à: "a",

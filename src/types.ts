@@ -73,6 +73,66 @@ export interface Drop {
 	read_at: number | null;
 }
 
+/** A registered webhook endpoint: one public URL at {domain}/h/{inbox}/{slug}. */
+export interface WebhookReceiver {
+	id: string;
+	inbox: string;
+	slug: string;
+	label: string | null;
+	auth_mode: string;
+	auth_config: string | null;
+	handshake_mode: string;
+	handshake_config: string | null;
+	preset: string | null;
+	extract_config: string | null;
+	response_status: number | null;
+	response_body: string | null;
+	response_content_type: string | null;
+	allowed_methods: string | null;
+	max_body_bytes: number | null;
+	retention_days: number | null;
+	daily_cap: number | null;
+	mirror_to_drops: number;
+	enabled: number;
+	previous_slug: string | null;
+	previous_slug_expires_at: number | null;
+	expires_at: number | null;
+	created_at: number;
+	last_event_at: number | null;
+	event_count: number;
+}
+
+/** One request that reached a receiver -- stored whatever we thought of it. */
+export interface WebhookEvent {
+	id: string;
+	receiver_id: string;
+	inbox: string;
+	slug: string;
+	subpath: string | null;
+	method: string;
+	event_type: string | null;
+	routing_key: string | null;
+	dedupe_key: string | null;
+	headers: string | null;
+	query: string | null;
+	content_type: string | null;
+	body_text: string | null;
+	body_r2_key: string | null;
+	body_bytes: number | null;
+	body_sha256: string | null;
+	verified: number | null;
+	remote_ip: string | null;
+	country: string | null;
+	user_agent: string | null;
+	status: "queued" | "leased" | "acked" | "rejected" | "handshake";
+	lease_id: string | null;
+	leased_until: number | null;
+	lease_count: number;
+	acked_at: number | null;
+	created_at: number;
+	expires_at: number;
+}
+
 export interface ApiKey {
 	id: string;
 	key_hash: string;

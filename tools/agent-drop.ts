@@ -1981,4 +1981,405 @@ program
 		}
 	});
 
+// ============================================================================
+// Webhook receivers (hook-*) and the messages in them (queue-*)
+// ============================================================================
+
+// A receiver reference is either its id or the `box/slug` pair you remember.
+// Both are one path segment group, so neither is encoded here.
+function hookPath(ref: string): string {
+	return `/api/hooks/receivers/${ref.replace(/^\/+|\/+$/g, "")}`;
+}
+
+/** `lisa/01hxyz` or `lisa 01hxyz` -- the box is the authorization boundary. */
+function splitEventRef(box: string, id?: string): { box: string; id: string } {
+	if (id) return { box, id };
+	const slash = box.indexOf("/");
+	if (slash === -1) {
+		throw new Error("Need a box and an event id, e.g. `queue-body lisa EVENT_ID`");
+	}
+	return { box: box.slice(0, slash), id: box.slice(slash + 1) };
+}
+
+function extractFromOpts(opts: any): Record<string, unknown> | undefined {
+	const extract: Record<string, unknown> = {};
+	if (opts.routingKey) extract.routingKeyPath = opts.routingKey;
+	if (opts.eventPath) extract.eventTypePath = opts.eventPath;
+	if (opts.dedupe) extract.dedupe = opts.dedupe;
+	if (opts.dedupeHeader) extract.dedupeHeader = opts.dedupeHeader;
+	if (opts.dedupePath) extract.dedupePath = opts.dedupePath;
+	if (opts.dedupeWindow) extract.dedupeWindowMs = parseDuration(opts.dedupeWindow);
+	return Object.keys(extract).length ? extract : undefined;
+}
+
+program
+	.command("hook-create <box> [name]")
+	.description("Register a webhook receiver; prints the URL to paste into the provider")
+	.option("--slug <slug>", "Exact slug (no random suffix -- you are on your own for entropy)")
+	.option("--label <text>", "Human note")
+	.option("--auth <mode>", "Signature scheme (phase 2; only 'none' works today)")
+	.option("--secret <secret>", "Provider secret for --auth")
+	.option("--handshake <mode>", "Setup handshake (phase 3; only 'none' works today)")
+	.option("--preset <name>", "Extraction preset: github, stripe, standard, slack, shopify")
+	.option("--routing-key <path>", "Dotted body path to index as the correlation key")
+	.option("--event-path <path>", "Dotted body path holding the event type")
+	.option("--dedupe <mode>", "none | header | path | body-hash")
+	.option("--dedupe-header <name>", "Header carrying the provider's message id")
+	.option("--dedupe-path <path>", "Body path carrying the provider's message id")
+	.option("--dedupe-window <dur>", "body-hash window, e.g. 65m (must exceed retry spacing)")
+	.option("--methods <list>", "Comma-separated methods to accept", "POST")
+	.option("--max-body <bytes>", "Reject bodies over this size")
+	.option("--retention <days>", "Days to keep events", "120")
+	.option("--daily-cap <n>", "Max events per day")
+	.option("--expires <dur>", "Auto-expire the receiver, e.g. 30d (410 after)")
+	.action(async (box, name, opts) => {
+		try {
+			const body: Record<string, unknown> = {
+				inbox: box,
+				name: name || undefined,
+				slug: opts.slug,
+				label: opts.label,
+				authMode: opts.auth,
+				authConfig: opts.secret ? { secret: opts.secret } : undefined,
+				handshakeMode: opts.handshake,
+				preset: opts.preset,
+				extract: extractFromOpts(opts),
+				methods: opts.methods,
+				maxBodyBytes: opts.maxBody ? parseInt(opts.maxBody, 10) : undefined,
+				retentionDays: parseInt(opts.retention, 10),
+				dailyCap: opts.dailyCap ? parseInt(opts.dailyCap, 10) : undefined,
+				expiresAt: opts.expires ? Date.now() + parseDuration(opts.expires) : undefined,
+			};
+			const hook = await api("/api/hooks/receivers", { method: "POST", body, admin: true });
+
+			console.log(chalk.green(`\n  Receiver created: ${chalk.cyan(hook.inbox)}/${hook.slug}`));
+			console.log(`  ${chalk.bold(hook.url)}`);
+			console.log(
+				chalk.dim(`  id ${hook.id}  ${hook.allowed_methods}  keeps ${hook.retention_days}d`),
+			);
+			if (!hook.secret_set) {
+				// The URL is the credential when nothing is signed. Say so out loud
+				// rather than letting an operator discover it later.
+				console.log(
+					chalk.yellow(
+						"\n  No signature configured: this URL IS the credential.\n" +
+							"  Anyone who learns it can write to this box's queue. Keep it out of\n" +
+							"  tickets and chat logs, and rotate with `hook-rotate` if it leaks.",
+					),
+				);
+			}
+			console.log("");
+		} catch (err: any) {
+			console.error(chalk.red(err.message));
+			process.exit(3);
+		}
+	});
+
+for (const verb of ["hooks", "hook-list"]) {
+	program
+		.command(`${verb} [box]`)
+		.description("List webhook receivers, all boxes or one")
+		.action(async (box) => {
+			const merged = program.opts();
+			try {
+				const data = await api(box ? hookPath(box) : "/api/hooks/receivers", { admin: true });
+				if (merged.format === "json") {
+					console.log(JSON.stringify(data, null, 2));
+					return;
+				}
+				const hooks = data.receivers || [];
+				if (hooks.length === 0) {
+					console.log(chalk.dim(`\n  No receivers${box ? ` for ${box}` : ""}\n`));
+					return;
+				}
+				console.log(chalk.bold(`\n  Receivers (${hooks.length}):\n`));
+				console.log(
+					chalk.dim("  BOX          SLUG                 AUTH      EVENTS  LAST         URL"),
+				);
+				for (const h of hooks) {
+					const last = h.last_event_at ? relativeTime(h.last_event_at) : "never";
+					const auth = h.secret_set ? h.auth_mode : chalk.yellow(h.auth_mode);
+					console.log(
+						`  ${padRight(chalk.cyan(h.inbox), 12)} ${padRight(h.slug, 20)} ${padRight(auth, 9)} ` +
+							`${padLeft(String(h.event_count), 6)}  ${padRight(chalk.dim(last), 11)}  ${h.url}` +
+							(h.enabled ? "" : chalk.red(" [disabled]")),
+					);
+				}
+				console.log("");
+			} catch (err: any) {
+				console.error(chalk.red(err.message));
+				process.exit(3);
+			}
+		});
+}
+
+program
+	.command("hook-get <ref>")
+	.description("Show one receiver in full. REF is its id or box/slug")
+	.action(async (ref) => {
+		const merged = program.opts();
+		try {
+			const h = await api(hookPath(ref), { admin: true });
+			if (merged.format === "json") {
+				console.log(JSON.stringify(h, null, 2));
+				return;
+			}
+			console.log(chalk.bold(`\n  ${h.inbox}/${h.slug}`));
+			console.log(`  ${chalk.bold(h.url)}\n`);
+			const rows: [string, string][] = [
+				["id", h.id],
+				["label", h.label || chalk.dim("(none)")],
+				["enabled", h.enabled ? chalk.green("yes") : chalk.red("no")],
+				["auth", `${h.auth_mode}${h.secret_set ? chalk.dim(" (secret set)") : ""}`],
+				["handshake", h.handshake_mode],
+				["preset", h.preset || chalk.dim("(none)")],
+				["extract", h.extract_config ? JSON.stringify(h.extract_config) : chalk.dim("(none)")],
+				["methods", h.allowed_methods],
+				["max body", fmtBytes(h.max_body_bytes)],
+				["retention", `${h.retention_days}d`],
+				["daily cap", h.daily_cap ? String(h.daily_cap) : chalk.dim("(none)")],
+				[
+					"events",
+					`${h.event_count}${h.last_event_at ? `, last ${relativeTime(h.last_event_at)}` : ""}`,
+				],
+				["expires", h.expires_at ? isoDate(h.expires_at) : chalk.dim("never")],
+				["created", isoDate(h.created_at)],
+			];
+			if (h.previous_slug) {
+				rows.push([
+					"old slug",
+					`${h.previous_slug} ${chalk.dim(`until ${isoDate(h.previous_slug_expires_at)}`)}`,
+				]);
+			}
+			for (const [key, value] of rows) console.log(`  ${chalk.dim(padRight(key, 11))} ${value}`);
+			console.log("");
+		} catch (err: any) {
+			console.error(chalk.red(err.message));
+			process.exit(3);
+		}
+	});
+
+program
+	.command("hook-url <ref>")
+	.description("Print just the receiver URL, for piping into a clipboard")
+	.action(async (ref) => {
+		try {
+			console.log((await api(hookPath(ref), { admin: true })).url);
+		} catch (err: any) {
+			console.error(chalk.red(err.message));
+			process.exit(3);
+		}
+	});
+
+program
+	.command("hook-update <ref>")
+	.description("Update a receiver. REF is its id or box/slug")
+	.option("--enable", "Resume accepting requests")
+	.option("--disable", "Stop accepting requests (answers 403, keeps history)")
+	.option("--label <text>", "New label")
+	.option("--secret <secret>", "Rotate the provider secret")
+	.option("--preset <name>", "New extraction preset")
+	.option("--routing-key <path>", "New routing-key path")
+	.option("--methods <list>", "New comma-separated method list")
+	.option("--max-body <bytes>", "New body size cap")
+	.option("--retention <days>", "New retention in days")
+	.option("--daily-cap <n>", "New daily event cap")
+	.option("--expires <dur>", "Expire the receiver after this long, e.g. 30d")
+	.action(async (ref, opts) => {
+		try {
+			const body: Record<string, unknown> = {};
+			if (opts.enable) body.enabled = true;
+			if (opts.disable) body.enabled = false;
+			if (opts.label) body.label = opts.label;
+			if (opts.secret) body.authConfig = { secret: opts.secret };
+			if (opts.preset) body.preset = opts.preset;
+			if (opts.methods) body.methods = opts.methods;
+			if (opts.maxBody) body.maxBodyBytes = parseInt(opts.maxBody, 10);
+			if (opts.retention) body.retentionDays = parseInt(opts.retention, 10);
+			if (opts.dailyCap) body.dailyCap = parseInt(opts.dailyCap, 10);
+			if (opts.expires) body.expiresAt = Date.now() + parseDuration(opts.expires);
+			const extract = extractFromOpts(opts);
+			if (extract) body.extract = extract;
+			if (Object.keys(body).length === 0) {
+				console.error(chalk.red("Nothing to update. Try --disable, --secret, --retention, ..."));
+				process.exit(1);
+			}
+			const h = await api(hookPath(ref), { method: "PATCH", body, admin: true });
+			console.log(chalk.green(`\n  Updated ${h.inbox}/${h.slug}\n`));
+		} catch (err: any) {
+			console.error(chalk.red(err.message));
+			process.exit(3);
+		}
+	});
+
+program
+	.command("hook-delete <ref>")
+	.description("Delete a receiver. Its events survive unless --purge")
+	.option("--purge", "Also destroy every event it received, R2 bodies included")
+	.action(async (ref, opts) => {
+		try {
+			const res = await api(`${hookPath(ref)}${opts.purge ? "?purge=1" : ""}`, {
+				method: "DELETE",
+				admin: true,
+			});
+			const purged = res.purged ? chalk.yellow(` (${res.purged} event(s) destroyed)`) : "";
+			console.log(chalk.green(`\n  Receiver deleted${purged}\n`));
+		} catch (err: any) {
+			console.error(chalk.red(err.message));
+			process.exit(3);
+		}
+	});
+
+function queueQuery(opts: any): string {
+	const params = new URLSearchParams();
+	if (opts.receiver) params.set("receiver", opts.receiver);
+	if (opts.status) params.set("status", opts.status);
+	if (opts.key) params.set("key", opts.key);
+	if (opts.event) params.set("event", opts.event);
+	if (opts.since) params.set("since", opts.since);
+	if (opts.limit) params.set("limit", String(opts.limit));
+	const query = params.toString();
+	return query ? `?${query}` : "";
+}
+
+function addQueueFilters(cmd: any) {
+	return cmd
+		.option("--receiver <idOrSlug>", "Only this receiver")
+		.option("--status <status>", "queued | leased | acked | rejected | handshake")
+		.option("--key <value>", "Only this routing key")
+		.option("--event <type>", "Only this event type")
+		.option("--since <id>", "Arrival cursor: only events after this id")
+		.option("-l, --limit <n>", "Max results", "20");
+}
+
+addQueueFilters(
+	program.command("queue-list <box>").description("List webhook events in a box"),
+).action(async (box: string, opts: any) => {
+	const merged = program.opts();
+	try {
+		const data = await api(`/api/hooks/queue/${encodeURIComponent(box)}${queueQuery(opts)}`);
+		if (merged.format === "json") {
+			console.log(JSON.stringify(data, null, 2));
+			return;
+		}
+		if (!data.count) {
+			console.log(chalk.dim(`\n  No events in ${box}\n`));
+			return;
+		}
+		console.log(chalk.bold(`\n  Events in ${box} (${data.count}):\n`));
+		console.log(
+			chalk.dim("  WHEN        ID                          RECEIVER    STATUS    TYPE / KEY"),
+		);
+		for (const e of data.events) {
+			const status =
+				e.status === "rejected"
+					? chalk.red(e.status)
+					: e.status === "queued"
+						? chalk.green(e.status)
+						: e.status;
+			const label =
+				[e.event_type, e.routing_key].filter(Boolean).join(" / ") || chalk.dim("(none)");
+			console.log(
+				`  ${padRight(relativeTime(e.created_at), 11)} ${chalk.dim(e.id)} ` +
+					`${padRight(chalk.cyan(truncate(e.slug, 11)), 11)} ${padRight(status, 9)} ${label}`,
+			);
+		}
+		console.log("");
+	} catch (err: any) {
+		console.error(chalk.red(err.message));
+		process.exit(3);
+	}
+});
+
+addQueueFilters(
+	program
+		.command("queue-peek <box> [eventId]")
+		.description("Read events in full WITHOUT taking a lease -- changes nothing"),
+).action(async (box: string, eventId: string | undefined, opts: any) => {
+	const merged = program.opts();
+	try {
+		const data = eventId
+			? { events: [await api(`/api/hooks/queue/${encodeURIComponent(box)}/${eventId}`)], count: 1 }
+			: await api(`/api/hooks/queue/${encodeURIComponent(box)}/peek${queueQuery(opts)}`, {
+					method: "POST",
+				});
+		if (merged.format === "json") {
+			// Parse the body when it is JSON, so an agent pipes straight into jq.
+			for (const e of data.events) {
+				try {
+					e.body_json = e.body ? JSON.parse(e.body) : null;
+				} catch {
+					e.body_json = null;
+				}
+			}
+			console.log(JSON.stringify(data, null, 2));
+			return;
+		}
+		if (!data.count) {
+			console.log(chalk.dim(`\n  Nothing to peek in ${box}\n`));
+			return;
+		}
+		for (const e of data.events) {
+			console.log(chalk.bold(`\n  ${e.id}`) + chalk.dim(`  ${isoDate(e.created_at)}`));
+			console.log(
+				`  ${e.method} ${e.inbox}/${e.slug}${e.subpath ? `/${e.subpath}` : ""}  ` +
+					`${e.status}${e.verified === 0 ? chalk.red(" (rejected)") : ""}`,
+			);
+			if (e.leased_until && e.leased_until > Date.now()) {
+				console.log(
+					chalk.yellow(`  leased for another ${relativeTime(2 * Date.now() - e.leased_until)}`),
+				);
+			}
+			const label = [e.event_type, e.routing_key].filter(Boolean).join(" / ");
+			if (label) console.log(`  ${chalk.dim("type/key")} ${label}`);
+			console.log(chalk.dim(`  ${fmtBytes(e.body_bytes || 0)}  sha256 ${e.body_sha256}`));
+			console.log(chalk.dim("  headers:"));
+			for (const [k, v] of Object.entries(e.headers || {})) console.log(`    ${k}: ${v}`);
+			if (e.body !== null && e.body !== undefined) {
+				console.log(chalk.dim("  body:"));
+				console.log(
+					e.body
+						.split("\n")
+						.map((l: string) => `    ${l}`)
+						.join("\n"),
+				);
+			} else if (e.body_available) {
+				console.log(chalk.dim("  body: not inline -- use `queue-body` for the raw bytes"));
+			}
+		}
+		console.log("");
+	} catch (err: any) {
+		console.error(chalk.red(err.message));
+		process.exit(3);
+	}
+});
+
+program
+	.command("queue-body <box> [eventId]")
+	.description("Write an event's raw bytes to stdout or a file (BOX/ID also works)")
+	// `-o, --output` is the program-wide flag; declaring a second `-o` here would
+	// be shadowed by it and silently ignored.
+	.option("-o, --output <file>", "Write to this file instead of stdout")
+	.action(async (box, eventId, opts) => {
+		try {
+			const ref = splitEventRef(box, eventId);
+			const res = await apiRaw(
+				`/api/hooks/queue/${encodeURIComponent(ref.box)}/${encodeURIComponent(ref.id)}/body`,
+			);
+			// Bytes go through untouched: this is the endpoint a consumer verifies
+			// the provider's signature against.
+			const bytes = new Uint8Array(await res.arrayBuffer());
+			const out = opts.output || program.opts().output;
+			if (out) {
+				fs.writeFileSync(out, bytes);
+				console.error(chalk.green(`  Wrote ${fmtBytes(bytes.byteLength)} to ${out}`));
+			} else {
+				process.stdout.write(bytes);
+			}
+		} catch (err: any) {
+			console.error(chalk.red(err.message));
+			process.exit(3);
+		}
+	});
+
 program.parseAsync();

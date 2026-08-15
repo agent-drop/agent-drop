@@ -94,20 +94,29 @@ export function makeCtx(): TestCtx {
 	} as unknown as TestCtx;
 }
 
-/** An R2Bucket over a plain map of key -> body, enough for read paths. */
-export function makeBucket(objects: Record<string, string> = {}): R2Bucket & {
+/**
+ * An R2Bucket over a plain map of key -> body, enough for read paths.
+ *
+ * Bodies are kept EXACTLY as they were put. A webhook body may be arbitrary
+ * bytes -- that is the whole promise of the receiver -- so coercing everything
+ * to a string here would make byte fidelity untestable, which is precisely the
+ * thing the tests exist to prove.
+ */
+export function makeBucket(objects: Record<string, string | Uint8Array> = {}): R2Bucket & {
 	heads: string[];
 	deletes: string[];
 } {
 	const heads: string[] = [];
 	const deletes: string[] = [];
+	const sizeOf = (body: string | Uint8Array) =>
+		typeof body === "string" ? body.length : body.byteLength;
 	return {
 		heads,
 		deletes,
 		list: async ({ prefix = "" }: { prefix?: string } = {}) => ({
 			objects: Object.entries(objects)
 				.filter(([key]) => key.startsWith(prefix))
-				.map(([key, body]) => ({ key, size: body.length })),
+				.map(([key, body]) => ({ key, size: sizeOf(body) })),
 			truncated: false as const,
 			delimitedPrefixes: [],
 		}),
@@ -117,8 +126,8 @@ export function makeBucket(objects: Record<string, string> = {}): R2Bucket & {
 				delete objects[key];
 			}
 		},
-		put: async (key: string, body: string) => {
-			objects[key] = String(body);
+		put: async (key: string, body: string | Uint8Array | ArrayBuffer) => {
+			objects[key] = body instanceof ArrayBuffer ? new Uint8Array(body) : body;
 			return { key };
 		},
 		get: async (key: string) => {
@@ -129,13 +138,15 @@ export function makeBucket(objects: Record<string, string> = {}): R2Bucket & {
 				body: new Response(body).body,
 				httpEtag: `"etag-${key}"`,
 				writeHttpMetadata: (_headers: Headers) => {},
-				text: async () => body,
+				text: async () => (typeof body === "string" ? body : new TextDecoder().decode(body)),
+				arrayBuffer: async () =>
+					typeof body === "string" ? new TextEncoder().encode(body).buffer : body.buffer,
 			};
 		},
 		head: async (key: string) => {
 			heads.push(key);
 			if (!(key in objects)) return null;
-			return { key, size: objects[key].length, httpEtag: `"etag-${key}"` };
+			return { key, size: sizeOf(objects[key]), httpEtag: `"etag-${key}"` };
 		},
 	} as unknown as R2Bucket & { heads: string[]; deletes: string[] };
 }
@@ -233,6 +244,63 @@ export async function seedPendingDrop(
 			opts.createdAt ?? Date.now(),
 		)
 		.run();
+}
+
+export interface SeedReceiver {
+	id?: string;
+	inbox: string;
+	slug: string;
+	authMode?: string;
+	authConfig?: Record<string, unknown> | null;
+	handshakeMode?: string;
+	preset?: string | null;
+	extract?: Record<string, unknown> | null;
+	methods?: string;
+	maxBodyBytes?: number;
+	retentionDays?: number;
+	responseStatus?: number;
+	responseBody?: string | null;
+	responseContentType?: string | null;
+	enabled?: number;
+	expiresAt?: number | null;
+	previousSlug?: string | null;
+	previousSlugExpiresAt?: number | null;
+}
+
+/** A receiver row, written straight in -- the CRUD API has its own tests. */
+export async function seedReceiver(env: TestEnv, opts: SeedReceiver): Promise<string> {
+	const id = opts.id ?? crypto.randomUUID();
+	await env.DB.prepare(
+		`INSERT INTO webhook_receivers (
+			id, inbox, slug, auth_mode, auth_config, handshake_mode, preset, extract_config,
+			allowed_methods, max_body_bytes, retention_days, response_status, response_body,
+			response_content_type, enabled, expires_at, previous_slug, previous_slug_expires_at,
+			created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	)
+		.bind(
+			id,
+			opts.inbox,
+			opts.slug,
+			opts.authMode ?? "none",
+			opts.authConfig ? JSON.stringify(opts.authConfig) : null,
+			opts.handshakeMode ?? "none",
+			opts.preset ?? null,
+			opts.extract ? JSON.stringify(opts.extract) : null,
+			opts.methods ?? "POST",
+			opts.maxBodyBytes ?? 1_048_576,
+			opts.retentionDays ?? 120,
+			opts.responseStatus ?? 200,
+			opts.responseBody ?? null,
+			opts.responseContentType ?? null,
+			opts.enabled ?? 1,
+			opts.expiresAt ?? null,
+			opts.previousSlug ?? null,
+			opts.previousSlugExpiresAt ?? null,
+			Date.now(),
+		)
+		.run();
+	return id;
 }
 
 export function dropStatus(env: TestEnv, id: string): string | undefined {
