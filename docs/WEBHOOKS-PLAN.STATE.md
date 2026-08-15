@@ -22,6 +22,12 @@ link_count: 1
   - [x] 1g. RUNTIME check: byte-identical round trip on `bun run dev` (log below)
   - [x] 53 new tests green; full suite 466 pass / 0 fail; `bun run verify` exit 0
 - [ ] 2. Verification -- all presets, hook-test
+  - [ ] 2z. **First edit: add each preset to `SUPPORTED_AUTH_MODES` in
+        `src/lib/webhook-defs.ts`.** Phase 1 fails closed on any mode not in
+        that array -- the CRUD refuses to register it and the receive path
+        rejects it -- so a verifier that is not listed there is dead code, and
+        `test/webhook-api.test.ts` "refuses a mode this build cannot honour"
+        will need its example changed to one still unimplemented.
 - [ ] 3. Handshakes -- meta/slack/zoom/echo/static
 - [ ] 4. The pull queue -- lease/remove/return/delete/put/peek + completeness gate
 - [ ] 5. Onward delivery -- RuleSubject, hook channel, passthrough, replay
@@ -205,3 +211,13 @@ hook-delete --purge  -> "Receiver deleted (2 event(s) destroyed)"
   icon SVGs, so `bun run check` -- and GitHub Actions -- was RED on main before
   this phase started (`f2ecc12` and `ffa2841` both failed, both docs-only).
   `!assets` added to `biome.jsonc`. Committed separately from the phase work.
+- 2026-08-15T06:10:00Z [link 1] **second off-mission bug**, card
+  `bug-deploy-guard-fails-silently`: fixing the lint failure unmasked it, since
+  the job had never reached the step. `bun scripts/deploy.ts --dry-run` exited 1
+  with NO output when wrangler was off PATH (devDependency + bare `spawnSync` +
+  `stdio: "inherit"` + `?? 1`). CI is the only caller that invokes it directly,
+  so its deploy dry-run could never have worked. Now spawns via `bunx` and
+  prints `describeSpawnFailure()`. RED test first.
+- 2026-08-15T06:12:00Z [link 1] **CI green on main** (`dd470d6`) -- first green
+  run of this chain. Commits: `233edde` biome, `4c877b7` phase 1, `dd470d6`
+  deploy guard.
