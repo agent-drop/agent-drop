@@ -85,6 +85,7 @@ link_count: 5
   - [x] 5n. RUNTIME check on `bun run dev`: envelope, passthrough, escalating backoff,
         replay, loop refusal, mirror (log below)
   - [x] 36 new tests; full suite 670 pass / 0 fail; `bun run verify` exit 0
+  - [x] 5o. integrated into `main` at `e462dd0`
 - [ ] 6. Retention, provisioning, deploy, docs
 
 ## Artifacts produced
@@ -1055,3 +1056,4 @@ note `drop key-create` needs the real `AGENT_DROP_ADMIN_KEY` from `~/.secrets`
   Runtime round trip transcribed above: the sink's own sha256 of the passthrough
   body matches the sent file byte for byte, with the signature header verbatim
   and none of agent-drop's own headers added. Plan v8 -> v9.
+- 2026-08-15T13:45:00Z [link 5] phase 5 integrated into `main` at `e462dd0`.
