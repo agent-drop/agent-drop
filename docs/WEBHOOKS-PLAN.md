@@ -520,11 +520,19 @@ five-minute confirmation before Phase 2 hardcodes the `digest` template.)*
 
 ---
 
-## 14. Open decisions
+## 14. Decisions -- SETTLED 2026-08-15
 
-1. **URL shape** -- `/h/{box}/{slug}` (recommended) vs `/api/hook/{box}/{slug}`
-   (zero wrangler config, muddies the router's tier invariant).
-2. **Do webhook events appear in `drop inbox`?** Plan says no by default, with
-   an opt-in `mirror_to_drops` per receiver in Phase 5.
-3. **Queue default** -- at-least-once with leases (recommended) vs simple
-   pull-and-delete.
+All four confirmed by Jonas. Nothing in this plan is open; build it as written.
+
+1. **URL shape: `/h/{box}/{slug}`.** Add `/h/*` to `run_worker_first`. The
+   `/api/hook/*` alternative is rejected -- it would put a public,
+   unauthenticated endpoint inside the namespace whose invariant is "unknown
+   path answers 401, not 404".
+2. **Webhook events stay a separate surface.** Own table, own CLI verbs. The
+   opt-in per-receiver `mirror_to_drops` flag stays in Phase 5 as a
+   convenience; it is off by default and nothing depends on it.
+3. **At-least-once with leases.** `pull` -> lease -> work -> `ack` is the
+   default. `--ack` on pull collapses to at-most-once for callers that do not
+   want the bookkeeping.
+4. **Execution: full chain, all six phases**, via the chain protocol, paired
+   with `docs/WEBHOOKS-PLAN.STATE.md`.
