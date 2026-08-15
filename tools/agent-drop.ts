@@ -8,6 +8,7 @@
 
 import { Command } from "commander";
 import { formatOutput, addCommonOptions, createLogger } from "./lib/cli-utils";
+import { signRequest } from "./lib/hook-sign";
 import chalk from "chalk";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -2001,6 +2002,47 @@ function splitEventRef(box: string, id?: string): { box: string; id: string } {
 	return { box: box.slice(0, slash), id: box.slice(slash + 1) };
 }
 
+/**
+ * `verified` is three-valued and an agent's trust decision hangs on which one it
+ * got, so none of the three is allowed to render as nothing. `unverified` is not
+ * a failure -- it means the receiver asked for no signature, so the URL is the
+ * only credential and the event is exactly as trustworthy as that URL is secret.
+ */
+function verdictLabel(verified: number | null): string {
+	if (verified === 1) return chalk.green("verified");
+	if (verified === 0) return chalk.red("SIGNATURE FAILED");
+	return chalk.dim("unverified");
+}
+
+/**
+ * The `auth_config` blob. A secret alone is enough for the named presets, which
+ * know their own header, but `hmac`, `digest`, `header` and `query` are
+ * configurable by definition and are unusable without these.
+ */
+function authConfigFromOpts(opts: any): Record<string, unknown> | undefined {
+	const config: Record<string, unknown> = {};
+	if (opts.secret) config.secret = opts.secret;
+	if (opts.authHeader) config.header = opts.authHeader;
+	if (opts.authTemplate) config.template = opts.authTemplate;
+	if (opts.authParam) config.param = opts.authParam;
+	if (opts.authEncoding) config.encoding = opts.authEncoding;
+	if (opts.authTimestampHeader) config.timestampHeader = opts.authTimestampHeader;
+	if (opts.authTolerance !== undefined) config.toleranceSeconds = parseInt(opts.authTolerance, 10);
+	return Object.keys(config).length ? config : undefined;
+}
+
+/** Shared by hook-create and hook-update, so the two cannot drift apart. */
+function withAuthOptions(command: Command): Command {
+	return command
+		.option("--secret <secret>", "Provider secret for --auth")
+		.option("--auth-header <name>", "Header carrying the signature (hmac, digest, header)")
+		.option("--auth-template <tpl>", "Signed string, e.g. '{body}/{secret}' (hmac, digest)")
+		.option("--auth-param <name>", "Query parameter carrying the token (query mode)")
+		.option("--auth-encoding <enc>", "hex | base64 (hmac, digest)")
+		.option("--auth-timestamp-header <name>", "Header carrying the signed timestamp")
+		.option("--auth-tolerance <seconds>", "Replay window; 0 turns it off");
+}
+
 function extractFromOpts(opts: any): Record<string, unknown> | undefined {
 	const extract: Record<string, unknown> = {};
 	if (opts.routingKey) extract.routingKeyPath = opts.routingKey;
@@ -2012,13 +2054,17 @@ function extractFromOpts(opts: any): Record<string, unknown> | undefined {
 	return Object.keys(extract).length ? extract : undefined;
 }
 
-program
-	.command("hook-create <box> [name]")
-	.description("Register a webhook receiver; prints the URL to paste into the provider")
-	.option("--slug <slug>", "Exact slug (no random suffix -- you are on your own for entropy)")
-	.option("--label <text>", "Human note")
-	.option("--auth <mode>", "Signature scheme (phase 2; only 'none' works today)")
-	.option("--secret <secret>", "Provider secret for --auth")
+withAuthOptions(
+	program
+		.command("hook-create <box> [name]")
+		.description("Register a webhook receiver; prints the URL to paste into the provider")
+		.option("--slug <slug>", "Exact slug (no random suffix -- you are on your own for entropy)")
+		.option("--label <text>", "Human note")
+		.option(
+			"--auth <mode>",
+			"standard | github | stripe | slack | shopify | hmac | digest | bearer | basic | header | query",
+		),
+)
 	.option("--handshake <mode>", "Setup handshake (phase 3; only 'none' works today)")
 	.option("--preset <name>", "Extraction preset: github, stripe, standard, slack, shopify")
 	.option("--routing-key <path>", "Dotted body path to index as the correlation key")
@@ -2040,7 +2086,7 @@ program
 				slug: opts.slug,
 				label: opts.label,
 				authMode: opts.auth,
-				authConfig: opts.secret ? { secret: opts.secret } : undefined,
+				authConfig: authConfigFromOpts(opts),
 				handshakeMode: opts.handshake,
 				preset: opts.preset,
 				extract: extractFromOpts(opts),
@@ -2172,12 +2218,95 @@ program
 	});
 
 program
-	.command("hook-update <ref>")
-	.description("Update a receiver. REF is its id or box/slug")
-	.option("--enable", "Resume accepting requests")
-	.option("--disable", "Stop accepting requests (answers 403, keeps history)")
-	.option("--label <text>", "New label")
-	.option("--secret <secret>", "Rotate the provider secret")
+	.command("hook-test <ref>")
+	.description("Fire a correctly-signed synthetic request at your own receiver")
+	.option("--secret <secret>", "The provider secret -- the API never returns it, so pass it here")
+	.option("--body <body>", "Body text, or @path to a file")
+	.option("--header <name>", "Signature header, for hmac / digest / header modes")
+	.option("--template <tpl>", "Signed-string template, for hmac / digest modes")
+	.option("--param <name>", "Query parameter, for query mode")
+	.option("--url <origin>", "Send somewhere else, e.g. http://localhost:5173")
+	.option("--content-type <type>", "Body content type", "application/json")
+	.action(async (ref, opts) => {
+		try {
+			const hook = await api(hookPath(ref), { admin: true });
+			const mode = hook.auth_mode || "none";
+			if (mode !== "none" && !opts.secret) {
+				throw new Error(
+					`${hook.inbox}/${hook.slug} verifies with '${mode}' -- pass --secret so the request can be signed`,
+				);
+			}
+
+			// A unique id per run, so a receiver with dedupe configured does not answer
+			// the second test with `duplicate: true` and store nothing.
+			const stamp = Date.now();
+			const raw: string =
+				opts.body?.[0] === "@"
+					? fs.readFileSync(opts.body.slice(1), "utf-8")
+					: (opts.body ??
+						JSON.stringify({
+							id: `evt_hooktest_${stamp}`,
+							type: "agent_drop.hook_test",
+							created: Math.floor(stamp / 1000),
+							data: { tag: "hook-test" },
+						}));
+			const body = new TextEncoder().encode(raw);
+
+			const signed = await signRequest({
+				mode,
+				secret: opts.secret ?? "",
+				body,
+				timestamp: Math.floor(stamp / 1000),
+				header: opts.header,
+				template: opts.template,
+				param: opts.param,
+			});
+
+			// The receiver's own URL, optionally re-pointed at a dev origin so the same
+			// command exercises localhost and production.
+			const target = new URL(hook.url);
+			if (opts.url) {
+				const override = new URL(opts.url);
+				target.protocol = override.protocol;
+				target.host = override.host;
+			}
+			for (const [key, value] of Object.entries(signed.query)) {
+				target.searchParams.set(key, value);
+			}
+
+			console.log(chalk.dim(`\n  POST ${target}`));
+			console.log(chalk.dim(`  auth ${mode}  ${body.byteLength} bytes`));
+
+			const res = await fetch(target, {
+				method: "POST",
+				headers: { "Content-Type": opts.contentType, ...signed.headers },
+				body,
+			});
+			const text = await res.text();
+
+			const ok = res.status >= 200 && res.status < 300;
+			console.log(`  ${ok ? chalk.green(res.status) : chalk.red(res.status)} ${text}\n`);
+			if (!ok) {
+				// A 401 here is the useful failure: the receiver is reachable and the
+				// secret is wrong, which is a different problem from a 404.
+				console.error(chalk.red("  Receiver did not accept it.\n"));
+				process.exit(4);
+			}
+		} catch (err: any) {
+			console.error(chalk.red(err.message));
+			process.exit(3);
+		}
+	});
+
+withAuthOptions(
+	program
+		.command("hook-update <ref>")
+		.description("Update a receiver. REF is its id or box/slug")
+		.option("--enable", "Resume accepting requests")
+		.option("--disable", "Stop accepting requests (answers 403, keeps history)")
+		.option("--label <text>", "New label")
+		.option("--auth <mode>", "Change the signature scheme"),
+)
 	.option("--preset <name>", "New extraction preset")
 	.option("--routing-key <path>", "New routing-key path")
 	.option("--methods <list>", "New comma-separated method list")
@@ -2191,7 +2320,11 @@ program
 			if (opts.enable) body.enabled = true;
 			if (opts.disable) body.enabled = false;
 			if (opts.label) body.label = opts.label;
-			if (opts.secret) body.authConfig = { secret: opts.secret };
+			if (opts.auth) body.authMode = opts.auth;
+			// Replaced wholesale, which is what rotation is: the old secret stops
+			// working the moment the new one lands.
+			const authConfig = authConfigFromOpts(opts);
+			if (authConfig) body.authConfig = authConfig;
 			if (opts.preset) body.preset = opts.preset;
 			if (opts.methods) body.methods = opts.methods;
 			if (opts.maxBody) body.maxBodyBytes = parseInt(opts.maxBody, 10);
@@ -2323,7 +2456,7 @@ addQueueFilters(
 			console.log(chalk.bold(`\n  ${e.id}`) + chalk.dim(`  ${isoDate(e.created_at)}`));
 			console.log(
 				`  ${e.method} ${e.inbox}/${e.slug}${e.subpath ? `/${e.subpath}` : ""}  ` +
-					`${e.status}${e.verified === 0 ? chalk.red(" (rejected)") : ""}`,
+					`${e.status}  ${verdictLabel(e.verified)}`,
 			);
 			if (e.leased_until && e.leased_until > Date.now()) {
 				console.log(

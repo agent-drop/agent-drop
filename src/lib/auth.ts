@@ -1,3 +1,4 @@
+import { constantTimeEqual } from "./compare";
 import type { Env } from "../types";
 
 export async function hashKey(key: string): Promise<string> {
@@ -6,15 +7,6 @@ export async function hashKey(key: string): Promise<string> {
 	return Array.from(new Uint8Array(hash))
 		.map((b) => b.toString(16).padStart(2, "0"))
 		.join("");
-}
-
-// Compare without an early exit, so the loop runs the same number of iterations
-// whatever the inputs are.
-function constantTimeEqual(a: string, b: string): boolean {
-	if (a.length !== b.length) return false;
-	let diff = 0;
-	for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
-	return diff === 0;
 }
 
 export async function validateApiKey(

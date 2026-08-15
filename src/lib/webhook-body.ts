@@ -62,16 +62,30 @@ export function jsonConfig<T>(raw: string | null): T | null {
 /**
  * Header names this receiver's own config turns into credentials.
  *
- * A `header`-mode receiver's token is a credential even though its name is not
- * on the fixed redaction list, and a `bearer`/`basic` receiver puts its secret
- * in Authorization, which is already covered but is named here so the intent is
- * visible where the mode is.
+ * The distinction this function exists to draw: `auth_config.header` names the
+ * SHARED SECRET under `header` mode, and the SIGNATURE under `hmac` and `digest`.
+ * Only the first is a credential.
+ *
+ * A shared secret rides every request unchanged, so anyone who reads one can
+ * replay it forever -- it has to go. A signature proves one specific body came
+ * from the signer and is worthless against any other request, so redacting it
+ * costs nothing and destroys the one thing a faithful receiver exists to enable:
+ * a consumer holding the provider's secret verifying the bytes we stored. Getting
+ * this backwards is silent -- everything still works, and consumer-side
+ * verification just quietly becomes impossible.
+ *
+ * `bearer`/`basic` put their secret in Authorization, which the fixed list
+ * already covers, but they are named here so the intent is visible at the mode.
  */
+const SIGNATURE_HEADER_MODES = new Set(["hmac", "digest"]);
+
 export function secretHeaders(receiver: WebhookReceiver): string[] {
 	const cfg = jsonConfig<{ header?: string }>(receiver.auth_config);
 	const names: string[] = [];
 	if (receiver.auth_mode === "bearer" || receiver.auth_mode === "basic")
 		names.push("authorization");
-	if (cfg?.header) names.push(cfg.header);
+	// Anything else that names a header means a secret. Only these two mean a
+	// signature -- so the default stays "redact", and the exception is narrow.
+	if (cfg?.header && !SIGNATURE_HEADER_MODES.has(receiver.auth_mode)) names.push(cfg.header);
 	return names;
 }

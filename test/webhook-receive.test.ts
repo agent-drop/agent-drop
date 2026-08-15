@@ -467,10 +467,13 @@ describe("extraction and dedupe", () => {
 describe("verification is not stubbed silently", () => {
 	test("a receiver asking for a mode this build cannot honour fails closed", async () => {
 		// Writing verified=1 for a signature no code checked would be a lie in the
-		// database. Until phase 2 lands the verifier, the honest answer is 401 --
-		// and the request is still stored, because a rejected event is how you
-		// debug a rotated secret.
-		await seedReceiver(env, { inbox: "lisa", slug: "signed", authMode: "stripe" });
+		// database, so the honest answer is 401 -- and the request is still stored,
+		// because a rejected event is how you debug a rotated secret.
+		//
+		// The CRUD refuses to register a mode nothing implements, so the only way a
+		// row like this exists is a rollback or a hand-edited database. That is
+		// exactly when failing closed matters.
+		await seedReceiver(env, { inbox: "lisa", slug: "signed", authMode: "someday-mode" });
 
 		const res = await serve(post("/h/lisa/signed", "{}"));
 
@@ -485,9 +488,11 @@ describe("verification is not stubbed silently", () => {
 			inbox: "lisa",
 			slug: "signed",
 			authMode: "stripe",
+			authConfig: { secret: "whsec_test" },
 			retentionDays: 120,
 		});
 
+		// No Stripe-Signature header at all: a rejection, and stored as one.
 		await serve(post("/h/lisa/signed", "{}"));
 
 		const event = onlyEvent();
@@ -503,6 +508,148 @@ describe("verification is not stubbed silently", () => {
 		const event = onlyEvent();
 		expect(event.verified).toBeNull();
 		expect(event.status).toBe("queued");
+	});
+});
+
+describe("the verifier reads what arrived, through the whole path", () => {
+	// `test/webhook-verify.test.ts` proves the algorithms against the providers'
+	// own published vectors. These prove the SEAM: that the receive path hands the
+	// verifier the bytes it read and hashed, and writes the verdict down.
+	const SECRET = "123456ABCDEF";
+	const BODY =
+		'{"event":"TRACKING_UPDATED","data":{"number":"RR123456789CN","carrier":3011,"tag":null}}';
+	const SIGN = "45acb4a6f4a194a6ac1f0f712182c4e314b1ae9399941ea086987408f3166994";
+
+	async function seedSigned() {
+		await seedReceiver(env, {
+			inbox: "lisa",
+			slug: "track",
+			authMode: "digest",
+			authConfig: { secret: SECRET, header: "sign" },
+		});
+	}
+
+	test("a correctly signed request stores verified=1 and queues", async () => {
+		await seedSigned();
+
+		const res = await serve(post("/h/lisa/track", BODY, { headers: { sign: SIGN } }));
+
+		expect(res.status).toBe(200);
+		const event = onlyEvent();
+		expect(event.verified).toBe(1);
+		expect(event.status).toBe("queued");
+	});
+
+	test("one changed byte is a 401 and is stored as rejected", async () => {
+		await seedSigned();
+		// Same signature, one byte of body different -- the tamper the whole scheme
+		// exists to catch.
+		const tampered = BODY.replace("RR123456789CN", "RR123456789CO");
+
+		const res = await serve(post("/h/lisa/track", tampered, { headers: { sign: SIGN } }));
+
+		expect(res.status).toBe(401);
+		const event = onlyEvent();
+		expect(event.verified).toBe(0);
+		expect(event.status).toBe("rejected");
+		// Stored anyway: a rejected event is the evidence you debug a rotated
+		// secret with, and the body has to be the one that actually failed.
+		expect(event.body_text).toBe(tampered);
+	});
+
+	test("the response says nothing about WHY it failed", async () => {
+		await seedSigned();
+
+		const res = await serve(post("/h/lisa/track", BODY, { headers: { sign: "deadbeef" } }));
+
+		expect(res.status).toBe(401);
+		// A caller probing for a working secret learns only that it did not work.
+		// The reason goes to the operator's logs.
+		expect(await res.json<{ error: string }>()).toEqual({
+			error: "signature verification failed",
+		});
+	});
+
+	test("a non-UTF-8 body verifies against its bytes, not a decode of them", async () => {
+		// The case a text-first read destroys: these bytes have no string form, so a
+		// verifier working from `body_text` could not check them at all, and one
+		// working from a lossy decode would hash U+FFFD and reject a valid request.
+		const bytes = new Uint8Array([0x7b, 0x22, 0x61, 0x22, 0x3a, 0xff, 0xc3, 0x28, 0x7d]);
+		const signed = new Uint8Array([...bytes, ...new TextEncoder().encode(`/${SECRET}`)]);
+		const sign = await sha256Of(signed);
+		await seedSigned();
+
+		const res = await serve(post("/h/lisa/track", bytes, { headers: { sign } }));
+
+		expect(res.status).toBe(200);
+		const event = onlyEvent();
+		expect(event.verified).toBe(1);
+		expect(event.body_text).toBeNull(); // never decoded
+		expect(event.body_r2_key).not.toBeNull();
+	});
+
+	test("a signature over a re-serialized body does NOT pass", async () => {
+		// The failure this design exists to prevent. `JSON.parse` then
+		// `JSON.stringify` gives a different byte string -- key order and interior
+		// whitespace both move -- so if the verifier ever worked from a re-encode,
+		// this signature would be the one that passed and the provider's real one
+		// would not.
+		await seedSigned();
+		const spaced = '{ "event" : "TRACKING_UPDATED" }';
+		const reencoded = JSON.stringify(JSON.parse(spaced));
+		expect(reencoded).not.toBe(spaced);
+		const wrongSign = await sha256Of(new TextEncoder().encode(`${reencoded}/${SECRET}`));
+
+		const res = await serve(post("/h/lisa/track", spaced, { headers: { sign: wrongSign } }));
+
+		expect(res.status).toBe(401);
+		expect(onlyEvent().verified).toBe(0);
+	});
+
+	test("the SIGNATURE header survives verbatim, so a consumer can re-verify", async () => {
+		// `hmac` and `digest` name their signature header in auth_config, exactly
+		// where `header` mode names its shared secret. Treating the two the same
+		// redacts the signature -- and a stored event whose signature is
+		// `<redacted>` cannot be verified by the consumer holding the provider's
+		// secret, which is the one thing a faithful receiver exists to enable.
+		await seedSigned();
+
+		await serve(post("/h/lisa/track", BODY, { headers: { sign: SIGN } }));
+
+		const headers = JSON.parse(onlyEvent().headers);
+		expect(headers.sign).toBe(SIGN);
+	});
+
+	test("a header-mode receiver's token IS redacted -- it is a credential", async () => {
+		// The other side of the same line. This value is replayable against any
+		// request, so it is a credential rather than a proof about one body.
+		await seedReceiver(env, {
+			inbox: "lisa",
+			slug: "tok",
+			authMode: "header",
+			authConfig: { header: "x-api-token", secret: "s3cr3t-value" },
+		});
+
+		await serve(post("/h/lisa/tok", "{}", { headers: { "x-api-token": "s3cr3t-value" } }));
+
+		const event = onlyEvent();
+		expect(event.verified).toBe(1);
+		expect(JSON.parse(event.headers)["x-api-token"]).toBe("<redacted>");
+	});
+
+	test("a shared-secret mode reads the query string off the real URL", async () => {
+		await seedReceiver(env, {
+			inbox: "lisa",
+			slug: "qtok",
+			authMode: "query",
+			authConfig: { secret: "url-token" },
+		});
+
+		const good = await serve(post("/h/lisa/qtok?token=url-token", "{}"));
+		expect(good.status).toBe(200);
+
+		const bad = await serve(post("/h/lisa/qtok?token=nope", "{}"));
+		expect(bad.status).toBe(401);
 	});
 });
 

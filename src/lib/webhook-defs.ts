@@ -5,18 +5,25 @@
  */
 
 import { generateId } from "./id";
+import { VERIFIER_MODES } from "./webhook-verify";
 import type { Env } from "../types";
 
 /** Top-level reserved path prefix, beside `/f/` for hosting. In run_worker_first. */
 export const HOOK_PREFIX = "h";
 
 /**
- * The modes this build can actually honour. Phase 2 adds the verifiers and
- * phase 3 the handshakes; until then the receiver CRUD refuses to register a
- * mode nothing implements, rather than letting an operator believe a signature
- * is being checked when it is not.
+ * The modes this build can actually honour. The receiver CRUD refuses to register
+ * anything else, rather than letting an operator believe a signature is being
+ * checked when it is not.
+ *
+ * The auth list is DERIVED from the verifier's own dispatch table rather than
+ * typed out again here, so the two cannot drift: a preset that exists only in
+ * this array would be registerable and then rejected on every delivery, and one
+ * missing from it would be dead code nobody could reach.
  */
-export const SUPPORTED_AUTH_MODES = ["none"];
+export const SUPPORTED_AUTH_MODES = ["none", ...VERIFIER_MODES];
+
+/** Phase 3 fills this in the same way, from the handshake dispatch table. */
 export const SUPPORTED_HANDSHAKE_MODES = ["none"];
 
 export function hookUrl(env: Env, inbox: string, slug: string): string {

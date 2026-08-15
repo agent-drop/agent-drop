@@ -21,6 +21,7 @@ import { recordAuthFailure } from "./ratelimit";
 import { decodeUtf8, jsonConfig, parseJson, secretHeaders, sha256Hex } from "./webhook-body";
 import { extractFields, type ExtractConfig } from "./webhook-extract";
 import { bumpReceiverCounters, collectHeaders, collectQuery, storeEvent } from "./webhook-store";
+import { verifyWebhook } from "./webhook-verify";
 import type { Env, WebhookReceiver } from "../types";
 
 export { HOOK_PREFIX } from "./webhook-defs";
@@ -148,11 +149,24 @@ async function receive(
 	const contentType = request.headers.get("Content-Type");
 
 	// Handshake (phase 3) runs BEFORE verification and never falls through to it.
-	// Verification (phase 2) is stubbed: `none` is a first-class answer, and a mode
-	// nothing implements fails closed -- writing verified=1 for a signature no code
-	// checked would be a lie in the database.
-	const unverifiable = receiver.auth_mode !== "none";
-	const status = unverifiable ? "rejected" : "queued";
+	//
+	// Verification reads `bytes` -- the same array that was hashed above, never the
+	// decoded text and never a re-encode of it. `verified` is three-valued: 1 pass,
+	// 0 fail, null for a receiver that asked for nothing.
+	const verdict = await verifyWebhook({
+		receiver,
+		headers: request.headers,
+		url,
+		method: request.method,
+		bytes,
+		now,
+	});
+	const status = verdict.verified === 0 ? "rejected" : "queued";
+	if (verdict.reason) {
+		// The reason goes to the operator's logs and nowhere near the response: a
+		// caller probing for a working secret learns only that it failed.
+		console.warn(`webhook rejected ${receiver.inbox}/${receiver.slug}: ${verdict.reason}`);
+	}
 
 	const extracted = extractFields({
 		preset: receiver.preset,
@@ -177,7 +191,7 @@ async function receive(
 		text,
 		sha256,
 		extracted,
-		verified: unverifiable ? 0 : null,
+		verified: verdict.verified,
 		status,
 		remoteIp: request.headers.get("CF-Connecting-IP"),
 		country: request.headers.get("CF-IPCountry"),
