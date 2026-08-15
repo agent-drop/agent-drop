@@ -1,5 +1,5 @@
 ---
-version: 7
+version: 8
 created: 2026-08-15
 ---
 
@@ -941,6 +941,48 @@ All four confirmed by Jonas. Nothing in this plan is open; build it as written.
 ---
 
 ## Changelog
+
+### v8 -- 2026-08-15 -- author: link 4 (phase 4)
+
+No GOAL change, nothing weakened. One pre-existing bug that this phase's own verb
+surfaced, and four implementation facts -- three of them decisions §7 implies but
+does not spell out.
+
+- **A `rejected` event must not carry a dedupe key.** §3's dedupe index exists so
+  a provider's retry does not become four copies; §9 gives `rejected` a 7-day
+  retention because it is evidence for a rotated secret, not an archive. Those
+  two together were wrong in the code: a rejected row deduped, so the sequence
+  wrong-secret -> 401 -> operator fixes it -> provider retries the same bytes
+  answered `200 {"duplicate":true}` and stored nothing. The provider stops, the
+  only row is one no lease hands out, and we told the sender we had it. Skipping
+  the *lookup* was not enough -- the partial unique index has no status column, so
+  the retry became a 503 instead. A refusal now stores `dedupe_key = NULL`, which
+  also means `queue-requeue` on a rejected row can never collide with the
+  accepted copy. Card `bug-rejected-row-blocks-its-own-retry`, mutation-checked
+  in both directions. §3's "the dedupe index is the point" is unchanged; this is
+  the code catching up to what §9 already said a rejected row IS.
+- **`?receiver=` resolves through the receiver ROW, not the event's slug column.**
+  §7 promises rotation costs no history. Matching the events' denormalized `slug`
+  would have broken exactly that: every message stored under the old slug would
+  vanish from `--receiver <new-slug>`. Both the read filter and the lease filter
+  resolve the reference (id, current slug, or pre-rotation slug) to `receiver_id`
+  first, and fall back to the raw string so a deleted receiver's events stay
+  findable.
+- **`queue-extend` will not extend an expired lease, and takes an optional
+  `--lease-id`.** §7 says extend "pushes `leased_until` out without changing
+  ownership" and does not say what an expired lease does. An expired lease is
+  back in the pool by §7's own `OR` and may already be someone else's, so
+  extending it would be taking it back silently. It answers `extended: 0`.
+- **`queue-remove` refuses a handshake row, as `queue-requeue` does.** §7's lease
+  SELECT already excludes handshakes, so nothing hands one out -- but an id typed
+  by hand could still ack one, and `acked` is a status with no way back for a row
+  whose only purpose is to be evidence that a provider's validation failed.
+- **`--delete-on-success` destroys after the write RETURNED.** Down a pipe that
+  means the OS accepted the bytes, not that the reader processed them. §10's
+  guarantee -- "a pull that dies halfway leaves the remainder leased, not
+  destroyed" -- holds and is tested; the weaker per-message half is now stated in
+  `queue-get --help` rather than left to be discovered. A consumer that needs
+  stronger should lease and `queue-remove`, which is the default for this reason.
 
 ### v7 -- 2026-08-15 -- author: link 3 (phase 3)
 

@@ -1,11 +1,11 @@
 ---
 chain_id: webhooks-20260815-115712-c042
 plan_file: /Users/jonas/projects/agent-drop/docs/WEBHOOKS-PLAN.md
-plan_version: 7
+plan_version: 8
 status: in_progress
-current_phase: 4
-last_updated: 2026-08-15T08:55:00Z
-link_count: 3
+current_phase: 5
+last_updated: 2026-08-15T12:20:00Z
+link_count: 4
 ---
 
 # Agent Drop webhook-receiver chain state
@@ -49,7 +49,19 @@ link_count: 3
   - [x] 3j. RUNTIME check: all five modes on `bun run dev` (log below)
   - [x] 42 new tests; full suite 585 pass / 0 fail; `bun run verify` exit 0
   - [x] 3k. integrated into `main` at `dc26ee0`
-- [ ] 4. The pull queue -- lease/remove/return/delete/put/peek + completeness gate
+- [x] 4. The pull queue -- lease/remove/return/delete/put/peek + completeness gate (link 4)
+  - [x] 4a. `hook-lease.ts` -- the UPDATE...RETURNING, get/remove/return/extend/requeue
+  - [x] 4b. `hook-queue-write.ts` -- put through the real receive path, delete, stats
+  - [x] 4c. `hook-rotate` -- new slug, grace window, history intact
+  - [x] 4d. Router: ten routes, everything mutating under `keyedWriter`
+  - [x] 4e. CLI: the ten `queue-*` verbs + `hook-rotate`
+  - [x] 4f. Section 10's completeness matrix walked cell by cell -- no cell needs a curl
+  - [x] 4g. `?receiver=` resolves through the receiver row, so rotation costs no history
+  - [x] 4h. **Bug found at runtime + fixed**: a rejected row deduped against its own
+        valid retry (card `bug-rejected-row-blocks-its-own-retry`)
+  - [x] 4i. Tests: every claim in the phase-4 verify block, mutation-checked six ways
+  - [x] 4j. RUNTIME check on `bun run dev` against the 17 real events (log below)
+  - [x] 49 new tests; full suite 634 pass / 0 fail; `bun run verify` exit 0
 - [ ] 5. Onward delivery -- RuleSubject, hook channel, passthrough, replay
 - [ ] 6. Retention, provisioning, deploy, docs
 
@@ -116,6 +128,25 @@ Modified: `src/lib/webhook-defs.ts` (`SUPPORTED_HANDSHAKE_MODES` derived),
 `tools/agent-drop.ts` (`withHandshakeOptions` on create + update, `hook-get`),
 `test/helpers/env.ts` (`handshakeConfig` on `seedReceiver`),
 `test/webhook-receive.test.ts` (+3), `test/webhook-api.test.ts` (+7).
+
+Phase 4 (link 4):
+
+| File | What |
+|---|---|
+| `src/api/hook-lease.ts` | the one `UPDATE ... RETURNING` with the subselect, plus remove / return / extend / requeue |
+| `src/api/hook-queue-write.ts` | `put` through the real receive path, single + bulk `delete`, `stats` |
+| `src/api/hook-rotate.ts` | new slug on the same row, `previous_slug` + grace window |
+| `tools/lib/queue-emit.ts` | the `--delete-on-success` loop, extracted so its ORDERING is testable |
+| `test/webhook-queue.test.ts` | 23 tests: leasing, concurrency, expiry, peek-inertness, the ack |
+| `test/webhook-queue-admin.test.ts` | 24 tests: put, delete, stats, rotate, the emit loop |
+
+Modified: `src/api/router.ts` (ten routes; `stats` deliberately BEFORE `:id`),
+`src/api/hook-queue.ts` (`detail` exported, `resolveReceiverId`),
+`src/api/hooks.ts` (the `rotate` sub-route),
+`src/lib/webhook-receive.ts` (`ReceiveOutcome`, an out-param so `queue-put`
+learns the id without changing what a provider sees),
+`src/lib/webhook-store.ts` (the dedupe fix),
+`tools/agent-drop.ts` (ten verbs), `test/webhook-receive.test.ts` (+2).
 
 ## Decisions
 
@@ -205,6 +236,44 @@ Phase 3 (link 3) -- all recorded in PLAN v7's changelog:
 - **Zoom, Meta and Slack were all re-verified against live docs**, not memory.
   Zoom's field names are unchanged since the plan was written; `204` is
   acceptable as well as `200`, and six consecutive failures disable the endpoint.
+
+Phase 4 (link 4) -- all recorded in PLAN v8's changelog:
+
+- **A refusal is not a queue member, and it must not behave like one.** A
+  `rejected` row carried a `dedupe_key`, so the exact sequence you most want to
+  survive lost the message silently: wrong secret -> 401 stored `rejected` ->
+  operator fixes the secret -> provider retries the same bytes -> `200
+  {"duplicate":true}`, nothing stored, provider stops. The only row left was one
+  no lease will ever hand out. Card
+  `bug-rejected-row-blocks-its-own-retry`. **Phase 5 note: `payload_mode:
+  passthrough` re-delivers stored rows, so it inherits this -- a rejected row is
+  not a delivery.**
+- **The dedupe fix had to go one layer down.** Skipping the *lookup* for rejected
+  rows was not enough: the partial unique index `(receiver_id, dedupe_key)` has
+  no status column, so the valid retry became a 503 instead of a lost event.
+  Still wrong, just louder. A refusal now carries NO dedupe key, which also means
+  `queue-requeue` on a rejected row can never collide with the accepted copy.
+- **Peek is inert, and that is asserted on a LEASED row.** The whole row is
+  compared before and after list / peek / one / body / stats. A read that
+  disturbed a hold would be the worst kind of bug here, because it only shows up
+  when someone is mid-work.
+- **`queue-extend` will not resurrect an expired lease**, and takes an optional
+  `--lease-id` so it refuses to extend one that is not yours. An expired lease is
+  back in the pool and may already belong to someone else; taking it back
+  silently is worse than making the caller pull again.
+- **`?receiver=` resolves through the receiver ROW, not the events' denormalized
+  slug.** Otherwise a rotation would cost history: every message stored under the
+  old slug would vanish from `--receiver <new-slug>`, and §7 promises the
+  opposite.
+- **`--delete-on-success` destroys after the write RETURNED**, which down a pipe
+  means the OS accepted the bytes, not that the reader processed them. Proven at
+  runtime: piping into `head -1` destroyed two and left the rest LEASED. The
+  guarantee is the remainder, not per-byte delivery -- stated in `queue-get
+  --help` rather than left for someone to discover.
+- **`queue-put` is the same code path, including the parts that say no.** An
+  unsigned injection into a signed receiver answers 401 and stores `rejected`,
+  exactly as a real delivery would. There is no flag that writes `verified=1` for
+  a signature nothing checked.
 
 ## Open questions / blockers
 
@@ -469,6 +538,169 @@ against. Admin API key named `p3-runtime` (value not recorded; make your own wit
 `drop key-create`). The CLI reaches local dev via `AGENT_DROP_URL=http://localhost:5173`
 -- export it AFTER `source ~/.secrets`, which sets the production key.
 
+## Phase 4 runtime log -- the queue, proven on `bun run dev`
+
+Not tests: the real worker in workerd, real local D1, real local R2, driven by
+the real CLI against the 17 events link 3 left behind. Row state below is read
+straight out of the miniflare D1 file, not from what a handler claimed.
+
+```
+$ drop queue-stats
+  BOX          TOTAL  QUEUED  LEASED  ACKED  REJECTED  HANDSHAKE  SIZE   LAST
+  lisa            17       7       0      0         4          6  1KB    18m ago
+
+$ drop queue-get lisa --limit 50 --lease 300      # asked for FIFTY, out of 17 rows
+  leased 7                                        <- the 7 queued ones, and only those
+  6 handshake  4 rejected  left exactly where they were
+
+  01m01zjz3jn…  track-17-0qjqda   leased  lease=27bcb1a3  n=1
+  …
+```
+
+Peek is inert, and the row that matters is a leased one:
+
+```
+$ ID=01m01zjz3jnfebvvvzrsj4p8hy                   # currently LEASED
+$ sqlite  SELECT * FROM webhook_events WHERE id=$ID   > before.json
+$ drop queue-peek lisa $ID ; drop --format json queue-peek lisa $ID
+$ drop queue-body lisa $ID -o /dev/null ; drop queue-list lisa ; drop queue-stats lisa
+$ sqlite  SELECT * …                                  > after.json
+$ diff before.json after.json && echo IDENTICAL
+IDENTICAL -- every column, on a leased row
+0bdbc8d2e937cff1203bc8b316b16ed29d0f3baae8ed4a73cd35f9faa765f8b1  before.json
+0bdbc8d2e937cff1203bc8b316b16ed29d0f3baae8ed4a73cd35f9faa765f8b1  after.json
+```
+
+Extend keeps ownership; a stranger's lease id does not:
+
+```
+before  leased  lease=27bcb1a3  until=1786776518625  n=2
+$ drop queue-extend lisa $ID --lease 1800 --lease-id 27bcb1a3-…
+  Extended 1 of 1 until 2026-08-15 07:03:44
+after   leased  lease=27bcb1a3  until=1786777424162  n=2   <- only leased_until moved
+
+$ drop queue-extend lisa $ID --lease 3600 --lease-id 00000000-0000-4000-8000-…
+  Extended 0 of 1
+  Not extended: already expired, or not your lease.
+after   leased  lease=27bcb1a3  until=1786777424162  n=2   <- untouched
+```
+
+Two consumers pulling the whole queue at the same instant:
+
+```
+$ curl … /queue/lisa/get -d '{"limit":10}' &  curl … /queue/lisa/get -d '{"limit":10}' &
+  consumer A got 0  lease f4412d2b
+  consumer B got 7  lease 3c99e676
+  overlap: NONE
+  union  : 7 distinct events
+```
+
+The ack, and the two statuses that are not work:
+
+```
+$ drop queue-remove lisa $ID
+  Removed 1                    -> acked  n=3  acked=1786775642334
+$ drop queue-remove lisa $ID   # again, a second later
+  Removed 0  (1 already removed)
+                               -> acked=1786775642334   <- NOT restamped
+
+$ drop queue-remove lisa <handshake-id> <id-from-another-box>
+  Removed 0  (1 handshake, kept, 1 not in lisa)
+
+$ drop queue-requeue lisa <acked> <rejected> <handshake>
+  Requeued 2 of 3
+  Only removed and rejected events requeue. Handshakes never do.
+```
+
+**The bug this phase found.** `queue-put` injects through the same path a
+provider would, which is exactly how it surfaced -- a real 17TRACK retry hits it
+identically:
+
+```
+$ drop queue-put lisa --receiver track-17-0qjqda --body @put2.json --header 'sign:deadbeef'
+  Receiver rejected it: 401
+  stored as 01m0226wq10eb1mj0d1ztj1c3k (rejected)
+
+# the operator fixes the secret; the provider retries THE SAME BYTES
+$ SIGN=$(cat put2.json <(printf '%s' '/123456ABCDEF') | shasum -a 256 | cut -d' ' -f1)
+$ drop queue-put lisa --receiver track-17-0qjqda --body @put2.json --header "sign:$SIGN"
+  Injected 01m0226wtq8vehdsdx4st7v0x3          <- BEFORE the fix: "duplicate", nothing
+  receiver answered 200                            stored, provider stops, event gone
+
+$ drop queue-put … --header "sign:$SIGN"       # and a GENUINE duplicate still is one
+  Injected 01m0226wtq8vehdsdx4st7v0x3 (duplicate -- nothing stored)
+```
+
+Delete takes the R2 body with it:
+
+```
+$ printf '\x00\xff\xc3\x28\x89PNG\r\n\x1a\n\xfe\xed' | curl --data-binary @- …
+  body_text: null   body_r2_key: hooks/lisa/echo-box-wyc5nt/01m02276q8…   14 bytes
+  body endpoint -> 200 14B
+$ drop queue-delete lisa 01m02276q8…
+  Destroyed 1 event(s), R2 bodies included
+  body endpoint -> 404      row -> null
+```
+
+Rotation, with the grace window:
+
+```
+$ drop queue-list lisa --receiver track-17-0qjqda   ->  8 events
+$ drop hook-rotate lisa/track-17-0qjqda --grace 1h
+  Rotated to lisa/track-17-fnrq5n
+  track-17-0qjqda keeps answering until 2026-08-15 07:37:28
+
+  old slug -> 401      <- reached the receiver (bad signature), NOT 404
+  new slug -> 401      <- same receiver, same verdict, new address
+$ drop queue-list lisa --receiver track-17-fnrq5n   -> 10 events
+$ drop queue-list lisa --receiver track-17-0qjqda   -> 10 events
+                                                       ^ the same rows under either
+                                                         name: events key on the id
+```
+
+`--delete-on-success` when the output dies partway, and the bulk deletes:
+
+```
+$ drop --format json queue-get lisa --limit 4 --lease 900 --delete-on-success | head -1
+  {"id":"01m01zjz3jn…"                       <- head closes the pipe
+  rows 22 -> 20                              <- two destroyed (the write RETURNED for
+                                                both; a pipe accepts before a reader
+                                                reads -- documented in --help)
+  01m01zqjpjvm…  leased  n=4                 <- the remainder is LEASED, not destroyed
+  01m01zr2ebnf…  leased  n=3
+
+$ drop queue-delete lisa --removed
+  About to DESTROY 2 event(s) in lisa:
+    01m020vncjxra…  acked  25m ago
+    01m01zr9pdvvd…  acked  44m ago
+  Re-run with --yes to destroy them.
+  rows still there: 20                       <- a preview destroys nothing
+$ drop queue-delete lisa --removed --yes
+  Destroyed 2 event(s)                       -> 18
+```
+
+`queue-replay` to a real listener, proving what a consumer gets:
+
+```
+$ drop queue-replay lisa 01m01zqjpjvm… --to http://localhost:4931/ingest
+  POST http://localhost:4931/ingest  95B
+  200 sink ok
+
+SINK got POST 95 bytes
+  sign: 99d58000af5855efe1091678c3b3fdc277e218eaf7fa85bebd9ed6b734b96d18
+  authorization: (none -- a redacted header is not replayed)
+  sha256: 3e4a3eb469916ed9748a4b8eb9aca621c00ee67d16cb6067796287a16bcbe68d
+          ^ the stored body_sha256, byte for byte. a consumer holding 17TRACK's
+            key can verify this replay, which is the whole acceptance criterion
+```
+
+Left behind in the LOCAL dev D1 for phase 5: 11 events across `queued` /
+`handshake` / `rejected` on `lisa`, the rotated receiver `lisa/track-17-fnrq5n`
+(old slug `track-17-0qjqda` still answering until its grace expires), and the six
+other receivers. Admin API key named `p4-runtime` (value not recorded; make your
+own with `drop key-create`). `AGENT_DROP_URL=http://localhost:5173`, exported
+AFTER `source ~/.secrets`.
+
 ## Log
 
 - 2026-08-15T04:57:12Z [link 1] chain started at plan v3, phase 1
@@ -543,3 +775,26 @@ against. Admin API key named `p3-runtime` (value not recorded; make your own wit
   PLAN's required test red; dropping the query redaction turns 3 red. Runtime
   round trip transcribed above, including the ordering guarantee against a live
   worker. Plan v6 -> v7.
+- 2026-08-15T11:45:00Z [link 4] **off-mission bug found and fixed**, card
+  `bug-rejected-row-blocks-its-own-retry`: a `rejected` row carried a
+  `dedupe_key`, so a provider's retry of the same bytes AFTER the secret was
+  fixed answered `200 {"duplicate":true}` and stored nothing -- the provider
+  stops, and the only row left is one no lease ever hands out. Found at runtime
+  through `queue-put`, which is the same code path a real retry takes. The first
+  fix (skip the lookup for rejected rows) was not enough: the partial unique
+  index has no status column, so the retry became a 503 instead. A refusal now
+  carries no dedupe key at all. RED first, mutation-checked both directions --
+  restoring the key turns exactly the new test red, and dropping dedupe entirely
+  turns seven red.
+- 2026-08-15T12:05:00Z [link 4] mutation-checked the phase's own suites four ways
+  before trusting a clean first run: a lease SELECT that forgets expired leases,
+  a requeue that admits handshakes, an emit loop that finishes before it writes,
+  and a delete that leaves the R2 body. Each turned exactly the tests it should.
+- 2026-08-15T12:20:00Z [link 4] **phase 4 complete.** The full message
+  vocabulary: `queue-get/remove/return/extend/requeue/delete/put/stats/replay`
+  plus `hook-rotate`, on ten new routes -- everything that leases, mutates or
+  destroys under `keyedWriter`, everything inert under `keyedReader`. Section
+  10's completeness matrix walked cell by cell: no cell needs a raw curl or a D1
+  query. 49 new tests, full suite 634 pass / 0 fail, `bun run verify` exit 0.
+  Runtime round trip transcribed above against the 17 real events link 3 left.
+  Plan v7 -> v8.
