@@ -109,6 +109,36 @@ export function applyDeployIdentity(config: IdentityFields, identity: DeployIden
 	}
 }
 
+/** The part of a `spawnSync` result that says whether the child ever ran. */
+export interface SpawnOutcome {
+	status: number | null;
+	signal?: NodeJS.Signals | string | null;
+	error?: Error & { code?: string };
+}
+
+/**
+ * Explain a wrangler that never ran, or null if it ran (whatever it exited with).
+ *
+ * `spawnSync` reports a child that could not be started as `status: null` plus
+ * an `error` -- and with `stdio: "inherit"` there is nothing on the terminal to
+ * see, so the deploy wrapper exited 1 in total silence. For a script whose
+ * entire job is to stop a silent wrong deploy, failing silently is the worst
+ * available behaviour.
+ *
+ * A non-zero exit from a wrangler that DID run is not this function's business:
+ * wrangler already printed its own error, and restating it adds noise.
+ */
+export function describeSpawnFailure(res: SpawnOutcome): string | null {
+	if (res.status !== null) return null;
+	if (res.signal) return `wrangler was killed by ${res.signal} before it could finish.`;
+	const detail = res.error?.code ? `${res.error.code}: ${res.error.message}` : res.error?.message;
+	return (
+		`Could not run wrangler (${detail ?? "spawn failed"}).\n` +
+		"It is a devDependency, so it only resolves when node_modules/.bin is on\n" +
+		"PATH -- run this through `bun run deploy`, or invoke it with `bunx`."
+	);
+}
+
 /** Substitute the `%BRAND%` / `%DOMAIN%` tokens the SPA's index.html carries. */
 export function renderBrandTokens(html: string, identity: DeployIdentity): string {
 	return html.replaceAll("%BRAND%", identity.brand).replaceAll("%DOMAIN%", identity.domain);

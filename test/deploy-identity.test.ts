@@ -8,6 +8,7 @@ import {
 	type IdentityFields,
 	IDENTITY_VARS,
 	PLACEHOLDERS,
+	describeSpawnFailure,
 	readDeployIdentity,
 	renderBrandTokens,
 } from "../scripts/deploy-identity.ts";
@@ -220,5 +221,32 @@ describe("renderBrandTokens", () => {
 		expect(html).toContain("%BRAND%");
 		expect(renderBrandTokens(html, REAL)).toContain("FRST");
 		expect(renderBrandTokens(html, REAL)).not.toContain("%BRAND%");
+	});
+});
+
+describe("describeSpawnFailure", () => {
+	// The deploy wrapper exists to stop a silent wrong deploy. It was doing the
+	// silent thing itself: when `wrangler` is not on PATH, spawnSync returns
+	// `status: null` with an `error`, `stdio: "inherit"` prints nothing, and the
+	// script exited 1 having said nothing at all. That is what turned the CI
+	// deploy dry-run red -- it is the one CI step not run through bunx/bun run,
+	// so node_modules/.bin is not on its PATH.
+	test("explains a spawn that never started", () => {
+		const message = describeSpawnFailure({
+			status: null,
+			error: Object.assign(new Error("spawnSync wrangler ENOENT"), { code: "ENOENT" }),
+		});
+		expect(message).toContain("wrangler");
+		expect(message).toContain("ENOENT");
+	});
+
+	test("says nothing when wrangler ran, whatever it exited with", () => {
+		// A non-zero wrangler is wrangler's story to tell; it already printed it.
+		expect(describeSpawnFailure({ status: 0 })).toBeNull();
+		expect(describeSpawnFailure({ status: 1 })).toBeNull();
+	});
+
+	test("covers a signal kill, which also leaves status null", () => {
+		expect(describeSpawnFailure({ status: null, signal: "SIGKILL" })).toContain("SIGKILL");
 	});
 });

@@ -16,6 +16,7 @@ import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import {
 	checkDeployIdentity,
+	describeSpawnFailure,
 	IDENTITY_VARS,
 	type IdentityFields,
 	readDeployIdentity,
@@ -60,7 +61,15 @@ if (problems.length) {
 	process.exit(1);
 }
 
-const res = spawnSync("wrangler", ["deploy", "-c", configPath, ...process.argv.slice(2)], {
+// Through `bunx`, not bare `wrangler`: wrangler is a devDependency, so a bare
+// spawn only resolves when node_modules/.bin happens to be on PATH. It is when
+// this runs under `bun run deploy`, and it is NOT when something invokes the
+// script directly -- which is exactly how CI ran it, and why the dry-run there
+// failed without printing a word.
+const res = spawnSync("bunx", ["wrangler", "deploy", "-c", configPath, ...process.argv.slice(2)], {
 	stdio: "inherit",
 });
+
+const spawnFailure = describeSpawnFailure(res);
+if (spawnFailure) console.error(spawnFailure);
 process.exitCode = res.status ?? 1;
