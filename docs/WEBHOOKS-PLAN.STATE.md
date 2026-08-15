@@ -1,11 +1,11 @@
 ---
 chain_id: webhooks-20260815-115712-c042
 plan_file: /Users/jonas/projects/agent-drop/docs/WEBHOOKS-PLAN.md
-plan_version: 5
+plan_version: 6
 status: in_progress
-current_phase: 2
-last_updated: 2026-08-15T05:52:00Z
-link_count: 1
+current_phase: 3
+last_updated: 2026-08-15T07:35:00Z
+link_count: 2
 ---
 
 # Agent Drop webhook-receiver chain state
@@ -21,14 +21,26 @@ link_count: 1
   - [x] 1f. CLI: hook-create/list/get/url/update/delete, queue-list/peek/body
   - [x] 1g. RUNTIME check: byte-identical round trip on `bun run dev` (log below)
   - [x] 53 new tests green; full suite 466 pass / 0 fail; `bun run verify` exit 0
-- [ ] 2. Verification -- all presets, hook-test
-  - [ ] 2z. **First edit: add each preset to `SUPPORTED_AUTH_MODES` in
-        `src/lib/webhook-defs.ts`.** Phase 1 fails closed on any mode not in
-        that array -- the CRUD refuses to register it and the receive path
-        rejects it -- so a verifier that is not listed there is dead code, and
-        `test/webhook-api.test.ts` "refuses a mode this build cannot honour"
-        will need its example changed to one still unimplemented.
+- [x] 2. Verification -- all presets, hook-test (link 2)
+  - [x] 2a. `SUPPORTED_AUTH_MODES` now DERIVED from the verifier's dispatch table
+  - [x] 2b. `constantTimeEqual` lifted to `src/lib/compare.ts`, one copy
+  - [x] 2c. `webhook-crypto.ts` -- byte-level signed message, hex/base64, matchesAny
+  - [x] 2d. `webhook-schemes.ts` -- the 7 signed schemes' header/template trivia
+  - [x] 2e. `webhook-verify.ts` -- dispatch, replay windows, 4 shared-secret modes
+  - [x] 2f. Seam wired in `webhook-receive.ts`: verified 1 / 0 / NULL, verified
+        against `bytes`, reason to the logs and never to the caller
+  - [x] 2g. `hook-test` CLI + the `--auth-*` flags that make hmac/digest usable
+  - [x] 2h. 17TRACK vector, case-insensitive compare, leading-zero signature
+  - [x] 2i. **Bug found at runtime + fixed**: signature header was stored
+        `<redacted>` (card `bug-signature-header-redacted`)
+  - [x] 2j. RUNTIME check: verified=1 round trip, one-byte tamper -> 401 (log below)
+  - [x] 77 new tests; full suite 543 pass / 0 fail; `bun run verify` exit 0
 - [ ] 3. Handshakes -- meta/slack/zoom/echo/static
+  - [ ] 3z. **Do for handshakes what 2a did for auth**: derive
+        `SUPPORTED_HANDSHAKE_MODES` in `src/lib/webhook-defs.ts` from the
+        handshake dispatch table rather than typing the list twice. It is still
+        `["none"]`, so every handshake mode is refused by the CRUD and dead on
+        the receive path until that edit lands.
 - [ ] 4. The pull queue -- lease/remove/return/delete/put/peek + completeness gate
 - [ ] 5. Onward delivery -- RuleSubject, hook channel, passthrough, replay
 - [ ] 6. Retention, provisioning, deploy, docs
@@ -59,6 +71,26 @@ four Tier-2 routes), `src/types.ts`, `src/lib/normalize.ts` (`normalizeSlug`),
 Files split to stay under the 200-line rule: `webhook-receive` ->
 `+ webhook-body` `+ webhook-defs`; `hooks` -> `+ hook-config`; queue reads went
 to `hook-queue` rather than into `hooks`.
+
+Phase 2 (link 2):
+
+| File | What |
+|---|---|
+| `src/lib/compare.ts` | `constantTimeEqual`, lifted out of `auth.ts` -- one copy, two callers |
+| `src/lib/webhook-crypto.ts` | hmac/digest, hex/base64, `buildSignedBytes` (bytes, not strings), `matchesAny` |
+| `src/lib/webhook-schemes.ts` | the 7 signed schemes: header name, signature parsing, template, window |
+| `src/lib/webhook-verify.ts` | dispatch, `checkSignature`, the replay window, the 4 shared-secret modes |
+| `tools/lib/hook-sign.ts` | the producing half of the schemes, for `hook-test` |
+| `test/helpers/verify.ts` | `fakeReceiver`, `verify()`, `flipOneByte` |
+| `test/webhook-verify.test.ts` | 46 tests: the per-preset matrix + the digest encoding traps |
+| `test/webhook-verify-shared.test.ts` | 19 tests: bearer / basic / header / query |
+
+Modified: `src/lib/auth.ts` (imports the shared compare), `src/lib/webhook-defs.ts`
+(`SUPPORTED_AUTH_MODES` derived), `src/lib/webhook-receive.ts` (the seam),
+`src/lib/webhook-body.ts` (`secretHeaders` -- the redaction fix),
+`tools/agent-drop.ts` (`hook-test`, the `--auth-*` flags on create+update,
+`verdictLabel` so peek shows all three verdicts), `test/webhook-receive.test.ts`
+(+8), `test/webhook-api.test.ts` (+1).
 
 ## Decisions
 
@@ -95,6 +127,31 @@ Phase 1 (link 1) -- all recorded in PLAN v5's changelog:
   and failed in the full suite. Documented at the query in `hook-queue.ts`.
 - Queue reads filter by `inbox` AND id, never id alone -- the inbox is what the
   gate approved, so an id by itself must never reach another box's event.
+
+Phase 2 (link 2) -- all recorded in PLAN v6's changelog:
+
+- **`auth_config.header` means two different things, and getting it backwards is
+  SILENT.** Shared secret under `header` mode; the signature under `hmac` and
+  `digest`. Redacting a signature destroys consumer-side verification -- the one
+  thing the whole receiver exists to enable -- and nothing reports a problem:
+  the event stores, the status is 200, the body is perfect. Rule: **default
+  redact, `hmac`/`digest` are the only exception.** Phase 3 touches the same
+  file.
+- **`SUPPORTED_AUTH_MODES` is derived from `VERIFIER_MODES`, not typed out.**
+  The two halves of a fail-closed gate cannot drift if only one of them exists.
+  Phase 3 should do the same for handshakes.
+- **The signed message is assembled as BYTES.** `buildSignedBytes` splices the
+  raw body in unmodified; building the string first would have reintroduced the
+  UTF-8 round trip one layer below the one §4 avoids.
+- **A signature list is never just its first entry.** `standard` and `stripe`
+  both send several mid-rotation, and every candidate is compared even after one
+  matches, so the timing does not say WHICH matched.
+- **Hex is compared case-insensitively and zero-padded up to width.** 17TRACK's
+  BigInteger encoding drops leading zeros, so ~1 in 256 signatures is 63 chars.
+  Pinned by a real fixture whose digest starts with `0`.
+- **The 401 body says nothing about why.** The reason goes to
+  `console.warn` for the operator; a caller probing for a working secret learns
+  only that it failed.
 
 ## Open questions / blockers
 
@@ -192,6 +249,81 @@ disabled receiver    -> 403 {"error":"receiver disabled"}
 hook-delete --purge  -> "Receiver deleted (2 event(s) destroyed)"
 ```
 
+## Phase 2 runtime log -- verification, proven on `bun run dev`
+
+Not tests: the real worker in workerd, real local D1, real local R2. Every
+signature below was computed with `shasum` OUTSIDE the codebase, so a pass is
+agreement with an external tool rather than the code agreeing with itself.
+
+```
+$ drop hook-create lisa track-17 --auth digest --secret 123456ABCDEF \
+    --auth-header sign --preset generic --routing-key data.tag \
+    --dedupe body-hash --dedupe-window 65m
+  Receiver created: lisa/track-17-0qjqda
+  id e835b2c1-7699-49ab-b1b0-97fbfc581d0e  POST  keeps 120d
+                                     <- no "URL IS the credential" warning now:
+                                        a secret is set, so the URL is not it
+
+$ shasum -a 256 fresh.json
+3e4a3eb469916ed9748a4b8eb9aca621c00ee67d16cb6067796287a16bcbe68d  fresh.json
+$ SIGN=$(cat fresh.json <(printf '%s' '/123456ABCDEF') | shasum -a 256 | cut -d' ' -f1)
+  99d58000af5855efe1091678c3b3fdc277e218eaf7fa85bebd9ed6b734b96d18
+
+$ curl -X POST localhost:5173/h/lisa/track-17-0qjqda \
+    -H "sign: $SIGN" -H 'Authorization: Bearer should-be-redacted' \
+    --data-binary @fresh.json
+{"ok":true,"id":"01m01zqjpjvmqjnvhw90ybmk3s"}   HTTP 200
+
+$ drop queue-peek lisa 01m01zqjpjvmqjnvhw90ybmk3s
+  POST lisa/track-17-0qjqda  queued  verified      <- verified=1, not NULL
+  type/key parcel-77
+  95B  sha256 3e4a3eb469916ed9748a4b8eb9aca621c00ee67d16cb6067796287a16bcbe68d
+                                                   ^ MATCHES the sent file
+  headers:
+    authorization: <redacted>                      <- a credential in its own right
+    sign: 99d58000af5855efe1091678c3b3fdc277e218eaf7fa85bebd9ed6b734b96d18
+                                                   ^ VERBATIM. this is the bug
+                                                     fixed this phase; a consumer
+                                                     re-verifies from exactly this
+```
+
+One byte, and only one byte, different -- the same signature:
+
+```
+$ cmp -l body.json tampered.json | wc -l
+       1
+$ curl -X POST ... -H "sign: $SIGN" --data-binary @tampered.json
+{"error":"signature verification failed"}   HTTP 401
+
+$ drop queue-peek lisa 01m01zqbmt7fg962cxzeztagyd
+  POST lisa/track-17-0qjqda  rejected  SIGNATURE FAILED   <- stored, verified=0
+  95B  sha256 22a42191ae993e95a51adf37a7734fd30ab68553318950cc285dfb1fb21318b2
+```
+
+`hook-test`, and an HMAC preset as well as the digest one, so the round trip is
+not just proving the one simplest scheme:
+
+```
+$ drop hook-test lisa/track-17-0qjqda --secret 123456ABCDEF --url http://localhost:5173
+  POST http://localhost:5173/h/lisa/track-17-0qjqda
+  auth digest  113 bytes
+  200 {"ok":true,"id":"01m01zr2ebnf55ankx51thzkry"}
+
+$ drop hook-test lisa/track-17-0qjqda --secret wrong-key --url http://localhost:5173
+  401 {"error":"signature verification failed"}
+  Receiver did not accept it.                            <- exit 4
+
+$ drop hook-create lisa stripe-live --auth stripe --secret whsec_live_test --preset stripe
+$ drop hook-test lisa/stripe-live-jaekt0 --secret whsec_live_test --url http://localhost:5173
+  200 {"ok":true,"id":"01m01zr9pdvvd2ng3bgh7kwj2y"}
+$ drop hook-test lisa/stripe-live-jaekt0 --secret whsec_nope --url http://localhost:5173
+  401 {"error":"signature verification failed"}
+```
+
+Left behind in the LOCAL dev D1 for phase 3 to reuse: receivers
+`lisa/track-17-0qjqda` (digest) and `lisa/stripe-live-jaekt0` (stripe), and an
+admin API key named `p2-runtime`.
+
 ## Log
 
 - 2026-08-15T04:57:12Z [link 1] chain started at plan v3, phase 1
@@ -221,3 +353,25 @@ hook-delete --purge  -> "Receiver deleted (2 event(s) destroyed)"
 - 2026-08-15T06:12:00Z [link 1] **CI green on main** (`dd470d6`) -- first green
   run of this chain. Commits: `233edde` biome, `4c877b7` phase 1, `dd470d6`
   deploy guard.
+- 2026-08-15T07:35:00Z [link 2] **phase 2 complete.** All 11 auth modes verify:
+  `standard`, `github`, `stripe`, `slack`, `shopify`, `hmac`, `digest`,
+  `bearer`, `basic`, `header`, `query`. 77 new tests, full suite 543 pass / 0
+  fail, `bun run verify` exit 0. Every signed-preset fixture was computed
+  outside the codebase with `openssl dgst` / `shasum`, and the `github` and
+  `standard` rows are the providers' own published vectors -- so a pass means
+  agreement with the provider, not with ourselves. The 17TRACK vector was
+  recomputed a third time and agrees. Runtime round trip transcribed above.
+  Plan v5 -> v6.
+- 2026-08-15T07:20:00Z [link 2] **off-mission bug found and fixed**, card
+  `bug-signature-header-redacted`: `secretHeaders()` redacted
+  `auth_config.header` for every mode, but `hmac` and `digest` use that key to
+  name the SIGNATURE rather than a secret -- so every signature header was
+  stored as `<redacted>`, silently voiding the plan's "a consumer holding the
+  provider's secret can verify what we stored" criterion. Found during the
+  runtime round trip, not by a test. RED first, both directions; phase 1's
+  existing redaction test passes unchanged and caught an over-correction on the
+  first attempt at the fix.
+- 2026-08-15T07:10:00Z [link 2] mutation-checked the new suite rather than
+  trusting 46 first-run passes: swapping `standard`'s template to
+  `{ts}.{id}.{body}` turns 3 tests red, restoring it turns them green. The
+  fixtures bite.

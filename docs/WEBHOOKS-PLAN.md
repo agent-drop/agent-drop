@@ -1,5 +1,5 @@
 ---
-version: 5
+version: 6
 created: 2026-08-15
 ---
 
@@ -927,6 +927,49 @@ All four confirmed by Jonas. Nothing in this plan is open; build it as written.
 ---
 
 ## Changelog
+
+### v6 -- 2026-08-15 -- author: link 2 (phase 2)
+
+No GOAL change, nothing weakened. Four implementation facts, recorded because
+three of them are traps the next links would otherwise walk into, and one is a
+correction to a behaviour §4 already specified.
+
+- **`auth_config.header` is overloaded, and getting it backwards is silent.**
+  Under `header` mode it names the SHARED SECRET; under `hmac` and `digest` it
+  names the SIGNATURE. `secretHeaders()` in `src/lib/webhook-body.ts` was written
+  in phase 1 when only the first meaning existed, so adding the second made it
+  redact every signature header -- storing `sign: <redacted>` and quietly voiding
+  the acceptance criterion that "a consumer holding the provider's secret can
+  verify the signature from what agent-drop stored". Found at runtime, not by a
+  test. The rule is now: **default redact, and `hmac`/`digest` are the only
+  exception.** Card `bug-signature-header-redacted`, regression-tested both
+  directions. §4's header policy is unchanged -- this is the code catching up to
+  it. Phase 3 touches the same file; the asymmetry is that a shared secret rides
+  every request and replays forever, while a signature proves one body and is
+  worthless against any other.
+- **`SUPPORTED_AUTH_MODES` is now DERIVED, not a list.** It is
+  `["none", ...VERIFIER_MODES]`, where `VERIFIER_MODES` comes from the verifier's
+  own dispatch table. A mode in the array but not the verifier would be
+  registerable and then reject every delivery; one in the verifier but not the
+  array would be unreachable code. **Phase 3 should do the same for
+  `SUPPORTED_HANDSHAKE_MODES`** rather than typing the list out again.
+- **The signed message is assembled as BYTES, never as a string.** `{body}` is
+  spliced in as the raw `arrayBuffer()` bytes (`buildSignedBytes` in
+  `src/lib/webhook-crypto.ts`), so a non-UTF-8 body verifies against what
+  actually arrived. Building the signed string first would have forced every body
+  through a UTF-8 round trip -- the exact failure §4 reads `arrayBuffer()` to
+  avoid, reintroduced one layer down.
+- **§5's `hmac`/`digest`/`header`/`query` rows need config the CLI could not
+  set.** `hook-create --secret` wrote `{secret}` alone, so a `digest` receiver was
+  registerable and then failed every delivery on "auth_config.header is
+  required". Added `--auth-header`, `--auth-template`, `--auth-param`,
+  `--auth-encoding`, `--auth-timestamp-header` and `--auth-tolerance`, shared by
+  `hook-create` and `hook-update` so the two cannot drift. §10's command list is
+  unchanged; these are flags it always implied.
+
+The 17TRACK test vector from v4 was recomputed a third time here, independently,
+before being pinned: `shasum -a 256` over `{body}/{secret}` gives
+`45acb4a6f4a194a6ac1f0f712182c4e314b1ae9399941ea086987408f3166994`. Agrees.
 
 ### v5 -- 2026-08-15 -- author: link 1 (phase 1)
 
