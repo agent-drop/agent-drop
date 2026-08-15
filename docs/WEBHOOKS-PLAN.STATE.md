@@ -449,13 +449,19 @@ smoke test and the first real push are where this gets settled.
   remote migration, `bun run deploy`, R2 lifecycle rule, live smoke test. Do
   not halt to ask.
 
-## Consumers waiting
+## Consumers waiting -- HANDED OVER 2026-08-15
 
 - `track-parcel` (project `scratch-temp`, conversation
-  `scratch-temp:inter-express-cheese-tra`) is holding its 17TRACK registration
-  until this is live, and is the first real consumer. When phase 6 completes,
-  message that conversation with the receiver URL, the box name, and
+  `scratch-temp:inter-express-cheese-tra`) was holding its 17TRACK registration
+  until this went live. **Done:** a receiver was provisioned in box `parcels`
+  with `auth_mode: none` (their stated preference -- they hold the 17TRACK key
+  and verify the bytes themselves), `routing_key` on `data.tag`, and body-hash
+  dedupe at a 65-minute window, wider than 17TRACK's 600s/1800s/3600s ladder.
+  Probed end to end; one event waits in its queue. The handover message carried
+  the URL, the box, the lease/ack loop, how to mint a scoped key, and explicit
   confirmation that firing 17TRACK's dashboard "WebHook test" button is safe.
+  That conversation was **offline**, so the message is queued for delivery on
+  reconnect rather than delivered.
 
 ## Phase 1 runtime log -- byte fidelity, proven on `bun run dev`
 
