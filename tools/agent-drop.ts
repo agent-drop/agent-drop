@@ -2102,7 +2102,7 @@ withHandshakeOptions(
 	.option("--methods <list>", "Comma-separated methods to accept", "POST")
 	.option("--max-body <bytes>", "Reject bodies over this size")
 	.option("--retention <days>", "Days to keep events", "120")
-	.option("--daily-cap <n>", "Max events per day")
+	.option("--daily-cap <n>", "Refuse with 429 past this many stored events in 24h")
 	.option("--expires <dur>", "Auto-expire the receiver, e.g. 30d (410 after)")
 	.option("--mirror", "Also write each accepted event into drops (off by default)")
 	.action(async (box, name, opts) => {
@@ -2356,7 +2356,7 @@ withHandshakeOptions(
 	.option("--methods <list>", "New comma-separated method list")
 	.option("--max-body <bytes>", "New body size cap")
 	.option("--retention <days>", "New retention in days")
-	.option("--daily-cap <n>", "New daily event cap")
+	.option("--daily-cap <n>", "New cap on stored events per rolling 24h (0 clears it)")
 	.option("--expires <dur>", "Expire the receiver after this long, e.g. 30d")
 	.option("--mirror", "Start writing accepted events into drops as well")
 	.option("--no-mirror", "Stop mirroring into drops")

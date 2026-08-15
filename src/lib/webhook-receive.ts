@@ -29,6 +29,7 @@ import {
 } from "./webhook-body";
 import { extractFields, type ExtractConfig } from "./webhook-extract";
 import { detectHandshake } from "./webhook-handshake";
+import { checkBurst, checkDailyCap } from "./webhook-throttle";
 import { bumpReceiverCounters, collectHeaders, collectQuery, storeEvent } from "./webhook-store";
 import { verifyWebhook } from "./webhook-verify";
 import type { Env, WebhookReceiver } from "../types";
@@ -155,6 +156,13 @@ async function receive(
 	const methodDenied = checkMethod(receiver, request.method);
 	if (methodDenied) return methodDenied;
 
+	// The burst shed goes here, before a byte is read: shedding load after doing
+	// the work is not shedding load. It covers everything aimed at a registered
+	// receiver, handshake-shaped requests included -- a flood of those fills the
+	// table just as fast.
+	const throttled = await checkBurst(env, receiver);
+	if (throttled) return throttled;
+
 	const maxBytes = receiver.max_body_bytes ?? 1_048_576;
 	const declared = Number(request.headers.get("Content-Length") ?? Number.NaN);
 	if (Number.isFinite(declared) && declared > maxBytes) return fail(413, "body too large");
@@ -238,6 +246,15 @@ async function receive(
 			.catch((err: unknown) => console.error("handshake event not stored:", err));
 		return handshake.response;
 	}
+
+	// The daily cap sits AFTER the handshake, deliberately. It is a bound on rows,
+	// and a handshake does not need one: phase 3 already established that a storage
+	// failure does not fail a handshake, because the answer is the whole product.
+	// Refusing a Zoom CRC over a cap would cost the operator their endpoint
+	// registration -- six consecutive failures and Zoom disables it -- to save one
+	// row. The burst limiter above is what stops a handshake flood.
+	const capped = await checkDailyCap(env, receiver, now);
+	if (capped) return capped;
 
 	// Verification reads `bytes` -- the same array that was hashed above, never the
 	// decoded text and never a re-encode of it. `verified` is three-valued: 1 pass,

@@ -20,6 +20,7 @@ export interface Env {
 	// rather than letting a throttle become an outage.
 	AUTH_RATE_LIMIT?: RateLimit;
 	UPLOAD_RATE_LIMIT?: RateLimit;
+	HOOK_RATE_LIMIT?: RateLimit;
 }
 
 export type QueueMessage = WebhookQueueMessage | RelayQueueMessage;

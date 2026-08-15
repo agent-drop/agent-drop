@@ -59,6 +59,7 @@ export function makeEnv(overrides: Partial<Env> = {}): TestEnv {
 		EMAIL: {} as Env["EMAIL"],
 		AUTH_RATE_LIMIT: allowAll(),
 		UPLOAD_RATE_LIMIT: allowAll(),
+		HOOK_RATE_LIMIT: allowAll(),
 		...overrides,
 	} as unknown as TestEnv;
 }
@@ -266,6 +267,7 @@ export interface SeedReceiver {
 	expiresAt?: number | null;
 	previousSlug?: string | null;
 	previousSlugExpiresAt?: number | null;
+	dailyCap?: number | null;
 }
 
 /** A receiver row, written straight in -- the CRUD API has its own tests. */
@@ -276,8 +278,8 @@ export async function seedReceiver(env: TestEnv, opts: SeedReceiver): Promise<st
 			id, inbox, slug, auth_mode, auth_config, handshake_mode, handshake_config, preset,
 			extract_config, allowed_methods, max_body_bytes, retention_days, response_status,
 			response_body, response_content_type, enabled, expires_at, previous_slug,
-			previous_slug_expires_at, created_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			previous_slug_expires_at, daily_cap, created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 	)
 		.bind(
 			id,
@@ -299,6 +301,7 @@ export async function seedReceiver(env: TestEnv, opts: SeedReceiver): Promise<st
 			opts.expiresAt ?? null,
 			opts.previousSlug ?? null,
 			opts.previousSlugExpiresAt ?? null,
+			opts.dailyCap ?? null,
 			Date.now(),
 		)
 		.run();

@@ -13,9 +13,10 @@ email (Email Sending). No origin server, no egress bill, scales to zero, deploys
 minutes under your own domain.
 
 ```
-email  ─┐
-upload ─┼─▶  {box}@your-domain  ─▶  [ D1 index + R2 blobs ]  ─▶  agent pulls via API
-api    ─┘                            rules: forward · webhook · relay
+email   ─┐
+upload  ─┼─▶  {box}@your-domain  ─▶  [ D1 index + R2 blobs ]  ─▶  agent pulls via API
+api     ─┤                            rules: forward · webhook · relay
+webhook ─┘   your-domain/h/{box}/{slug}  ─▶  lease · ack · replay
 ```
 
 ## Why you'd want this
@@ -25,8 +26,17 @@ api    ─┘                            rules: forward · webhook · relay
   `+addressing` (`box+topic@…`) sorts it for you.
 - **Agents can send email.** Real mail `From: {box}@your-domain` — attachments, inline
   images (`cid:`), threading, YAML templates. Your own SPF/DKIM, no SendGrid tax.
-- **Three ways in, one way out.** Email, a drag-drop web page at `your-domain/{box}`,
-  or a one-line `POST`. Everything lands in the same box, readable through one API.
+- **Four ways in, one way out.** Email, a drag-drop web page at `your-domain/{box}`,
+  a one-line `POST`, or a webhook receiver. The first three land in the same box,
+  readable through one API.
+- **Agents can receive webhooks.** Paste `your-domain/h/{box}/{slug}` into Stripe,
+  GitHub, Shopify, Slack, Zoom or Meta's console. Agent Drop answers their setup
+  handshake, verifies the signature (11 schemes, including the plain-SHA-256 kind
+  that is not HMAC), stores the bytes **unchanged**, and hands them to your agent
+  over a lease-based pull queue -- `queue-get`, work, `queue-remove`. A crashed
+  consumer's lease expires and the event is served again. Or relay it onward
+  byte-for-byte with `--payload-mode passthrough`, so your own service still sees
+  exactly what the provider sent, signature header included.
 - **A rules engine that reacts to drops.** Cascading pattern rules (`shop-*`,
   `*-invoices`) that **forward** email, fire **webhooks** (queue-delivered, exponential
   backoff, 24h retry), or run an **Apple-style email relay** — masked bidirectional
@@ -46,7 +56,7 @@ Every layer is Cloudflare — one platform, one `wrangler deploy`.
 | Inbound email | Cloudflare Email Routing (catch-all `*@your-domain` → Worker) |
 | Outbound email | Cloudflare Email Sending (`cloudflare:email` binding) — sends, forwards, relay |
 | Database | Cloudflare D1 (SQLite) — inbox index, keys, tokens, rules |
-| Blobs | Cloudflare R2 — attachments, raw emails, uploads, hosted sites |
+| Blobs | Cloudflare R2 — attachments, raw emails, uploads, hosted sites, webhook bodies |
 | Async | Cloudflare Queues — webhook + relay delivery with backoff |
 | Auth | API keys, drop tokens, admin key, Google OAuth (GIS) |
 | Frontend | Vite 8 + React 19 + Tailwind 4 (Tokyo Night theme) |
@@ -67,6 +77,15 @@ curl -X POST -H "Authorization: Bearer ad_..." -H "Content-Type: application/jso
 
 # …and the agent pulls the latest drop back out, files and all.
 curl -H "Authorization: Bearer ad_..." https://your-domain/api/inbox/research/latest
+```
+
+```bash
+# Point a provider at a URL you own, then let an agent drain the queue.
+drop hook-create research stripe-prod --auth stripe --secret whsec_...
+#   → https://your-domain/h/research/stripe-prod-k7f2q9   (paste into Stripe)
+
+drop queue-get research --limit 10 --lease 60 --json | jq        # lease, work…
+drop queue-remove research EVENT_ID                              # …then ack
 ```
 
 ## Deploy
@@ -115,7 +134,7 @@ cp .env.example .env
 ### 3 · Migrate the database + set secrets
 
 ```bash
-bunx wrangler d1 migrations apply agent-drop-db --remote   # 0001 … 0007
+bun run db:migrate     # 0001 … 0010, against the remote DB
 
 # Secrets — set once, stored on the Worker (never in the repo):
 bunx wrangler secret put ADMIN_API_KEY          # full-access admin key you choose
@@ -123,6 +142,11 @@ bunx wrangler secret put R2_ACCESS_KEY_ID       # from the R2 API token
 bunx wrangler secret put R2_SECRET_ACCESS_KEY
 bunx wrangler secret put GOOGLE_CLIENT_ID        # same value as .env (server-side verify)
 ```
+
+> Run the migrations **before** the deploy, and use `bun run db:migrate` rather than
+> a bare `wrangler d1 migrations apply` — the committed `wrangler.toml` carries
+> placeholder ids, so the bare form cannot find your database. The script renders
+> the real config first, exactly as `bun run deploy` does.
 
 ### 4 · Wire up email (Cloudflare dashboard)
 
@@ -157,6 +181,9 @@ drop send-email --drop lisa --to bob@x.com --subject Hi --body "Hello"
 drop host lisa marketing ./dist     # publish a static site
 drop rule-add "*" --forward "me@example.com" --scope email
 drop mask-create --prefix j         # create a relay mask
+drop hook-create lisa stripe-prod   # register a webhook receiver, print its URL
+drop queue-get lisa --limit 10      # lease webhook events off the queue
+drop queue-peek lisa                # …or read them without leasing anything
 drop --help                         # full command reference
 ```
 
@@ -176,6 +203,10 @@ curl -X POST -H "Authorization: Bearer ad_..." -H "Content-Type: application/jso
 curl -X POST -H "Authorization: Bearer ad_..." -H "Content-Type: application/json" \
   -d '{"to":["bob@example.com"],"subject":"Hi","text":"Hello"}' \
   https://your-domain/api/send/lisa
+
+# Lease webhook events off a box's queue (POST leases; GET peeks and changes nothing)
+curl -X POST -H "Authorization: Bearer ad_..." -H "Content-Type: application/json" \
+  -d '{"limit":10,"leaseSeconds":60}' https://your-domain/api/hooks/queue/lisa/get
 ```
 
 Run `drop --help` for the full command + endpoint reference (admin, agent, presigned
@@ -185,12 +216,13 @@ upload, drop-token, hosting).
 
 ```
 src/
-  index.ts            Worker entry (fetch + email + queue consumer)
+  index.ts            Worker entry (fetch + email + queue consumers + cron)
   email-handler.ts    Inbound email → D1 + R2 (quote stripping, relay detection)
-  api/                Route handlers (inbox, drop, send, host, keys, rules, masks, …)
-  lib/                auth, ses, hosting, rules, relay, google-auth, normalize, id
+  api/                Route handlers (inbox, drop, send, host, keys, rules, masks, hooks, …)
+  lib/                auth, hosting, rules, relay, google-auth, normalize, id,
+                      webhook-* (receive, verify, handshake, store, throttle), reapers
 web/                  Vite + React SPA (Landing, InboxView, DropZone, GoogleSignIn)
-migrations/           D1 schema (0001 … 0007)
+migrations/           D1 schema (0001 … 0010)
 scripts/deploy.ts     Deploy wrapper (renders wrangler.toml from .env)
 tools/agent-drop.ts   CLI
 wrangler.toml         Worker config (R2 / D1 / Queue bindings)

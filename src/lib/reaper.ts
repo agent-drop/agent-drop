@@ -1,5 +1,6 @@
 import type { Env } from "../types";
 import { resolveObjectKey } from "./drops";
+import { type EventReapSummary, reapExpiredEvents } from "./hook-reaper";
 
 /**
  * Reaper for drops stuck in `pending`.
@@ -96,7 +97,7 @@ export async function reapPendingDrops(env: Env, now: number = Date.now()): Prom
 	return summary;
 }
 
-/** The `scheduled` handler's body, kept out of src/index.ts so it is testable. */
+/** The stale-`pending` sweep plus its log line. */
 export async function runScheduled(env: Env, now: number = Date.now()): Promise<ReapSummary> {
 	const summary = await reapPendingDrops(env, now);
 	if (summary.scanned) {
@@ -106,4 +107,42 @@ export async function runScheduled(env: Env, now: number = Date.now()): Promise<
 		);
 	}
 	return summary;
+}
+
+export interface SweepSummary {
+	/** Null when that sweep threw; the error is logged, the other still ran. */
+	drops: ReapSummary | null;
+	events: EventReapSummary | null;
+}
+
+/**
+ * Everything the hourly cron does, kept out of src/index.ts so it is testable.
+ *
+ * Two sweeps that share nothing: stale `pending` drops, and webhook events past
+ * their retention. They run independently and are settled rather than chained,
+ * because a D1 or R2 hiccup in one is no reason to skip the other -- the failure
+ * mode that buys is a bucket that quietly stops expiring because an unrelated
+ * upload check threw.
+ */
+export async function runSweeps(env: Env, now: number = Date.now()): Promise<SweepSummary> {
+	const [drops, events] = await Promise.allSettled([
+		runScheduled(env, now),
+		reapExpiredEvents(env, now),
+	]);
+
+	if (drops.status === "rejected")
+		console.error("reaper: pending-drop sweep failed:", drops.reason);
+	if (events.status === "rejected") {
+		console.error("reaper: webhook-event sweep failed:", events.reason);
+	} else if (events.value.scanned) {
+		console.log(
+			`hook reaper: scanned ${events.value.scanned} expired events -- ` +
+				`deleted ${events.value.deleted}, bodies ${events.value.bodies}, kept ${events.value.kept}`,
+		);
+	}
+
+	return {
+		drops: drops.status === "fulfilled" ? drops.value : null,
+		events: events.status === "fulfilled" ? events.value : null,
+	};
 }

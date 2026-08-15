@@ -4,7 +4,7 @@ import { processWebhookBatch } from "./lib/rules";
 import { processRelayMessage } from "./lib/relay";
 import { serveHostedSite, HOST_PREFIX } from "./lib/hosting";
 import { processR2EventBatch, R2_EVENT_QUEUE, type R2EventNotification } from "./lib/r2-events";
-import { runScheduled } from "./lib/reaper";
+import { runSweeps } from "./lib/reaper";
 import { HOOK_PREFIX, serveWebhook } from "./lib/webhook-receive";
 import type { Env, QueueMessage } from "./types";
 
@@ -43,15 +43,16 @@ export default {
 		}
 	},
 
-	// Hourly sweep for drops stuck in `pending` -- presigns that were never
-	// spent, and uploads whose R2 notification was lost. See src/lib/reaper.ts.
+	// The hourly cron: drops stuck in `pending` (presigns never spent, uploads
+	// whose R2 notification was lost) and webhook events past their retention.
+	// Both live in src/lib/reaper.ts; neither can cancel the other.
 	async scheduled(
 		_controller: ScheduledController,
 		env: Env,
 		ctx: ExecutionContext,
 	): Promise<void> {
 		ctx.waitUntil(
-			runScheduled(env).then(
+			runSweeps(env).then(
 				() => {},
 				(err: unknown) => {
 					console.error("Reaper error:", err);

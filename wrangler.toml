@@ -76,6 +76,15 @@ name = "UPLOAD_RATE_LIMIT"
 namespace_id = "1002"
 simple = { limit = 60, period = 60 }
 
+# Burst shed on the public webhook receivers, keyed by receiver id. Generous on
+# purpose: a provider replaying a backlog is normal traffic, and the real bound
+# on a receiver is its `daily_cap` column, which is counted in D1 and cannot fail
+# open the way this can.
+[[ratelimits]]
+name = "HOOK_RATE_LIMIT"
+namespace_id = "1003"
+simple = { limit = 300, period = 60 }
+
 # Hourly reaper for drops stuck in `pending` (src/lib/reaper.ts). Offset off the
 # hour so it does not queue behind everyone else's :00 cron.
 [triggers]
