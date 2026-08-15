@@ -105,14 +105,15 @@ list API returns `secret_set: true`, never the value. Rotation is
 | `subpath` | TEXT | anything after `/h/{box}/{slug}` |
 | `method` | TEXT NOT NULL | |
 | `event_type` | TEXT | extracted per §4 |
-| `dedupe_key` | TEXT | provider's own message id |
-| `headers` | TEXT | JSON, signature/auth headers replaced with `<redacted>` |
+| `routing_key` | TEXT | correlation handle, extracted per §4 |
+| `dedupe_key` | TEXT | provider's message id, or the body hash -- see below |
+| `headers` | TEXT | JSON, **complete**; only true credentials redacted (§4) |
 | `query` | TEXT | JSON |
 | `content_type` | TEXT | |
-| `body_text` | TEXT | inline when <= 64 KiB |
-| `body_r2_key` | TEXT | else `hooks/{box}/{slug}/{id}` |
+| `body_text` | TEXT | inline when <= 64 KiB **and** the body is valid UTF-8 |
+| `body_r2_key` | TEXT | else `hooks/{box}/{slug}/{id}` -- raw bytes, unmodified |
 | `body_bytes` | INTEGER | |
-| `body_sha256` | TEXT | |
+| `body_sha256` | TEXT | over the raw bytes, before any decode |
 | `verified` | INTEGER | 1 pass, 0 fail, NULL not applicable |
 | `remote_ip` / `country` / `user_agent` | TEXT | from CF headers |
 | `status` | TEXT NOT NULL DEFAULT 'queued' | `queued`\|`leased`\|`acked`\|`rejected`\|`handshake` |
@@ -126,6 +127,7 @@ list API returns `secret_set: true`, never the value. Rotation is
 ```sql
 CREATE INDEX idx_hook_events_pull    ON webhook_events(inbox, status, created_at);
 CREATE INDEX idx_hook_events_recv    ON webhook_events(receiver_id, created_at DESC);
+CREATE INDEX idx_hook_events_route   ON webhook_events(receiver_id, routing_key, created_at DESC);
 CREATE INDEX idx_hook_events_expiry  ON webhook_events(expires_at);
 CREATE UNIQUE INDEX idx_hook_events_dedupe
     ON webhook_events(receiver_id, dedupe_key) WHERE dedupe_key IS NOT NULL;
@@ -135,6 +137,21 @@ CREATE UNIQUE INDEX idx_hook_events_dedupe
 retries on a slow response, and a retry carries the same message id. Without it
 one flaky 3-second Zoom response becomes four copies in the agent's queue. On
 conflict the endpoint answers `200 {"duplicate": true}` and stores nothing.
+
+**When the provider gives you no message id**, `dedupe_key` is NULL and the
+unique index does nothing -- which is correct by default, because two byte-
+identical bodies can be two real events. Per-receiver `--dedupe body-hash`
+opts into `dedupe_key = body_sha256` scoped to a window (default 15 min, must
+exceed the provider's retry spacing: 17TRACK retries at 600s/1800s/3600s, so
+that receiver wants `--dedupe-window 65m`). Outside the window the same bytes
+store again. Consumers must still tolerate duplicates -- this narrows the
+window, it does not close it.
+
+**`routing_key` is the correlation handle**, extracted by configured JSON path
+and indexed, so `hook-events --key <value>` filters server-side. For a provider
+that echoes a caller-supplied tag (17TRACK's `data.tag`, a parcel number in
+`data.number`) this is the difference between filing events per-entity and
+pulling every body to find the three you wanted.
 
 ---
 
@@ -146,22 +163,47 @@ Order matters and is not negotiable:
    hint about which of the two it was.
 2. Method check against `allowed_methods` -> `405`.
 3. `Content-Length` vs `max_body_bytes` -> `413` before reading a byte.
-4. **Read the raw body once, as text.** Everything downstream uses this exact
-   string. HMAC over a re-serialized JSON object is the classic way to ship a
-   verifier that rejects every real request.
+4. **Read the raw body once, as bytes** (`arrayBuffer()`), and hash those bytes.
+   Decode to text only for storage convenience, and only when the bytes are
+   valid UTF-8; otherwise the body lives in R2 unmodified and `body_text` is
+   NULL. Nothing downstream ever re-serializes. Signing a re-serialized JSON
+   object is the classic way to ship a verifier that rejects every real
+   request -- key order, whitespace and unicode escaping all shift, and once
+   you've stored the re-serialized form the evidence is gone permanently.
 5. Handshake detection (§6). If it matches, answer the challenge, store the
    event with `status='handshake'`, return. Never falls through to verification.
-6. Verify (§5). Fail -> `401`, store with `verified=0, status='rejected'`, and
-   burn a token from `AUTH_RATE_LIMIT` -- a bad signature *is* a credential
-   failure.
-7. Extract `event_type` and `dedupe_key` via the receiver's `auth_config`
+6. Verify (§5), **if the receiver asked for it**. `auth_mode: none` is a
+   first-class answer, not a misconfiguration -- see the note below. Fail ->
+   `401`, store with `verified=0, status='rejected'`, burn a token from
+   `AUTH_RATE_LIMIT`.
+7. Extract `event_type`, `routing_key` and `dedupe_key` per the receiver's
    preset defaults (below), overridable per receiver.
-8. Persist. Body inline if <= 64 KiB, else `BUCKET.put("hooks/...")` first.
+8. Persist. Body inline if <= 64 KiB and UTF-8, else `BUCKET.put("hooks/...")`
+   first.
 9. **Respond immediately.** Rule firing goes on `ctx.waitUntil`. Zoom allows 3
-   seconds total; anything synchronous after the insert is a bug waiting for a
-   slow day.
+   seconds; 17TRACK turns any non-200 into three more copies over 100 minutes.
+   Anything synchronous after the insert is a bug waiting for a slow day.
 
-### `event_type` / `dedupe_key` extraction defaults
+**An unparseable or unrecognised body is a successful receive**, not an error.
+Unknown event types, dashboard "test" pings and malformed JSON all store and
+return 200. The receiver's job is to preserve, not to understand.
+
+### Header storage: preserve, don't curate
+
+Store the **complete** header map. An allowlist cannot work -- the signature is
+`sign` for 17TRACK, `X-Hub-Signature-256` for GitHub, `Stripe-Signature` for
+Stripe, and whatever the next provider invents.
+
+Redaction is therefore narrowed to headers that are **credentials in their own
+right**: `Authorization`, `Cookie`, `Proxy-Authorization`, and any header the
+receiver's own `auth_config` names as a shared secret (`bearer`/`basic`/
+`header` modes). Signature headers are **kept verbatim** -- an HMAC or digest
+proves a specific body came from the signer and is worthless against any other
+request, and a consumer doing its own verification needs it. (Earlier draft
+redacted these. That was wrong: it would have made consumer-side verification
+impossible, which is the exact thing a faithful receiver exists to enable.)
+
+### `event_type` / `routing_key` / `dedupe_key` extraction defaults
 
 | Preset | `event_type` | `dedupe_key` |
 |---|---|---|
@@ -170,10 +212,15 @@ Order matters and is not negotiable:
 | `standard`/`svix` | JSON `$.type` | header `webhook-id` |
 | `slack` | JSON `$.event.type` | header `X-Slack-Request-Timestamp` + body hash |
 | `shopify` | header `X-Shopify-Topic` | header `X-Shopify-Webhook-Id` |
-| generic | configurable JSON path | configurable header/path |
+| generic | configurable JSON path | configurable header/path, or `body-hash` |
+
+`routing_key` has no preset -- it is always a configured path, because only the
+operator knows which field correlates (`data.tag`, `data.number`,
+`$.data.object.customer`).
 
 A tiny dotted-path reader over the parsed body -- not a JSONPath dependency.
-Parse failures are non-fatal: the event still stores, `event_type` is NULL.
+Parse failures are non-fatal: the event still stores, the extracted fields are
+NULL.
 
 ---
 
@@ -190,7 +237,8 @@ All comparisons via `constantTimeEqual`, which today is private in
 | `stripe` | `Stripe-Signature` (`t=<ts>,v1=<hex>`) | `{t}.{body}` | hex | 5 min |
 | `slack` | `X-Slack-Signature` (`v0=<hex>`) + `X-Slack-Request-Timestamp` | `v0:{ts}:{body}` | hex | 5 min |
 | `shopify` | `X-Shopify-Hmac-Sha256` | `{body}` | base64 | none |
-| `hmac` | configurable | template over `{body}` `{ts}` `{id}` `{method}` `{path}` `{url}` | hex or base64, optional `sha256=` prefix | configurable |
+| `hmac` | configurable | template over `{body}` `{ts}` `{id}` `{method}` `{path}` `{url}` `{secret}` | hex or base64, optional `sha256=` prefix | configurable |
+| `digest` | configurable | plain `SHA-256(template)`, **not** HMAC -- e.g. 17TRACK's `sign` = `SHA256_hex({body}/{secret})` | hex or base64 | configurable |
 | `bearer` | `Authorization: Bearer <t>` | -- | -- | -- |
 | `basic` | `Authorization: Basic ...` | -- | -- | -- |
 | `header` | any header equals a value | -- | -- | -- |
@@ -200,9 +248,28 @@ The `standard` row is [Standard Webhooks](https://github.com/standard-webhooks/s
 which is what Svix and a growing pile of providers emit -- worth having as the
 default recommendation for anything new.
 
+The `digest` row exists because a real family of providers does **not** use
+HMAC -- they concatenate the secret into the string and take a plain SHA-256.
+It is weaker (length-extension applies, though not exploitably here), but
+refusing to support it just means those providers can't be verified at all.
+
 Signature list handling: `standard` and `stripe` both send **multiple**
 signatures during a secret rotation. Accept if *any* matches. A verifier that
 only reads the first one breaks every rotation.
+
+### Verification is optional, preservation is not
+
+`auth_mode: none` is a supported end state, not a half-configured one. A
+consumer that would rather hold its own secret and verify the bytes itself
+gets exactly that, provided §4's guarantees hold: raw bytes preserved, full
+header map stored, signature headers unredacted. That consumer never has to
+trust agent-drop with the provider's API key.
+
+Built-in verification earns its keep for the presets above -- it rejects
+garbage at the edge instead of filling the queue with it, and it means an
+agent pulling events doesn't need crypto at all. Offer both; default to
+`none` with a loud warning (§11) rather than to a scheme the operator hasn't
+chosen.
 
 ---
 
@@ -233,9 +300,10 @@ GET    /api/hooks/receivers            list all (admin)
 POST   /api/hooks/receivers            create
 GET    /api/hooks/receivers/:box       list for a box
 PATCH  /api/hooks/receivers/:id        update / enable / disable / rotate secret
+POST   /api/hooks/receivers/:id/rotate rotate the SLUG, keep the row + history
 DELETE /api/hooks/receivers/:id        delete (purges its events + R2 bodies)
 
-GET    /api/hooks/events/:box          list (?receiver= ?status= ?since= ?limit=)
+GET    /api/hooks/events/:box          list (?receiver= ?status= ?key= ?since= ?limit=)
 GET    /api/hooks/events/:box/:id      one event, full body inlined
 GET    /api/hooks/events/:box/:id/body raw bytes, original content-type
 POST   /api/hooks/pull/:box            lease N events and return them
@@ -274,6 +342,26 @@ pull collapses it to at-most-once for agents that don't want the bookkeeping.
 
 Ack marks `acked_at` and keeps the row until `expires_at` -- audit and replay
 both need it. `--delete` on ack hard-deletes (and drops the R2 body).
+
+### Cursors, and what order means
+
+`id` is a ULID, so `?since=<id>` is a monotonic **arrival** cursor and needs no
+extra column. It is arrival order and nothing more: providers state outright
+that delivery order is not guaranteed (17TRACK does), so a consumer that cares
+about event order must sort by the provider's own timestamp inside the body.
+The API will not pretend otherwise.
+
+Note that the lease queue makes the cursor optional: `pull` -> work -> `ack`
+holds no client-side state at all, which is strictly better than a cursor for
+a stateless consumer. `?since=` stays for read-only browsing and replay.
+
+### Slug rotation
+
+Because the URL is the credential for a whole class of providers, rotating it
+must not cost history. `POST /receivers/:id/rotate` issues a new slug on the
+same receiver row; events reference `receiver_id`, so everything already
+stored survives. Optional `--grace <duration>` keeps the old slug answering
+for a window while you update the provider's dashboard.
 
 ---
 
@@ -327,9 +415,10 @@ drop hook-create lisa stripe-prod --auth stripe --secret whsec_...
 drop hook-create lisa meta --handshake meta --handshake-secret TOKEN
 drop hook-url lisa stripe-prod                # the URL to paste into the provider
 drop hook-update ID --disable | --enable | --secret ... | --retention 90
+drop hook-rotate ID [--grace 24h]             # new slug, same history
 drop hook-remove ID
 
-drop hook-events lisa [--receiver stripe-prod] [--status queued] [--limit 20]
+drop hook-events lisa [--receiver x] [--status queued] [--key TAG] [--since ID] [--limit 20]
 drop hook-pull lisa [--receiver x] [--limit 10] [--lease 60] [--ack] [--json]
 drop hook-ack ID...  [--delete]
 drop hook-nack ID...
@@ -357,10 +446,14 @@ into `jq`.
   enforced in D1 backs it up, because a fail-open throttle in front of a table
   that grows forever is not enough on its own.
 - No CORS headers. These are server-to-server.
-- Signature headers are redacted before the headers JSON is stored. Storing a
-  valid Stripe signature next to the body it signs hands a replay to anyone who
-  can read the row.
+- Only true credential headers are redacted (`Authorization`, `Cookie`,
+  `Proxy-Authorization`, plus whatever `auth_config` names as a shared secret).
+  Signature headers are stored verbatim on purpose -- see §4.
 - Secrets are plaintext in D1, admin-read-only, never returned by any list API.
+- Slug entropy: the default random suffix is 6 chars from a 32-char alphabet
+  (~30 bits). That is fine behind the per-receiver rate limit, which is what
+  actually stops enumeration; raise it with `--slug-entropy` if a receiver is
+  the sole credential for something that matters.
 
 ---
 
@@ -394,7 +487,40 @@ Modified: `src/index.ts` (the `/h/` branch), `src/api/router.ts`,
 
 ---
 
-## 13. Open decisions
+## 13. First consumer: `track-parcel` / 17TRACK
+
+The `track-parcel` project wants to consume 17TRACK push notifications through
+this instead of running its own daemon. It is a good archetype to build
+against, because it is the *hostile* case rather than the friendly one:
+
+| 17TRACK does | Which forces |
+|---|---|
+| One webhook URL per account, set in their dashboard; no custom headers, no query params | The URL is the credential -- slug entropy (§11) and rotation (§7) are not optional |
+| `sign` = `SHA256_hex(raw_body + "/" + api_key)` | The `digest` preset (§5); plain HMAC would not cover it |
+| Non-200 -> retry 3x at 600s / 1800s / 3600s | Persist-and-respond, zero synchronous work (§4); `--dedupe-window 65m` (§3) |
+| Order explicitly not guaranteed | Arrival cursor only, no ordering promise (§7) |
+| Echoes a caller-supplied `tag` in every push | `routing_key` extraction on `data.tag` (§3) |
+| A dashboard "test" button firing an unspecified ping | Unparseable/unknown bodies must store and return 200 (§4) |
+
+Its stated preference is to hold its own API key and verify the bytes itself,
+with agent-drop doing nothing but preserve faithfully. That works today under
+`auth_mode: none` -- and it is precisely why the header-redaction policy had to
+change. Configuring `digest` instead is a later, optional upgrade.
+
+Consumption is `hook-pull` -> work -> `hook-ack`, which needs no cursor state
+at all. Their sketch asked for `drop inbox <name> --format json` + a cursor;
+that shape only exists if decision 2 below lands on mirroring. The queue verbs
+give the same access with better crash semantics, so mirroring is a
+convenience, not a requirement.
+
+*(Requirements relayed by the `track-parcel` conversation and verified against
+this plan; the two corrections above came from it. The 17TRACK specifics are
+its claims, not something I checked against 17TRACK's docs myself -- worth a
+five-minute confirmation before Phase 2 hardcodes the `digest` template.)*
+
+---
+
+## 14. Open decisions
 
 1. **URL shape** -- `/h/{box}/{slug}` (recommended) vs `/api/hook/{box}/{slug}`
    (zero wrangler config, muddies the router's tier invariant).
