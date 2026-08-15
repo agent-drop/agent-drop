@@ -10,6 +10,8 @@ import { Command } from "commander";
 import { formatOutput, addCommonOptions, createLogger } from "./lib/cli-utils";
 import { signRequest } from "./lib/hook-sign";
 import { emitEvents } from "./lib/queue-emit";
+import { previewRule } from "./lib/rule-preview";
+import { replayableHeaders } from "../src/lib/webhook-headers";
 import chalk from "chalk";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -1373,7 +1375,10 @@ program
 				const scopes = chalk.dim(r.scopes.padEnd(9));
 				const target = r.target;
 				const enabled = r.enabled ? "" : chalk.red(" [disabled]");
-				console.log(`  ${pattern} ${type} ${scopes} ${target}${enabled}`);
+				// Only shown when it is not the default -- a column of "envelope" would
+				// be noise on every line that has nothing to say.
+				const mode = r.payload_mode === "passthrough" ? chalk.dim(" [passthrough]") : "";
+				console.log(`  ${pattern} ${type} ${scopes} ${target}${mode}${enabled}`);
 			}
 			console.log("");
 		} catch (err: any) {
@@ -1393,9 +1398,14 @@ program
 		[],
 	)
 	.option("--webhook <url>", "POST webhook to this URL on drops")
-	.option("--scope <scopes>", "Comma-separated: email,web,api,all", "all")
+	.option("--scope <scopes>", "Comma-separated: email,web,api,hook,all", "all")
 	.option("--header <kv...>", "Webhook headers as Key:Value pairs")
 	.option("--priority <n>", "Priority (higher fires first)", "0")
+	.option(
+		"--payload-mode <mode>",
+		"envelope (our JSON wrapper) or passthrough (the provider's original bytes and headers, hook events only)",
+		"envelope",
+	)
 	.action(async (pattern, opts) => {
 		try {
 			const forwards: string[] = (opts.forward || [])
@@ -1419,6 +1429,11 @@ program
 				}
 			}
 
+			if (opts.payloadMode !== "envelope" && opts.payloadMode !== "passthrough") {
+				console.error(chalk.red("--payload-mode must be 'envelope' or 'passthrough'"));
+				process.exit(1);
+			}
+
 			await api("/api/rules", {
 				method: "POST",
 				body: {
@@ -1428,13 +1443,23 @@ program
 					target,
 					headers,
 					priority: parseInt(opts.priority, 10),
+					payloadMode: opts.payloadMode,
 				},
 				admin: true,
 			});
 
-			console.log(
-				chalk.green(`\n  Rule created: ${chalk.cyan(pattern)} -> ${type} -> ${target}\n`),
-			);
+			console.log(chalk.green(`\n  Rule created: ${chalk.cyan(pattern)} -> ${type} -> ${target}`));
+			if (opts.payloadMode === "passthrough") {
+				console.log(
+					chalk.dim("  passthrough: the provider's original bytes and headers, verbatim."),
+				);
+				console.log(
+					chalk.dim(
+						"  Applies to hook events; a drop has no original request and gets the envelope.",
+					),
+				);
+			}
+			console.log("");
 		} catch (err: any) {
 			console.error(chalk.red(err.message));
 			process.exit(3);
@@ -1476,12 +1501,14 @@ program
 	.option("--scope <scopes>", "New scopes (comma-separated)")
 	.option("--priority <n>", "New priority")
 	.option("--header <kv...>", "New webhook headers as Key:Value pairs")
+	.option("--payload-mode <mode>", "envelope or passthrough")
 	.action(async (id, opts) => {
 		try {
 			const body: Record<string, unknown> = {};
 			if (opts.target) body.target = opts.target;
 			if (opts.scope) body.scopes = opts.scope;
 			if (opts.priority) body.priority = parseInt(opts.priority, 10);
+			if (opts.payloadMode) body.payloadMode = opts.payloadMode;
 			if (opts.header) {
 				const headers: Record<string, string> = {};
 				for (const h of opts.header) {
@@ -1492,7 +1519,9 @@ program
 			}
 			if (Object.keys(body).length === 0) {
 				console.error(
-					chalk.red("Nothing to update. Use --target, --scope, --priority, or --header"),
+					chalk.red(
+						"Nothing to update. Use --target, --scope, --priority, --header or --payload-mode",
+					),
 				);
 				process.exit(1);
 			}
@@ -1522,44 +1551,14 @@ program
 program
 	.command("rule-test <inbox>")
 	.description("Test which rules would fire for an inbox (dry run)")
-	.option("--channel <ch>", "Channel to simulate: email, web, api", "email")
+	.option("--channel <ch>", "Channel to simulate: email, web, api, hook", "email")
+	.option("--slug <slug>", "Receiver slug to simulate, for {slug} on --channel hook")
+	.option("--event-type <type>", "Event type to simulate, for {event_type}")
+	.option("--routing-key <key>", "Routing key to simulate, for {routing_key}")
 	.action(async (inbox, opts) => {
 		try {
 			const data = await api("/api/rules", { admin: true });
 			const rules = data.rules || [];
-
-			// Simulate pattern matching locally (same logic as server)
-			function matchPattern(
-				pattern: string,
-				name: string,
-			): { match: boolean; captures: Record<string, string> } {
-				if (pattern === "*") return { match: true, captures: { name } };
-				if (pattern === name) return { match: true, captures: {} };
-				if (pattern.endsWith("-*")) {
-					const prefix = pattern.slice(0, -2);
-					if (name.startsWith(`${prefix}-`))
-						return { match: true, captures: { name: name.slice(prefix.length + 1) } };
-				}
-				if (pattern.startsWith("*-")) {
-					const suffix = pattern.slice(2);
-					if (name.endsWith(`-${suffix}`))
-						return { match: true, captures: { name: name.slice(0, -(suffix.length + 1)) } };
-				}
-				const starIdx = pattern.indexOf("*");
-				if (starIdx > 0 && starIdx < pattern.length - 1) {
-					const prefix = pattern.slice(0, starIdx);
-					const suffix = pattern.slice(starIdx + 1);
-					if (name.startsWith(prefix) && name.endsWith(suffix)) {
-						const captured = name.slice(prefix.length, name.length - suffix.length);
-						if (captured.length > 0) return { match: true, captures: { name: captured } };
-					}
-				}
-				return { match: false, captures: {} };
-			}
-
-			function substitute(tpl: string, vars: Record<string, string>): string {
-				return tpl.replace(/\{(\w+)\}/g, (_, k) => vars[k] || "");
-			}
 
 			// Strip dots for normalization (same as server)
 			const normalized = inbox
@@ -1572,48 +1571,42 @@ program
 				chalk.bold(`\n  Rule test: ${chalk.cyan(normalized)} (channel: ${opts.channel})\n`),
 			);
 
+			const hook = opts.channel === "hook";
 			const vars: Record<string, string> = {
 				inbox: normalized,
 				topic: "",
-				from: "test@example.com",
-				subject: "(test)",
+				// A hook event has no sender and no subject; substituting a plausible
+				// email into a hook dry run would show a target that never resolves.
+				from: hook ? "" : "test@example.com",
+				subject: hook ? "" : "(test)",
 				drop_id: "test-dry-run",
 				channel: opts.channel,
+				slug: opts.slug || (hook ? "test-receiver" : ""),
+				event_type: opts.eventType || (hook ? "test.event" : ""),
+				routing_key: opts.routingKey || "",
 			};
 
 			let matchCount = 0;
 			for (const rule of rules) {
-				const { match, captures } = matchPattern(rule.pattern, normalized);
-				if (!match) continue;
+				const verdict = previewRule(rule, normalized, opts.channel, vars);
+				if (!verdict) continue;
 
-				const scopes = rule.scopes.split(",").map((s: string) => s.trim());
-				if (!scopes.includes(opts.channel) && !scopes.includes("all")) {
-					console.log(
-						chalk.dim(
-							`  ~ ${rule.pattern} -> pattern matches but scope "${rule.scopes}" excludes "${opts.channel}"`,
-						),
-					);
-					continue;
-				}
-
-				if (!rule.enabled) {
-					console.log(chalk.dim(`  ~ ${rule.pattern} -> matches but DISABLED`));
+				if (!verdict.fires) {
+					console.log(chalk.dim(`  ~ ${rule.pattern} -> pattern matches but ${verdict.reason}`));
 					continue;
 				}
 
 				matchCount++;
-				const allVars = { ...vars, ...captures };
-				const resolved = substitute(rule.target, allVars);
-
 				const typeColor = rule.type === "forward" ? chalk.yellow : chalk.magenta;
+				const mode = rule.payload_mode === "passthrough" ? chalk.dim(" [passthrough]") : "";
 				console.log(
-					`  ${chalk.green(">")} ${chalk.cyan(rule.pattern)} -> ${typeColor(rule.type)} -> ${resolved}`,
+					`  ${chalk.green(">")} ${chalk.cyan(rule.pattern)} -> ${typeColor(rule.type)} -> ${verdict.target}${mode}`,
 				);
 
-				if (Object.keys(captures).length > 0) {
+				if (Object.keys(verdict.captures).length > 0) {
 					console.log(
 						chalk.dim(
-							`    captures: ${Object.entries(captures)
+							`    captures: ${Object.entries(verdict.captures)
 								.map(([k, v]) => `{${k}}=${v}`)
 								.join(", ")}`,
 						),
@@ -2111,6 +2104,7 @@ withHandshakeOptions(
 	.option("--retention <days>", "Days to keep events", "120")
 	.option("--daily-cap <n>", "Max events per day")
 	.option("--expires <dur>", "Auto-expire the receiver, e.g. 30d (410 after)")
+	.option("--mirror", "Also write each accepted event into drops (off by default)")
 	.action(async (box, name, opts) => {
 		try {
 			const body: Record<string, unknown> = {
@@ -2129,6 +2123,7 @@ withHandshakeOptions(
 				retentionDays: parseInt(opts.retention, 10),
 				dailyCap: opts.dailyCap ? parseInt(opts.dailyCap, 10) : undefined,
 				expiresAt: opts.expires ? Date.now() + parseDuration(opts.expires) : undefined,
+				mirrorToDrops: opts.mirror ? true : undefined,
 			};
 			const hook = await api("/api/hooks/receivers", { method: "POST", body, admin: true });
 
@@ -2142,6 +2137,9 @@ withHandshakeOptions(
 				// rather than letting it look like the flag was ignored.
 				const widened = hook.handshake_mode === "meta" ? ", GET added for it" : "";
 				console.log(chalk.dim(`  handshake ${hook.handshake_mode}${widened}`));
+			}
+			if (hook.mirror_to_drops) {
+				console.log(chalk.dim("  mirrored into drops as well as the queue"));
 			}
 			if (!hook.secret_set) {
 				// The URL is the credential when nothing is signed. Say so out loud
@@ -2360,6 +2358,8 @@ withHandshakeOptions(
 	.option("--retention <days>", "New retention in days")
 	.option("--daily-cap <n>", "New daily event cap")
 	.option("--expires <dur>", "Expire the receiver after this long, e.g. 30d")
+	.option("--mirror", "Start writing accepted events into drops as well")
+	.option("--no-mirror", "Stop mirroring into drops")
 	.action(async (ref, opts) => {
 		try {
 			const body: Record<string, unknown> = {};
@@ -2384,6 +2384,9 @@ withHandshakeOptions(
 			if (opts.retention) body.retentionDays = parseInt(opts.retention, 10);
 			if (opts.dailyCap) body.dailyCap = parseInt(opts.dailyCap, 10);
 			if (opts.expires) body.expiresAt = Date.now() + parseDuration(opts.expires);
+			// Undefined when neither --mirror nor --no-mirror was passed, so an
+			// unrelated patch never silently flips it either way.
+			if (opts.mirror !== undefined) body.mirrorToDrops = opts.mirror;
 			const extract = extractFromOpts(opts);
 			if (extract) body.extract = extract;
 			if (Object.keys(body).length === 0) {
@@ -2985,7 +2988,9 @@ program
 
 program
 	.command("queue-replay <box> [eventId]")
-	.description("Re-deliver a stored event to an arbitrary URL, bytes and headers as they arrived")
+	.description(
+		"CLIENT-side re-delivery: POST a stored event to a URL from here, once. No retries, no delivery log -- use hook-replay for those",
+	)
 	.requiredOption("--to <url>", "Where to POST it")
 	.option("--header <kv...>", "Extra headers as Key:Value (override the stored ones)")
 	.action(async (box, eventId, opts) => {
@@ -2999,15 +3004,9 @@ program
 			);
 			const bytes = new Uint8Array(await raw.arrayBuffer());
 
-			const headers: Record<string, string> = {};
-			for (const [key, value] of Object.entries(event.headers || {})) {
-				// A redacted credential is a placeholder, not a header -- sending the
-				// literal string would be worse than sending nothing. Hop-by-hop headers
-				// describe the connection that is gone, not this one.
-				if (value === "<redacted>") continue;
-				if (["host", "content-length", "connection", "transfer-encoding"].includes(key)) continue;
-				headers[key] = String(value);
-			}
+			// The same filter the server's `passthrough` mode uses, so a client replay
+			// and a queued one put the same request on the wire.
+			const headers = replayableHeaders(event.headers || null);
 			Object.assign(headers, headerPairs(opts.header));
 
 			console.log(chalk.dim(`\n  POST ${opts.to}  ${fmtBytes(bytes.byteLength)}`));
@@ -3016,6 +3015,54 @@ program
 			const ok = res.status >= 200 && res.status < 300;
 			console.log(`  ${ok ? chalk.green(res.status) : chalk.red(res.status)} ${text}\n`);
 			if (!ok) process.exit(4);
+		} catch (err: any) {
+			console.error(chalk.red(err.message));
+			process.exit(3);
+		}
+	});
+
+program
+	.command("hook-replay <box> [eventId]")
+	.description(
+		"SERVER-side re-delivery: queue a stored event through the retry machinery and delivery log. Use queue-replay for a one-shot POST from here",
+	)
+	.option("--to <url>", "Deliver to this URL. Omit to re-fire whatever rules match")
+	.option("--mode <mode>", "envelope (default) or passthrough (the provider's original request)")
+	.option("--header <kv...>", "Extra headers as Key:Value (override the stored ones)")
+	.action(async (box, eventId, opts) => {
+		try {
+			const ref = splitEventRef(box, eventId);
+			const body: Record<string, unknown> = {};
+			if (opts.to) body.to = opts.to;
+			if (opts.mode) body.mode = opts.mode;
+			const extra = headerPairs(opts.header);
+			if (Object.keys(extra).length) body.headers = extra;
+
+			const res = await api(
+				`/api/hooks/queue/${encodeURIComponent(ref.box)}/${encodeURIComponent(ref.id)}/replay`,
+				{ method: "POST", body },
+			);
+
+			if (res.mode === "rules") {
+				const fired = res.deliveries || [];
+				console.log(chalk.green(`\n  Replayed ${res.replayed} through the rules engine`));
+				if (!fired.length) {
+					console.log(chalk.dim("  No rule matched -- nothing was queued.\n"));
+					return;
+				}
+				for (const d of fired) {
+					const color = d.status === "failed" ? chalk.red : chalk.dim;
+					console.log(`  ${color(padRight(d.status, 9))} ${d.target}`);
+				}
+				console.log(
+					chalk.dim("\n  Watch them with: drop deliveries --drop " + res.replayed + "\n"),
+				);
+				return;
+			}
+
+			console.log(chalk.green(`\n  Queued ${res.replayed} -> ${res.target}`));
+			console.log(chalk.dim(`  mode ${res.mode}  delivery ${res.delivery}`));
+			console.log(chalk.dim(`  Retries and status: drop deliveries --drop ${res.replayed}\n`));
 		} catch (err: any) {
 			console.error(chalk.red(err.message));
 			process.exit(3);

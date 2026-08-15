@@ -13,6 +13,7 @@
  * read another box's event.
  */
 
+import { loadStoredBody } from "../lib/webhook-load";
 import type { Env, WebhookEvent } from "../types";
 
 const MAX_LIMIT = 200;
@@ -170,23 +171,25 @@ export async function handleQueueOne(env: Env, inbox: string, id: string): Promi
  * content-type. This is the endpoint the byte-fidelity promise is made to: a
  * consumer holding the provider's secret verifies its signature against what
  * comes back from here.
+ *
+ * The inline-vs-R2 fork is `loadStoredBody`'s, not this handler's -- onward
+ * delivery reads the same bodies back and there is no version of "byte
+ * identical" that survives two implementations of it.
  */
 export async function handleQueueBody(env: Env, inbox: string, id: string): Promise<Response> {
 	const row = await loadEvent(env, inbox, id);
 	if (!row) return Response.json({ error: "no such event" }, { status: 404 });
 
-	const contentType = row.content_type || "application/octet-stream";
 	const headers = {
-		"Content-Type": contentType,
+		"Content-Type": row.content_type || "application/octet-stream",
 		"X-Body-Sha256": row.body_sha256 || "",
 		"X-Content-Type-Options": "nosniff",
 	};
 
-	if (row.body_r2_key) {
-		const object = await env.BUCKET.get(row.body_r2_key);
-		if (!object) return Response.json({ error: "body no longer stored" }, { status: 410 });
-		return new Response(object.body, { headers });
+	const stored = await loadStoredBody(env, row);
+	if (stored.kind === "gone") {
+		return Response.json({ error: "body no longer stored" }, { status: 410 });
 	}
-	if (row.body_text === null) return new Response(null, { status: 204, headers });
-	return new Response(row.body_text, { headers });
+	if (stored.kind === "empty") return new Response(null, { status: 204, headers });
+	return new Response(stored.bytes, { headers });
 }

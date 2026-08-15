@@ -71,8 +71,9 @@ async function create(request: Request, env: Env): Promise<Response> {
 			`INSERT INTO webhook_receivers (
 				id, inbox, slug, label, auth_mode, auth_config, handshake_mode, handshake_config,
 				preset, extract_config, response_status, response_body, response_content_type,
-				allowed_methods, max_body_bytes, retention_days, daily_cap, expires_at, created_at
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				allowed_methods, max_body_bytes, retention_days, daily_cap, mirror_to_drops,
+				expires_at, created_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		)
 			.bind(
 				id,
@@ -92,6 +93,7 @@ async function create(request: Request, env: Env): Promise<Response> {
 				body.maxBodyBytes ?? 1_048_576,
 				body.retentionDays ?? 120,
 				body.dailyCap ?? null,
+				body.mirrorToDrops ? 1 : 0,
 				body.expiresAt ?? null,
 				Date.now(),
 			)

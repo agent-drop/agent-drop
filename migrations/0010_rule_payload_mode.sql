@@ -1,0 +1,12 @@
+-- Onward delivery for webhook events (phase 5).
+--
+-- `envelope` is agent-drop's JSON wrapper -- what every existing rule sends, so
+-- it is the default and no existing row changes meaning. `passthrough` re-sends
+-- the provider's ORIGINAL bytes and headers, which is what makes agent-drop a
+-- relay rather than a notifier: point Stripe at frst.dev, get retries and an
+-- audit log, and your own service still sees exactly what Stripe sent.
+--
+-- Passthrough only means something for a subject that HAS stored bytes, which
+-- today is a webhook event. A drop rule set to passthrough falls back to the
+-- envelope rather than sending nothing.
+ALTER TABLE drop_rules ADD COLUMN payload_mode TEXT NOT NULL DEFAULT 'envelope';

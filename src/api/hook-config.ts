@@ -39,6 +39,12 @@ export interface CreateBody {
 	retentionDays?: number;
 	dailyCap?: number;
 	expiresAt?: number;
+	/**
+	 * Also write each accepted event into `drops`. Off by default and nothing
+	 * depends on it (§14 decision 2) -- the queue verbs are the real consumption
+	 * path, with crash semantics a `drops` row does not have.
+	 */
+	mirrorToDrops?: boolean;
 }
 
 export function view(env: Env, row: WebhookReceiver) {

@@ -128,11 +128,19 @@ export function bodyKeyFor(receiver: WebhookReceiver, id: string): string {
  * The R2 body is written before the row so a completed row never points at a
  * missing object; if the insert then loses a dedupe race, the object is cleaned
  * up rather than orphaned.
+ *
+ * A successful insert hands the whole row back. Onward delivery (§8) needs the
+ * event it just stored, and the alternative -- reading it straight back out of
+ * D1, or rebuilding it from the inputs at the call site -- would be either a
+ * pointless round trip or a second place that has to agree about which bodies go
+ * inline and which go to R2.
  */
 export async function storeEvent(
 	env: Env,
 	input: StoreInput,
-): Promise<{ id: string; duplicate: false } | { id: string; duplicate: true }> {
+): Promise<
+	{ id: string; duplicate: false; event: WebhookEvent } | { id: string; duplicate: true }
+> {
 	// A dedupe key describes an event that ENTERED THE QUEUE. A refusal did not:
 	// it is evidence kept for 7 days (§9), not a queue member, so it neither
 	// dedupes against a real event nor blocks one. Both directions matter.
@@ -167,6 +175,39 @@ export async function storeEvent(
 
 	const expiresAt = input.now + retentionFor(input.receiver, input.status) * DAY_MS;
 
+	// The row as it is about to be written. Built here rather than read back,
+	// because this is the only place that decides inline-vs-R2 and it should stay
+	// the only place that knows.
+	const event: WebhookEvent = {
+		id,
+		receiver_id: input.receiver.id,
+		inbox: input.receiver.inbox,
+		slug: input.receiver.slug,
+		subpath: input.subpath,
+		method: input.method,
+		event_type: input.extracted.eventType,
+		routing_key: input.extracted.routingKey,
+		dedupe_key: dedupeKey,
+		headers: JSON.stringify(input.headers),
+		query: JSON.stringify(input.query),
+		content_type: input.contentType,
+		body_text: inline ? input.text : null,
+		body_r2_key: bodyKey,
+		body_bytes: input.bytes.byteLength,
+		body_sha256: input.sha256,
+		verified: input.verified,
+		remote_ip: input.remoteIp,
+		country: input.country,
+		user_agent: input.userAgent,
+		status: input.status,
+		lease_id: null,
+		leased_until: null,
+		lease_count: 0,
+		acked_at: null,
+		created_at: input.now,
+		expires_at: expiresAt,
+	};
+
 	try {
 		await env.DB.prepare(
 			`INSERT INTO webhook_events (
@@ -175,30 +216,32 @@ export async function storeEvent(
 				verified, remote_ip, country, user_agent, status, created_at, expires_at
 			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		)
+			// Bound from the row object above, so what is returned and what is written
+			// cannot drift apart.
 			.bind(
-				id,
-				input.receiver.id,
-				input.receiver.inbox,
-				input.receiver.slug,
-				input.subpath,
-				input.method,
-				input.extracted.eventType,
-				input.extracted.routingKey,
-				dedupeKey,
-				JSON.stringify(input.headers),
-				JSON.stringify(input.query),
-				input.contentType,
-				inline ? input.text : null,
-				bodyKey,
-				input.bytes.byteLength,
-				input.sha256,
-				input.verified,
-				input.remoteIp,
-				input.country,
-				input.userAgent,
-				input.status,
-				input.now,
-				expiresAt,
+				event.id,
+				event.receiver_id,
+				event.inbox,
+				event.slug,
+				event.subpath,
+				event.method,
+				event.event_type,
+				event.routing_key,
+				event.dedupe_key,
+				event.headers,
+				event.query,
+				event.content_type,
+				event.body_text,
+				event.body_r2_key,
+				event.body_bytes,
+				event.body_sha256,
+				event.verified,
+				event.remote_ip,
+				event.country,
+				event.user_agent,
+				event.status,
+				event.created_at,
+				event.expires_at,
 			)
 			.run();
 	} catch (err) {
@@ -212,7 +255,7 @@ export async function storeEvent(
 		throw err;
 	}
 
-	return { id, duplicate: false };
+	return { id, duplicate: false, event };
 }
 
 /** Counters are cosmetic, so they ride `waitUntil` rather than the response. */

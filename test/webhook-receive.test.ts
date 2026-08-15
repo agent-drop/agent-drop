@@ -761,7 +761,10 @@ describe("responding before the bookkeeping", () => {
 		const res = await serve(post("/h/lisa/count", "{}"));
 
 		expect(res.status).toBe(200);
-		expect(ctx.waits.length).toBe(1);
+		// Two deferred tasks, and the count is asserted so a THIRD one -- or one of
+		// these moving back inline -- fails here: the counter bump, and onward
+		// delivery. Neither may be in front of the provider's acknowledgement.
+		expect(ctx.waits.length).toBe(2);
 		expect(rows("SELECT event_count FROM webhook_receivers WHERE id = ?", id)[0].event_count).toBe(
 			0,
 		);

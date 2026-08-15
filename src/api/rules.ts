@@ -1,5 +1,19 @@
 import type { Env } from "../types";
 
+/**
+ * `envelope` is agent-drop's JSON wrapper; `passthrough` re-sends the provider's
+ * original bytes and headers. Passthrough needs a stored request to re-send, so
+ * it only means something on the `hook` channel -- a rule that matches a drop
+ * sends the envelope regardless (see `rule-payload.ts`).
+ */
+const PAYLOAD_MODES = ["envelope", "passthrough"];
+
+function payloadModeError(value: unknown): string | null {
+	if (value === undefined) return null;
+	if (typeof value === "string" && PAYLOAD_MODES.includes(value)) return null;
+	return `payloadMode must be one of: ${PAYLOAD_MODES.join(", ")}`;
+}
+
 export async function handleRules(request: Request, env: Env, url: URL): Promise<Response> {
 	const method = request.method;
 	const path = url.pathname;
@@ -13,6 +27,7 @@ export async function handleRules(request: Request, env: Env, url: URL): Promise
 			target: string;
 			headers?: Record<string, string>;
 			priority?: number;
+			payloadMode?: string;
 		};
 
 		if (!body.pattern || !body.type || !body.target) {
@@ -24,11 +39,14 @@ export async function handleRules(request: Request, env: Env, url: URL): Promise
 				{ status: 400 },
 			);
 		}
+		const badMode = payloadModeError(body.payloadMode);
+		if (badMode) return Response.json({ error: badMode }, { status: 400 });
 
 		const id = crypto.randomUUID();
 		await env.DB.prepare(
-			`INSERT INTO drop_rules (id, pattern, type, scopes, target, headers, priority, created_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			`INSERT INTO drop_rules (id, pattern, type, scopes, target, headers, priority,
+				payload_mode, created_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		)
 			.bind(
 				id,
@@ -38,12 +56,19 @@ export async function handleRules(request: Request, env: Env, url: URL): Promise
 				body.target,
 				body.headers ? JSON.stringify(body.headers) : null,
 				body.priority || 0,
+				body.payloadMode || "envelope",
 				Date.now(),
 			)
 			.run();
 
 		return Response.json(
-			{ id, pattern: body.pattern, type: body.type, target: body.target },
+			{
+				id,
+				pattern: body.pattern,
+				type: body.type,
+				target: body.target,
+				payload_mode: body.payloadMode || "envelope",
+			},
 			{ status: 201 },
 		);
 	}
@@ -57,8 +82,11 @@ export async function handleRules(request: Request, env: Env, url: URL): Promise
 			scopes?: string;
 			headers?: Record<string, string>;
 			priority?: number;
+			payloadMode?: string;
 		};
 		const id = patchMatch[1];
+		const badMode = payloadModeError(body.payloadMode);
+		if (badMode) return Response.json({ error: badMode }, { status: 400 });
 		const updates: string[] = [];
 		const params: (string | number)[] = [];
 
@@ -81,6 +109,10 @@ export async function handleRules(request: Request, env: Env, url: URL): Promise
 		if (body.priority !== undefined) {
 			updates.push("priority = ?");
 			params.push(body.priority);
+		}
+		if (body.payloadMode !== undefined) {
+			updates.push("payload_mode = ?");
+			params.push(body.payloadMode);
 		}
 
 		if (updates.length === 0) {

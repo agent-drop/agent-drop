@@ -42,6 +42,7 @@ import {
 	handleQueueReturn,
 } from "./hook-lease";
 import { handleQueueBody, handleQueueList, handleQueueOne, handleQueuePeek } from "./hook-queue";
+import { handleHookReplay } from "./hook-replay";
 import {
 	handleQueueDelete,
 	handleQueueDeleteOne,
@@ -269,6 +270,13 @@ const KEYED_ROUTES: Route<KeyedRoute>[] = [
 		method: "GET",
 		match: segments("/api/hooks/queue/:inbox/:id/body"),
 		run: keyedReader((s, inbox, params) => handleQueueBody(s.env, inbox, params.id)),
+	},
+	// Server-side replay: queued, retried, logged. The CLI's `queue-replay` is a
+	// different verb that POSTs from the client and touches none of that.
+	{
+		method: "POST",
+		match: segments("/api/hooks/queue/:inbox/:id/replay"),
+		run: keyedWriter((s, inbox, params) => handleHookReplay(s.request, s.env, inbox, params.id)),
 	},
 	{
 		method: "GET",

@@ -32,8 +32,24 @@ export interface WebhookQueueMessage {
 	target: string;
 	payload: Record<string, unknown>;
 	headers: Record<string, string>;
+	/**
+	 * @deprecated Always 0, and unread since 2026-08-15. `retry()` re-enqueues the
+	 * message body unchanged, so a counter kept here never advanced -- the
+	 * consumer reads `Message.attempts`, the platform's own. Kept only so messages
+	 * already in flight still deserialize.
+	 */
 	attempt: number;
 	firstAttemptAt: number;
+	/** Absent means `envelope` -- messages queued before phase 5 have no field. */
+	mode?: "envelope" | "passthrough";
+	/**
+	 * The webhook event whose original bytes `passthrough` re-sends. Carried as a
+	 * reference rather than inline: a body may be a megabyte, a queue message may
+	 * not, and the row is the authority for 120 days either way. Its inbox travels
+	 * with it because every read of an event is filtered by both.
+	 */
+	eventId?: string;
+	eventInbox?: string;
 }
 
 export interface RelayQueueMessage {
@@ -54,11 +70,56 @@ export const R2_BUCKET = "agent-drop-storage";
 export const r2ObjectUrl = (env: Env, key: string) =>
 	`https://${env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com/${R2_BUCKET}/${key}`;
 
+/**
+ * The four things that can arrive in a box. `hook` is the webhook receiver, and
+ * it is a rule scope like the others -- `scopes: "all"` therefore covers it.
+ */
+export type RuleChannel = "email" | "web" | "api" | "hook";
+
+/**
+ * What the rules engine needs from the thing that arrived.
+ *
+ * Both `Drop` and `WebhookEvent` satisfy this structurally, which is the entire
+ * point: the engine already had the queue, the backoff, the 24-hour give-up and
+ * `delivery_log`, and the honest way to reuse them for a fourth channel is to
+ * stop insisting the subject is a drop.
+ *
+ * Everything past the first three is optional because the channels genuinely
+ * differ -- an email has a `from_addr` and no `slug`, a webhook event has a
+ * `slug` and no `subject`. A field a subject does not carry substitutes to the
+ * empty string in a template, exactly as an unknown variable always has.
+ */
+export interface RuleSubject {
+	id: string;
+	inbox: string;
+	created_at: number;
+	topic?: string | null;
+	subject?: string | null;
+	from_addr?: string | null;
+	body_text?: string | null;
+	metadata?: string | null;
+	has_attachments?: number;
+	attachment_count?: number;
+	/** Webhook events only, from here down. */
+	slug?: string | null;
+	event_type?: string | null;
+	routing_key?: string | null;
+	method?: string;
+	content_type?: string | null;
+	body_bytes?: number | null;
+	body_sha256?: string | null;
+	body_r2_key?: string | null;
+	verified?: number | null;
+	headers?: string | null;
+	query?: string | null;
+}
+
 export interface Drop {
 	id: string;
 	inbox: string;
 	topic: string | null;
-	channel: "email" | "web" | "api";
+	/** `hook` appears only on a mirrored webhook event (`mirror_to_drops`). */
+	channel: "email" | "web" | "api" | "hook";
 	from_addr: string | null;
 	from_user: string | null;
 	subject: string | null;

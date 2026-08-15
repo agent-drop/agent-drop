@@ -16,6 +16,7 @@
  * synchronous after the insert is a bug waiting for a slow day.
  */
 
+import { fanOutEvent } from "./hook-fanout";
 import { normalizeInbox, normalizeSlug } from "./normalize";
 import { recordAuthFailure } from "./ratelimit";
 import {
@@ -290,14 +291,24 @@ async function receive(
 		return fail(401, "signature verification failed");
 	}
 
-	// Counters are cosmetic and rule firing (phase 5) can take as long as it likes;
-	// neither is allowed to hold up the acknowledgement. A duplicate does not
-	// count: it stored nothing, and a counter that disagrees with the queue it
-	// describes is worse than no counter.
+	// Counters are cosmetic and rule firing can take as long as it likes; neither
+	// is allowed to hold up the acknowledgement. A duplicate does not count: it
+	// stored nothing, and a counter that disagrees with the queue it describes is
+	// worse than no counter -- nor does it fan out, because re-delivering an event
+	// we deliberately discarded is the same lie one layer along.
+	//
+	// This is reached only by an ACCEPTED event. A handshake returned above and a
+	// refusal returned a line ago, which is the point: a rejected row is not a
+	// delivery, so `payload_mode: passthrough` can never re-deliver one.
 	if (!stored.duplicate) {
 		ctx.waitUntil(
 			bumpReceiverCounters(env, receiver.id, now).catch((err: unknown) =>
 				console.error("receiver counter update failed:", err),
+			),
+		);
+		ctx.waitUntil(
+			fanOutEvent(env, ctx, receiver, stored.event).catch((err: unknown) =>
+				console.error(`onward delivery failed for ${stored.id}:`, err),
 			),
 		);
 	}
