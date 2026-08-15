@@ -1,10 +1,10 @@
 ---
 chain_id: webhooks-20260815-115712-c042
 plan_file: /Users/jonas/projects/agent-drop/docs/WEBHOOKS-PLAN.md
-plan_version: 3
+plan_version: 4
 status: in_progress
 current_phase: 1
-last_updated: 2026-08-15T04:57:12Z
+last_updated: 2026-08-15T05:14:00Z
 link_count: 1
 ---
 
@@ -46,10 +46,22 @@ link_count: 1
 
 ## Open questions / blockers
 
-- 17TRACK's signature shape `SHA256_hex(body + "/" + api_key)` is relayed from
-  the track-parcel conversation, NOT verified against 17TRACK's docs. Phase 2
-  must confirm it before hardcoding the `digest` preset, and changelog the
-  result.
+- (none blocking)
+
+**RESOLVED 2026-08-15 (plan v4).** 17TRACK's signature scheme is CONFIRMED
+first-hand against the v2.4 docs: plain SHA-256 over `{body}/{secret}`, header
+`sign`, lowercase hex, NOT HMAC. Test vector pinned in PLAN §5 and recomputed
+independently in the planning conversation before being trusted. Phase 2 needs
+no doc round trip -- just pin the vector, plus a case-mismatch test and a
+leading-zero test (their Java sample's `BigInteger` encoding drops leading
+zeros, so ~1 in 256 signatures is 63 chars without the pad).
+
+**STILL UNVERIFIED -- a known limit, not a blocker.** The *wire format*. No real
+17TRACK push has ever fired at us, and the docs' example body is abridged (no
+`track_info`). The algorithm is confirmed; the bytes on the wire are not. If a
+live push fails verification, suspect the bytes before the template -- which is
+exactly why §4 hashes `arrayBuffer()` and never a re-encode. Phase 6's live
+smoke test and the first real push are where this gets settled.
 
 ## Standing authorizations
 
@@ -68,3 +80,7 @@ link_count: 1
 ## Log
 
 - 2026-08-15T04:57:12Z [link 1] chain started at plan v3, phase 1
+- 2026-08-15T05:14:00Z [planning] plan v3 -> v4: 17TRACK signature scheme
+  confirmed first-hand against the v2.4 docs, test vector pinned in §5 and
+  independently recomputed, phase-2 blocker cleared. Wire format recorded as a
+  known limit.

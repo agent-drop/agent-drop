@@ -1,5 +1,5 @@
 ---
-version: 3
+version: 4
 created: 2026-08-15
 ---
 
@@ -374,6 +374,49 @@ HMAC -- they concatenate the secret into the string and take a plain SHA-256.
 It is weaker (length-extension applies, though not exploitably here), but
 refusing to support it just means those providers can't be verified at all.
 
+#### 17TRACK -- CONFIRMED against the v2.4 docs, with a test vector
+
+Quoted first-hand from `api.17track.net/en/doc` on 2026-08-15 by the
+`track-parcel` conversation, which holds a working key on that account:
+
+> Concatenate the original notification message and the API key with "/" […]
+> Generate the signature by using SHA256 hex encoding. […] The info needed to
+> create the signature **should not be changed**, or the result can be
+> different, causing the verification to fail.
+
+So: `auth_mode: digest`, header `sign`, template `{body}/{secret}`, plain
+SHA-256, lowercase hex, 64 chars.
+
+**Pin this test vector in `test/webhook-verify.test.ts`** -- it is derived from
+the docs' own worked example (they publish the inputs but no expected hash) and
+was recomputed independently in the planning conversation before being written
+down here:
+
+```
+body   = {"event":"TRACKING_UPDATED","data":{"number":"RR123456789CN","carrier":3011,"tag":null}}
+secret = 123456ABCDEF
+input  = <body> + "/" + <secret>
+sign   = 45acb4a6f4a194a6ac1f0f712182c4e314b1ae9399941ea086987408f3166994
+```
+
+**Encoding gotcha, and it is a real one.** 17TRACK's own Java sample is
+`new BigInteger(1, hash).toString(16)` left-zero-padded to 64. `BigInteger`
+drops leading zeros, so that padding loop is doing actual work -- without it
+roughly 1 in 256 signatures comes out 63 characters. The net result is plain
+lowercase hex identical to Python's `hexdigest()`, but **the verifier must not
+assume a fixed length from the provider's side**, and must compare
+case-insensitively (or lowercase both sides) because some implementations
+upper-case. A test with a signature that would have lost a leading zero is
+worth writing.
+
+**What is still NOT verified:** the *algorithm* is confirmed; the *wire format*
+is not. The docs' example body is a shortened one (no `track_info`), so real
+whitespace and key ordering on the wire are unknown, and no 17TRACK push has
+ever actually fired at us. This is precisely why section 4 hashes
+`arrayBuffer()` rather than anything re-encoded -- hash what arrived. If a real
+push fails verification, the bytes-vs-algorithm split is the first place to
+look, not the template.
+
 Signature list handling: `standard` and `stripe` both send **multiple**
 signatures during a secret rotation. Accept if *any* matches. A verifier that
 only reads the first one breaks every rotation.
@@ -709,9 +752,11 @@ receiver.
 a known-good fixture passes; a **one-byte body change** rejects; a stale
 timestamp rejects where a replay window applies; and for `standard`/`stripe`,
 a header carrying **two** signatures (mid-rotation) passes on the second one.
-The `digest` preset must be proven against 17TRACK's shape
-`SHA256_hex(body + "/" + key)` -- and §13's flag applies: confirm that shape
-against 17TRACK's live docs before hardcoding it, and changelog the result.
+The `digest` preset must be proven against the 17TRACK test vector pinned in
+§5 (`45acb4a6...f3166994`), including a case-insensitive compare and a
+signature that would have lost a leading zero under a naive BigInteger
+encoding. That shape is CONFIRMED against the v2.4 docs -- the phase-2 blocker
+is cleared, no doc round trip needed.
 
 **artifacts:** `src/lib/webhook-verify.ts`, `src/lib/auth.ts`,
 `test/webhook-verify.test.ts`, `tools/agent-drop.ts`.
@@ -847,10 +892,12 @@ that shape only exists if decision 2 below lands on mirroring. The queue verbs
 give the same access with better crash semantics, so mirroring is a
 convenience, not a requirement.
 
-*(Requirements relayed by the `track-parcel` conversation and verified against
-this plan; the two corrections above came from it. The 17TRACK specifics are
-its claims, not something I checked against 17TRACK's docs myself -- worth a
-five-minute confirmation before Phase 2 hardcodes the `digest` template.)*
+*(Requirements relayed by the `track-parcel` conversation; the two corrections
+above came from it. The signature scheme was subsequently CONFIRMED first-hand
+against the v2.4 docs, with a test vector that was recomputed independently
+here before being trusted -- see §5. The remaining unknown is the wire format,
+not the algorithm: no real 17TRACK push has ever fired at us, so "spec
+confirmed" is not "observed". The first live push is the proof.)*
 
 ---
 
@@ -874,6 +921,30 @@ All four confirmed by Jonas. Nothing in this plan is open; build it as written.
 ---
 
 ## Changelog
+
+### v4 -- 2026-08-15 -- author: planning conversation
+
+Clears the one open blocker the chain started with. No GOAL change, no
+requirement change -- this converts an assumption into a verified fact.
+
+- 17TRACK's signature scheme is CONFIRMED first-hand against the v2.4 docs
+  (`api.17track.net/en/doc`) by the `track-parcel` conversation, which holds a
+  working key: plain SHA-256 over `{body}/{secret}`, header `sign`, lowercase
+  hex. Not HMAC. The `digest` preset was the right shape.
+- A test vector is now pinned in §5 and required by phase 2. The docs publish
+  worked inputs but no expected hash, so `track-parcel` computed it and this
+  conversation **recomputed it independently before writing it down** rather
+  than taking the number on trust. Both agree:
+  `45acb4a6f4a194a6ac1f0f712182c4e314b1ae9399941ea086987408f3166994`.
+- Encoding gotcha recorded: their Java sample zero-pads a `BigInteger` to 64
+  chars, and that padding is doing real work -- without it ~1 in 256 signatures
+  is 63 chars. The verifier must not assume a fixed length and must compare
+  case-insensitively. Phase 2 gets a leading-zero test.
+- Scope of the confirmation stated honestly in §5 and §13: the ALGORITHM is
+  confirmed, the WIRE FORMAT is not. The docs' example body is abridged and no
+  real push has ever fired at us. Spec-confirmed is not observed. This is the
+  argument for section 4's `arrayBuffer()` hashing, and if a live push fails
+  verification the bytes are the first suspect, not the template.
 
 ### v3 -- 2026-08-15 -- author: planning conversation
 
