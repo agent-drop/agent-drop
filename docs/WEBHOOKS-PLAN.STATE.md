@@ -62,6 +62,7 @@ link_count: 4
   - [x] 4i. Tests: every claim in the phase-4 verify block, mutation-checked six ways
   - [x] 4j. RUNTIME check on `bun run dev` against the 17 real events (log below)
   - [x] 49 new tests; full suite 634 pass / 0 fail; `bun run verify` exit 0
+  - [x] 4k. integrated into `main` at `d8e61b3`
 - [ ] 5. Onward delivery -- RuleSubject, hook channel, passthrough, replay
 - [ ] 6. Retention, provisioning, deploy, docs
 
