@@ -48,6 +48,7 @@ link_count: 3
   - [x] 3i. Mutation-checked, three ways, before trusting a clean first run
   - [x] 3j. RUNTIME check: all five modes on `bun run dev` (log below)
   - [x] 42 new tests; full suite 585 pass / 0 fail; `bun run verify` exit 0
+  - [x] 3k. integrated into `main` at `dc26ee0`
 - [ ] 4. The pull queue -- lease/remove/return/delete/put/peek + completeness gate
 - [ ] 5. Onward delivery -- RuleSubject, hook channel, passthrough, replay
 - [ ] 6. Retention, provisioning, deploy, docs
