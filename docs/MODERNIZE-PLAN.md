@@ -25,7 +25,7 @@ DONE and merged (local `main`, commit `1ba9671`). This plan starts from there.
 **Read this before touching anything.** No link ever sees the conversation that
 produced this plan, so everything material is written down here.
 
-- Repo: `/Users/jonas/projects/agent-drop`. Cloudflare Worker + D1 + R2 + Queues,
+- Repo: this directory. Cloudflare Worker + D1 + R2 + Queues,
   Vite/React SPA in `web/`, Bun CLI in `tools/agent-drop.ts`.
 - `CLAUDE.md` at the repo root is the authoritative description of the system
   (endpoints, auth methods, rules engine, relay, hosting). Read it first.

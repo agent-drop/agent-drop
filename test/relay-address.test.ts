@@ -20,7 +20,7 @@ const DOMAIN = "drop.test";
 describe("encodeEmail / decodeEmail", () => {
 	test("round-trips ordinary addresses", () => {
 		for (const email of [
-			"lisa@gmail.com",
+			"lisa@mail.example",
 			"first.last@sub.example.co.uk",
 			"user+tag@example.com",
 			"UPPER@Example.COM",
@@ -31,7 +31,7 @@ describe("encodeEmail / decodeEmail", () => {
 	});
 
 	test("encoding replaces the @ with _at_", () => {
-		expect(encodeEmail("lisa@gmail.com")).toBe("lisa_at_gmail.com");
+		expect(encodeEmail("lisa@mail.example")).toBe("lisa_at_mail.example");
 	});
 
 	test("decode splits on the LAST _at_, so a literal _at_ in the local part survives", () => {
@@ -50,14 +50,14 @@ describe("encodeEmail / decodeEmail", () => {
 
 describe("buildRelayAddress / parseRelayAddress", () => {
 	test("builds the documented shape", () => {
-		expect(buildRelayAddress("lisa@gmail.com", "j-7k9m", DOMAIN)).toBe(
-			"lisa_at_gmail.com+j-7k9m@drop.test",
+		expect(buildRelayAddress("lisa@mail.example", "j-7k9m", DOMAIN)).toBe(
+			"lisa_at_mail.example+j-7k9m@drop.test",
 		);
 	});
 
 	test("round-trips sender and mask through the local part", () => {
 		const cases: [string, string][] = [
-			["lisa@gmail.com", "j-7k9m"],
+			["lisa@mail.example", "j-7k9m"],
 			["first.last@sub.example.co.uk", "j-dating"],
 			["weird_at_name@example.com", "j-shop"],
 		];
@@ -82,7 +82,7 @@ describe("buildRelayAddress / parseRelayAddress", () => {
 	});
 
 	test("returns null when there is no + at all", () => {
-		expect(parseRelayAddress("lisa_at_gmail.com")).toBeNull();
+		expect(parseRelayAddress("lisa_at_mail.example")).toBeNull();
 	});
 
 	test("returns null when the part before + is not an encoded address", () => {
@@ -93,14 +93,14 @@ describe("buildRelayAddress / parseRelayAddress", () => {
 
 describe("isRelayReply", () => {
 	test("true only when both markers are present", () => {
-		expect(isRelayReply("lisa_at_gmail.com+j-7k9m")).toBe(true);
+		expect(isRelayReply("lisa_at_mail.example+j-7k9m")).toBe(true);
 		expect(isRelayReply("lisa+sales")).toBe(false);
-		expect(isRelayReply("lisa_at_gmail.com")).toBe(false);
+		expect(isRelayReply("lisa_at_mail.example")).toBe(false);
 		expect(isRelayReply("lisa")).toBe(false);
 	});
 
 	test("agrees with parseRelayAddress on addresses built by buildRelayAddress", () => {
-		for (const sender of ["lisa@gmail.com", "user+tag@example.com", "a@b.c"]) {
+		for (const sender of ["lisa@mail.example", "user+tag@example.com", "a@b.c"]) {
 			const addr = buildRelayAddress(sender, "j-1", DOMAIN);
 			const localPart = addr.slice(0, addr.lastIndexOf("@"));
 			expect(isRelayReply(localPart)).toBe(true);
@@ -140,31 +140,31 @@ describe("findRelayRule", () => {
 	});
 
 	test("an exact mask pattern resolves to its target", async () => {
-		await seedRelayRule("j-shop", "jonas@duplo.org");
-		expect(await findRelayRule(env, "j-shop")).toMatchObject({ target: "jonas@duplo.org" });
+		await seedRelayRule("j-shop", "jonas@example.org");
+		expect(await findRelayRule(env, "j-shop")).toMatchObject({ target: "jonas@example.org" });
 		expect(await findRelayRule(env, "j-other")).toBeNull();
 	});
 
 	test('a "j-*" prefix pattern matches every mask under that prefix', async () => {
-		await seedRelayRule("j-*", "jonas@duplo.org");
+		await seedRelayRule("j-*", "jonas@example.org");
 
-		expect(await findRelayRule(env, "j-7k9m")).toMatchObject({ target: "jonas@duplo.org" });
-		expect(await findRelayRule(env, "j-dating")).toMatchObject({ target: "jonas@duplo.org" });
+		expect(await findRelayRule(env, "j-7k9m")).toMatchObject({ target: "jonas@example.org" });
+		expect(await findRelayRule(env, "j-dating")).toMatchObject({ target: "jonas@example.org" });
 		// The hyphen is required: a bare "j" is not under "j-*".
 		expect(await findRelayRule(env, "j")).toBeNull();
 		expect(await findRelayRule(env, "k-7k9m")).toBeNull();
 	});
 
 	test("higher priority wins over a lower-priority catch-all", async () => {
-		await seedRelayRule("*", "catchall@duplo.org", { priority: 0 });
-		await seedRelayRule("j-shop", "shop@duplo.org", { priority: 10 });
+		await seedRelayRule("*", "catchall@example.org", { priority: 0 });
+		await seedRelayRule("j-shop", "shop@example.org", { priority: 10 });
 
-		expect(await findRelayRule(env, "j-shop")).toMatchObject({ target: "shop@duplo.org" });
-		expect(await findRelayRule(env, "x-1")).toMatchObject({ target: "catchall@duplo.org" });
+		expect(await findRelayRule(env, "j-shop")).toMatchObject({ target: "shop@example.org" });
+		expect(await findRelayRule(env, "x-1")).toMatchObject({ target: "catchall@example.org" });
 	});
 
 	test("disabled relay rules are ignored", async () => {
-		await seedRelayRule("j-*", "jonas@duplo.org", { enabled: 0 });
+		await seedRelayRule("j-*", "jonas@example.org", { enabled: 0 });
 		expect(await findRelayRule(env, "j-7k9m")).toBeNull();
 	});
 

@@ -1,6 +1,6 @@
 ---
 chain_id: modernize-20260801-161212-5998
-plan_file: /Users/jonas/projects/agent-drop/docs/MODERNIZE-PLAN.md
+plan_file: docs/MODERNIZE-PLAN.md
 plan_version: 4
 status: completed
 current_phase: 6

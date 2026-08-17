@@ -1,6 +1,6 @@
 ---
 chain_id: webhooks-20260815-115712-c042
-plan_file: /Users/jonas/projects/agent-drop/docs/WEBHOOKS-PLAN.md
+plan_file: docs/WEBHOOKS-PLAN.md
 plan_version: 10
 status: completed
 current_phase: 6
@@ -974,7 +974,7 @@ $ drop rule-test lisa --channel hook
                                  ^ before the fix this said it would fire
 $ drop rule-test lisa --channel email
   ~ lisa -> pattern matches but scope "hook" excludes "email"   (x2)
-  > lisa -> forward -> jonas+p5@duplo.org
+  > lisa -> forward -> owner+p5@example.org
 ```
 
 Left behind in the LOCAL dev D1 for phase 6: 21 events on `lisa` across
@@ -1073,7 +1073,7 @@ $ drop queue-peek lisa 01m025m0f58syq3w6w7kkq7n84
   headers:
     authorization: <redacted>
     sign: 4db7bd7b6733ba5b34bc02f9409d84663502f6e55e51f7a4b00d6e5136597d83
-    cf-connecting-ip: 49.0.79.228   cf-ipcountry: TH   <- real CF metadata
+    cf-connecting-ip: <redacted>    cf-ipcountry: TH   <- real CF metadata
 
 $ drop queue-body lisa 01m025m0f5… -o roundtrip.bin
   Wrote 104B

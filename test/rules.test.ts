@@ -246,14 +246,14 @@ describe("template substitution", () => {
 			pattern: "shop-*",
 			type: "forward",
 			scopes: "email",
-			target: "jonas+shopping+{name}@duplo.org",
+			target: "jonas+shopping+{name}@example.org",
 		});
 
 		const seen: string[] = [];
 		await fireRules(env, ctx, makeDrop({ inbox: "shop-returns" }), "email", forwarder(seen));
 		await ctx.settle();
 
-		expect(seen).toEqual(["jonas+shopping+returns@duplo.org"]);
+		expect(seen).toEqual(["jonas+shopping+returns@example.org"]);
 	});
 
 	test("an unknown variable substitutes to empty, it is not left literal", async () => {

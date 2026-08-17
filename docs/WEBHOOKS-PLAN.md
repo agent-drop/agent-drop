@@ -20,7 +20,7 @@ producer of, so faithful preservation of what arrived is the whole product.
 **Read this before touching anything.** No link ever sees the conversation that
 produced this plan, so everything material is written down here.
 
-- Repo: `/Users/jonas/projects/agent-drop`. Cloudflare Worker + D1 + R2 +
+- Repo: this directory. Cloudflare Worker + D1 + R2 +
   Queues, Vite/React SPA in `web/`, Bun CLI in `tools/agent-drop.ts`.
 - `CLAUDE.md` at the repo root is the authoritative description of the system
   as it stands today. It is also a **deliverable**: phase 6 updates it.
