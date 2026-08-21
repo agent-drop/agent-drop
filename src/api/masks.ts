@@ -75,7 +75,7 @@ export async function handleMasks(request: Request, env: Env, url: URL): Promise
 		return Response.json(
 			{
 				id: maskId,
-				email: `${maskId}@${env.DOMAIN}`,
+				email: `${maskId}@${env.MAIL_DOMAIN}`,
 				label: body.label || null,
 			},
 			{ status: 201 },
@@ -128,7 +128,7 @@ export async function handleMasks(request: Request, env: Env, url: URL): Promise
 
 		const masks = results.map((m: any) => ({
 			...m,
-			email: `${m.id}@${env.DOMAIN}`,
+			email: `${m.id}@${env.MAIL_DOMAIN}`,
 		}));
 
 		return Response.json({ masks });

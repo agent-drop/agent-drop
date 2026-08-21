@@ -3,6 +3,8 @@ import { type FakeD1, makeD1 } from "./d1";
 
 export const TEST_ADMIN_KEY = "admin-secret-do-not-guess";
 export const TEST_DOMAIN = "drop.test";
+/** Only test/mail-domain.test.ts uses this; makeEnv defaults to TEST_DOMAIN. */
+export const TEST_MAIL_DOMAIN = "mail.test";
 
 export async function sha256Hex(value: string): Promise<string> {
 	const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
@@ -45,6 +47,7 @@ export function makeEnv(overrides: Partial<Env> = {}): TestEnv {
 		BUCKET: {} as R2Bucket,
 		ASSETS: {} as Fetcher,
 		DOMAIN: TEST_DOMAIN,
+		MAIL_DOMAIN: TEST_DOMAIN,
 		BRAND: "Agent Drop",
 		R2_ACCOUNT_ID: "test-account",
 		SES_REGION: "eu-central-1",

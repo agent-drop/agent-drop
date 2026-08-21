@@ -21,6 +21,8 @@ binding = "ASSETS"
 not_found_handling = "single-page-application"
 run_worker_first = ["/api/*", "/f/*", "/h/*"]
 
+# `zone_name` is the ZONE, `pattern` carries the Worker host. Identical here
+# because the default is a single apex; ZONE_NAME in `.env` separates them.
 [[routes]]
 pattern = "example.com/*"
 zone_name = "example.com"
@@ -91,7 +93,10 @@ simple = { limit = 300, period = 60 }
 crons = ["17 * * * *"]
 
 [vars]
+# DOMAIN is the HTTP host the Worker serves from; MAIL_DOMAIN is what
+# {box}@... resolves to. Identical unless the Worker sits on a subdomain.
 DOMAIN = "example.com"
+MAIL_DOMAIN = "example.com"
 BRAND = "Agent Drop"
 R2_ACCOUNT_ID = "your-cloudflare-account-id"
 SES_REGION = "eu-central-1"

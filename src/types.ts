@@ -2,7 +2,10 @@ export interface Env {
 	DB: D1Database;
 	BUCKET: R2Bucket;
 	ASSETS: Fetcher;
+	/** The HTTP host the Worker serves from. Builds URLs, never addresses. */
 	DOMAIN: string;
+	/** The domain boxes send and receive mail on. Builds addresses, never URLs. */
+	MAIL_DOMAIN: string;
 	BRAND: string;
 	R2_ACCOUNT_ID: string;
 	SES_REGION: string;

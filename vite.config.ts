@@ -36,6 +36,7 @@ export default defineConfig(({ mode }) => {
 		define: {
 			__BRAND__: JSON.stringify(identity.brand),
 			__DOMAIN__: JSON.stringify(identity.domain),
+			__MAIL_DOMAIN__: JSON.stringify(identity.mailDomain),
 		},
 		build: {
 			outDir: "dist",

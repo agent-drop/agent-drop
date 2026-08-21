@@ -92,7 +92,7 @@ export async function forwardViaBinding(
 		messageId?: string | null;
 	},
 ): Promise<string> {
-	const boxAddr = `${opts.box}@${env.DOMAIN}`;
+	const boxAddr = `${opts.box}@${env.MAIL_DOMAIN}`;
 	const label = (opts.fromName || opts.from || "").replace(/"/g, "");
 
 	const attachments = (opts.attachments || []).map((a) =>
