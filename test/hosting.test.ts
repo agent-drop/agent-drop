@@ -147,6 +147,15 @@ describe("serveHostedSite", () => {
 		expect(res.headers.get("X-Content-Type-Options")).toBe("nosniff");
 	});
 
+	// Hosted files are attacker-supplied and share a host with the SPA, which
+	// keeps credentials in localStorage. `sandbox` without `allow-same-origin`
+	// is what denies an uploaded page access to them.
+	test("serves hosted files into an opaque origin", async () => {
+		const csp = (await get("/f/lisa/marketing/")).headers.get("Content-Security-Policy");
+		expect(csp).toContain("sandbox");
+		expect(csp).not.toContain("allow-same-origin");
+	});
+
 	test("redirects the no-slash root to the slashed form so relative links resolve", async () => {
 		const res = await get("/f/lisa/marketing");
 		expect(res.status).toBe(301);

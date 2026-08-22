@@ -155,6 +155,16 @@ export async function serveHostedSite(request: Request, env: Env, url: URL): Pro
 	headers.set("etag", obj.httpEtag);
 	headers.set("Cache-Control", "public, max-age=3600");
 	headers.set("X-Content-Type-Options", "nosniff");
+	// Hosted files are attacker-supplied and served from the Worker's own host,
+	// which is also the origin the SPA keeps its API key and Google token on.
+	// Without `sandbox` an uploaded page is same-origin with the app and can read
+	// both out of localStorage, so a write-scoped key would escalate to whatever
+	// the reader's key can do. Omitting `allow-same-origin` puts the page in an
+	// opaque origin: scripts still run, they just cannot reach that storage.
+	headers.set(
+		"Content-Security-Policy",
+		"sandbox allow-scripts allow-forms allow-popups allow-downloads",
+	);
 
 	if (request.method === "HEAD") return new Response(null, { headers });
 	return new Response(obj.body, { headers });
