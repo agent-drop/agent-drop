@@ -1,5 +1,6 @@
 import PostalMime from "postal-mime";
 import { generateId } from "./lib/id";
+import { parseAuthResults } from "./lib/mail-auth";
 import { normalizeInbox, slugifyFilename } from "./lib/normalize";
 import {
 	isRelayReply,
@@ -172,6 +173,10 @@ export async function handleEmail(
 		from_name: parsed.from?.name || null,
 		to_full: to,
 		message_id: message.headers.get("message-id") || null,
+		// What the receiving MTA concluded about the sender. `from_addr` is
+		// unverified by construction, so this is the only thing on the row that
+		// says whether it can be trusted.
+		sender_auth: parseAuthResults(message.headers.get("authentication-results")),
 	});
 
 	// Index in D1
