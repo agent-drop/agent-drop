@@ -198,7 +198,8 @@ curl -X POST $KEY -F "file=@document.pdf" \
 
 # Send outbound email (From: {name}@frst.dev). JSON fields are camelCase.
 # Supports: to/cc/bcc (string or array), replyTo, fromName, topic (+addressing),
-# html, inReplyTo (drop id or <message-id> for threading), attachments[], dryRun, deleteAfterSend.
+# text, html, markdown, inReplyTo (drop id or <message-id> for threading),
+# attachments[], deleteAfterSend.
 # Attachments resolve from one of: dataBase64 (inline), r2Key (uploaded), or url (fetched).
 # Worker hands an EmailMessageBuilder to the Email Sending binding, which assembles the MIME.
 # One send carries the whole to/cc/bcc list. Limits: 50 combined recipients, 25 MiB total.
@@ -207,6 +208,13 @@ curl -X POST $KEY -H "Content-Type: application/json" \
        "html":"<b>Hi</b> <img src=\"cid:logo\">",
        "attachments":[{"cid":"logo","inline":true,"r2Key":"outbound/temp/...","filename":"logo.png"},
                       {"url":"https://example.com/report.pdf","filename":"report.pdf"}]}' \
+  https://frst.dev/api/send/{name}
+
+# Same, from markdown. The worker renders it to email-safe HTML and carries the
+# raw markdown as the text part, so a plain-text reader still gets the report.
+curl -X POST $KEY -H "Content-Type: application/json" \
+  -d '{"to":["bob@example.com"],"subject":"Retrospect",
+       "markdown":"# Retrospect\n\n| leg | cost |\n|---|--:|\n| one | 3 |\n"}' \
   https://frst.dev/api/send/{name}
 
 # Presigned PUT for an outbound attachment (lands in outbound/temp/, no drop record).
@@ -423,6 +431,9 @@ drop send-email --drop lisa --to bob@x.com --subject "Report" \
   --attach ./report.pdf \            # regular attachment
   --attach https://example.com/x.pdf # fetched server-side
 
+# Markdown body -- rendered to email-safe HTML by the WORKER, not the CLI
+drop send-email --drop lisa --to bob@x.com --subject "Retrospect" --body-md @./retro.md
+
 # +addressing (From: lisa+sales@frst.dev), threading, YAML template, preview
 drop send-email --drop lisa --to bob@x.com --subject Hi --body Yo --topic sales
 drop send-email --drop lisa --to bob@x.com --subject Re --body "reply" --in-reply-to DROP_ID
@@ -431,9 +442,36 @@ drop send-email --drop lisa --to bob@x.com --subject Hi --body Yo --dry-run  # a
 ```
 
 **Flags:** `--drop` (sender box), `--to/--cc/--bcc` (repeatable), `--reply-to`, `--from-name`,
-`--subject`, `--body` (text or file path), `--body-html` (html or file path), `--attach`
-(repeatable; `path`, `url`, or `cid:path` for inline), `--topic`, `--in-reply-to` (drop id or
-`<message-id>`), `--template` (YAML), `--upload` (force R2 for all local files), `--dry-run`.
+`--subject`, `--body` (text or file path), `--body-html` (html or file path), `--body-md`
+(markdown or file path), `--attach` (repeatable; `path`, `url`, or `cid:path` for inline),
+`--topic`, `--in-reply-to` (drop id or `<message-id>`), `--template` (YAML), `--upload` (force
+R2 for all local files), `--dry-run`.
+
+### Markdown bodies
+
+`markdown` on `/api/send/:inbox` and `/api/compose/:inbox` (CLI: `--body-md`) is rendered
+**server-side** by `src/lib/markdown.ts`, so every consumer gets the same output instead of
+each shipping its own renderer. It fills two parts at once: the rendered HTML, and -- unless
+an explicit `text` is supplied -- the raw markdown as the plain-text part, markdown being the
+one markup a plain-text reader can still read.
+
+`markdown` **and** `html` together is a `400`. Two sources for one MIME part, and silently
+preferring either is invisible until a caller wonders where half its message went.
+
+Parsing is `marked`'s lexer; the rendering is ours, because the HTML an email needs is not
+the HTML a browser needs:
+
+- **Every style is inline.** Gmail discards `<style>` blocks and strips `<html>`/`<head>`/
+  `<body>`, so a stylesheet is not a stylesheet -- an attribute is.
+- **Tables carry `cellpadding`/`cellspacing`/`border` attributes** as well as CSS, because
+  Outlook renders through Word and ignores half the CSS beside them.
+- **`<pre>` wraps** (`white-space:pre-wrap` + `word-break`). A fenced code block is the one
+  thing guaranteed to be wider than a phone, and an unwrapped `<pre>` widens the whole message.
+- **`href`/`src` are scheme-filtered** to `http(s)`, `mailto:`, `tel:` and `cid:`. `cid:` is on
+  the list on purpose: `![logo](cid:logo)` addresses an inline attachment from markdown.
+- Task items render `☑`/`☐`, never `<input>` -- mail clients strip form controls.
+- Raw HTML in the source passes through, as markdown says it must. That grants nothing new:
+  the same key can post arbitrary `html` directly.
 
 **Attachment transport:** local files <1MB ride inline as base64; files >1MB (or any with
 `--upload`) are presigned + PUT to R2 (`outbound-tmp/`) and pulled by the Worker at send time;
@@ -441,7 +479,8 @@ URLs are fetched server-side. Cloudflare caps the assembled message at 25 MiB, a
 recipient list at 50 combined to/cc/bcc.
 
 **YAML template** keys are camelCase, mirroring the flags (`drop`/`from`, `to`, `cc`, `bcc`,
-`replyTo`, `fromName`, `subject`, `body`, `bodyHtml`, `topic`, `inReplyTo`, `attach`/`attachments`).
+`replyTo`, `fromName`, `subject`, `body`, `bodyHtml`, `markdown`, `topic`, `inReplyTo`,
+`attach`/`attachments`).
 CLI flags override template values; `--to` replaces the template's recipient list.
 
 ## Static Site Hosting
@@ -1321,6 +1360,7 @@ src/
     webhook-load.ts     -- loadStoredBody: the ONE inline-vs-R2 reader
     hook-fanout.ts      -- Fire rules + mirror, for an accepted event only
     hook-reaper.ts      -- Cron sweep for webhook events past expires_at
+    markdown.ts         -- Markdown -> email-safe HTML (marked's lexer, our renderer)
     email-builder.ts    -- EmailMessageBuilder construction + platform-limit validation
     mime.ts             -- Hand-rolled MIME: relay replay + /api/compose preview only
     relay.ts            -- Email relay + forwardViaBinding + sendRawViaBinding (CF Email Sending)
