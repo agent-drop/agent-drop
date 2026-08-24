@@ -47,6 +47,26 @@ async function compose(body: unknown, inbox = "lisa"): Promise<string> {
 
 const PLAIN = { to: "bob@example.com", subject: "Plain", text: "hello" };
 
+/**
+ * Every body part in the preview is base64 with a Content-Transfer-Encoding
+ * header to say so, exactly as a mail client expects. Decode them all and
+ * concatenate, so a test can assert on what a reader would see.
+ */
+function decodeParts(eml: string): string {
+	return eml
+		.split(/^--+=_Part_[^\r\n]*\r?\n?/m)
+		.slice(1)
+		.map((part) => {
+			const [, body = ""] = part.split(/\r\n\r\n/);
+			try {
+				return atob(body.replace(/\s+/g, ""));
+			} catch {
+				return body;
+			}
+		})
+		.join("\n");
+}
+
 describe("handleSend -- one send for the whole recipient list", () => {
 	test("plain text", async () => {
 		const { email, response } = await send(PLAIN);
@@ -181,6 +201,83 @@ describe("handleSend -- one send for the whole recipient list", () => {
 	});
 });
 
+describe("handleSend -- markdown becomes both parts", () => {
+	const REPORT = "# Retrospect\n\n| leg | cost |\n|---|--:|\n| one | 3 |\n\n```sh\nbun test\n```";
+
+	test("markdown alone fills html AND text -- the raw markdown is the text part", async () => {
+		const { email } = await send({ to: "bob@example.com", subject: "Retro", markdown: REPORT });
+
+		const builder = onlyBuilder(email);
+		// The text part is the source, verbatim: markdown is the one markup a
+		// plain-text reader can still read.
+		expect(builder.text).toBe(REPORT);
+		expect(builder.html).toContain("<h1 style=");
+		expect(builder.html).toContain("<table");
+		expect(builder.html).toContain("<pre style=");
+	});
+
+	test("an explicit text wins the text part while markdown still renders the html", async () => {
+		const { email } = await send({
+			to: "bob@example.com",
+			subject: "Retro",
+			markdown: "# hi",
+			text: "plain summary",
+		});
+
+		const builder = onlyBuilder(email);
+		expect(builder.text).toBe("plain summary");
+		expect(builder.html).toContain("<h1 style=");
+	});
+
+	test("the subject reaches the rendered document's title", async () => {
+		const { email } = await send({ to: "bob@example.com", subject: "Retro", markdown: "# hi" });
+
+		expect(onlyBuilder(email).html).toContain("<title>Retro</title>");
+	});
+
+	test("markdown alone satisfies the body requirement", async () => {
+		const { response } = await send({ to: "bob@example.com", subject: "s", markdown: "hi" });
+
+		expect(response.status).toBe(200);
+	});
+
+	// The log used to read `body.text || body.html`, neither of which a markdown
+	// send has -- so the row would have recorded an empty body.
+	test("the outbound log records the rendered text part, not an empty string", async () => {
+		const email = makeEmail();
+		const env = makeEnv({ EMAIL: email as unknown as Env["EMAIL"] });
+		await handleSend(
+			jsonRequest("https://drop.test/api/send/lisa", {
+				to: "bob@example.com",
+				subject: "Retro",
+				markdown: "# Retrospect",
+			}),
+			env,
+			"lisa",
+		);
+
+		const row = env.DB.raw.query("SELECT body_text FROM outbound").get() as { body_text: string };
+		expect(row.body_text).toBe("# Retrospect");
+	});
+
+	test("a markdown attachment-only send still works alongside attachments", async () => {
+		const { email, response } = await send({
+			to: "bob@example.com",
+			subject: "Retro",
+			markdown: "See ![logo](cid:logo)",
+			attachments: [
+				{ filename: "logo.png", contentType: "image/png", dataBase64: "aGVsbG8=", cid: "logo" },
+			],
+		});
+
+		expect(response.status).toBe(200);
+		const builder = onlyBuilder(email);
+		// `cid:` survives the URL filter precisely so this works from markdown.
+		expect(builder.html).toContain('src="cid:logo"');
+		expect((builder.attachments ?? [])[0].contentId).toBe("logo");
+	});
+});
+
 describe("handleSend -- attachments reach the binding as bytes", () => {
 	// "hello" as base64. The binding reads a string `content` as RAW content, so
 	// forwarding the base64 string would attach the literal text "aGVsbG8=".
@@ -232,8 +329,22 @@ describe("prepareEmail -- validation", () => {
 
 	test("no body and no attachments", async () => {
 		expect(await errorOf({ to: "bob@example.com", subject: "s" })).toMatch(
-			/text, html, or attachments/,
+			/text, html, markdown, or attachments/,
 		);
+	});
+
+	// Two sources for one MIME part. Picking a winner silently is how a caller
+	// ends up wondering which half of its message went missing.
+	test("markdown and html together is a 400, not a silent preference", async () => {
+		const { email, response } = await send({
+			...PLAIN,
+			markdown: "# hi",
+			html: "<p>hi</p>",
+		});
+
+		expect(response.status).toBe(400);
+		expect(((await response.json()) as { error: string }).error).toMatch(/not both/);
+		expect(email.sends).toHaveLength(0);
 	});
 
 	test("over 50 combined recipients is rejected before the send", async () => {
@@ -287,6 +398,28 @@ describe("handleCompose -- the dry-run preview", () => {
 		expect(eml).toContain("In-Reply-To: <orig@mail.example.com>");
 		expect(eml).toContain("References: <orig@mail.example.com>");
 		expect(eml).toContain("multipart/alternative");
+	});
+
+	// The whole value of `--dry-run` on a markdown send is seeing the RENDERED
+	// html, not the markdown source echoed back. Compose shares prepareEmail with
+	// send, so the two cannot disagree about what was rendered.
+	test("a markdown send previews as a real multipart with the rendered html", async () => {
+		const eml = await compose({
+			to: "bob@example.com",
+			subject: "Retro",
+			markdown: "# Retrospect\n\n| a | b |\n|---|---|\n| 1 | 2 |",
+		});
+
+		expect(eml).toContain("multipart/alternative");
+		expect(eml).toContain("text/plain");
+		expect(eml).toContain("text/html");
+
+		// The parts are base64 in the .eml, so the assertion has to go through the
+		// same decode a mail client does.
+		const decoded = decodeParts(eml);
+		expect(decoded).toContain("# Retrospect");
+		expect(decoded).toContain("<h1 style=");
+		expect(decoded).toContain("<table");
 	});
 
 	// Bcc is deliberately absent from the rendered headers -- it is an envelope

@@ -617,8 +617,16 @@ async function cmdSendEmail(opts: any) {
 
 	const bodyVal = opts.body ?? tpl.body;
 	const htmlVal = opts.bodyHtml ?? tpl.bodyHtml;
+	const mdVal = opts.bodyMd ?? tpl.markdown ?? tpl.bodyMd;
 	const text = bodyVal != null ? resolveBody(String(bodyVal)) : undefined;
 	const html = htmlVal != null ? resolveBody(String(htmlVal)) : undefined;
+	const markdown = mdVal != null ? resolveBody(String(mdVal)) : undefined;
+
+	// The worker rejects this too; catching it here saves a round trip and says
+	// which two flags collided rather than which two JSON fields did.
+	if (markdown != null && html != null) {
+		throw new Error("--body-md and --body-html are mutually exclusive (markdown renders the html)");
+	}
 
 	if (to.length === 0 && cc.length === 0 && bcc.length === 0) {
 		throw new Error("at least one --to / --cc / --bcc is required");
@@ -676,6 +684,7 @@ async function cmdSendEmail(opts: any) {
 	if (inReplyTo) payload.inReplyTo = inReplyTo;
 	if (text != null) payload.text = text;
 	if (html != null) payload.html = html;
+	if (markdown != null) payload.markdown = markdown;
 	if (attachments.length) payload.attachments = attachments;
 	if (opts.deleteAfterSend) payload.deleteAfterSend = true;
 
@@ -795,6 +804,10 @@ EXAMPLES
   bun tools/agent-drop.ts send-email --drop lisa \\
     --to '"Bob" <bob@x.com>' --cc team@x.com \\
     --subject Report --body-html ./mail.html --attach logo:./logo.png --dry-run
+
+  # Markdown report -- server renders the HTML, raw markdown is the text part
+  bun tools/agent-drop.ts send-email --drop lisa --to bob@x.com \\
+    --subject "Retrospect" --body-md @./retro.md
 
   # JSON output for piping
   bun tools/agent-drop.ts drops --format json | jq '.drops[].subject'
@@ -1803,6 +1816,10 @@ program
 	.option(
 		"--body-html <html|@file>",
 		"HTML body: literal text, or @path to read a file (@- for stdin)",
+	)
+	.option(
+		"--body-md <markdown|@file>",
+		"Markdown body: rendered server-side to email-safe HTML; the raw markdown becomes the text part",
 	)
 	.option(
 		"--attach <spec>",

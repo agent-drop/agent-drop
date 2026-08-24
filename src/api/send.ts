@@ -7,6 +7,7 @@ import {
 	validateRecipients,
 } from "../lib/email-builder";
 import { generateId } from "../lib/id";
+import { renderMarkdownEmail } from "../lib/markdown";
 import { renderBuilderPreview } from "../lib/mime";
 import { slugifyFilename } from "../lib/normalize";
 import { r2ObjectUrl } from "../types";
@@ -93,6 +94,12 @@ interface EmailBody {
 	subject?: string;
 	text?: string;
 	html?: string;
+	/**
+	 * Markdown source. Rendered server-side into the `html` part and, unless an
+	 * explicit `text` is supplied, carried verbatim as the plain-text part --
+	 * markdown being the one markup a plain-text reader can still read.
+	 */
+	markdown?: string;
 	topic?: string;
 	inReplyTo?: string;
 	attachments?: AttachmentInput[];
@@ -127,9 +134,25 @@ async function prepareEmail(
 	if (!body.subject) {
 		return Response.json({ error: "subject is required" }, { status: 400 });
 	}
-	if (!body.text && !body.html && !body.attachments?.length) {
-		return Response.json({ error: "text, html, or attachments are required" }, { status: 400 });
+	if (!body.text && !body.html && !body.markdown && !body.attachments?.length) {
+		return Response.json(
+			{ error: "text, html, markdown, or attachments are required" },
+			{ status: 400 },
+		);
 	}
+	// Two sources for one MIME part. Silently preferring either one is the kind of
+	// choice that is invisible until a caller wonders why half its message vanished.
+	if (body.markdown && body.html) {
+		return Response.json(
+			{ error: "provide markdown or html, not both (markdown renders the html part)" },
+			{ status: 400 },
+		);
+	}
+
+	// Render before anything else touches the body, so `text` and `html` below are
+	// simply "the parts", whichever field produced them.
+	const text = body.text || body.markdown;
+	const html = body.markdown ? renderMarkdownEmail(body.markdown, body.subject) : body.html;
 
 	// From address: optional +topic, optional display name
 	const addr = `${inbox}${body.topic ? `+${body.topic}` : ""}@${env.DOMAIN}`;
@@ -180,8 +203,8 @@ async function prepareEmail(
 		...destinations,
 	};
 	if (body.replyTo) builder.replyTo = body.replyTo;
-	if (body.text) builder.text = body.text;
-	if (body.html) builder.html = body.html;
+	if (text) builder.text = text;
+	if (html) builder.html = html;
 	if (resolved.length) builder.attachments = resolved.map(toEmailAttachment);
 	// Message-ID and Date are platform-controlled; only threading headers are ours.
 	if (inReplyTo) builder.headers = { "In-Reply-To": inReplyTo, References: inReplyTo };
@@ -240,7 +263,17 @@ export async function handleSend(request: Request, env: Env, inbox: string): Pro
 		`INSERT INTO outbound (id, inbox, to_addr, subject, body_text, ses_message_id, status, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, 'sent', ?)`,
 	)
-		.bind(id, inbox, recipients, body.subject, body.text || body.html || "", messageId, Date.now())
+		// From the builder, not the request body: a markdown send has neither a
+		// `text` nor an `html` field, and logging "" for it would lose the message.
+		.bind(
+			id,
+			inbox,
+			recipients,
+			body.subject,
+			builder.text || builder.html || "",
+			messageId,
+			Date.now(),
+		)
 		.run();
 
 	return Response.json({ sent: true, messageId, recipients: { to, cc, bcc } });
