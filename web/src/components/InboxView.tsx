@@ -103,7 +103,7 @@ export function InboxView() {
 					<p className="text-sm mt-2" style={{ color: "var(--color-fg-dim)" }}>
 						or email{" "}
 						<span style={{ color: "var(--color-cga-cyan)" }}>
-							{name}@{__DOMAIN__}
+							{name}@{__MAIL_DOMAIN__}
 						</span>
 					</p>
 				</div>
@@ -143,7 +143,7 @@ export function InboxView() {
 										: "var(--color-fg-dim)",
 							}}
 						>
-							{googleUser || (dropToken ? "temporary access" : `${name}@${__DOMAIN__}`)}
+							{googleUser || (dropToken ? "temporary access" : `${name}@${__MAIL_DOMAIN__}`)}
 						</span>
 						{googleUser && (
 							<button
@@ -308,7 +308,7 @@ curl -X POST "https://${__DOMAIN__}/api/upload/confirm" \\
 					<p className="mb-2" style={{ color: "var(--color-fg-dim)" }}>
 						<span style={{ color: "var(--color-neon-purple)" }}>#</span> or just email:{" "}
 						<span style={{ color: "var(--color-neon-teal)" }}>
-							{inbox}@{__DOMAIN__}
+							{inbox}@{__MAIL_DOMAIN__}
 						</span>
 					</p>
 				</div>

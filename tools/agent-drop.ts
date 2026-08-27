@@ -70,13 +70,20 @@ function getBaseUrl(): string {
 	);
 }
 
-// Display domain (host of the base URL) used in help text + addressing hints.
+// Display host of the base URL, used in help text about URLs.
 function getDomain(): string {
 	try {
 		return new URL(getBaseUrl()).host;
 	} catch {
 		return "example.com";
 	}
+}
+
+// The domain box addresses live on. Read separately rather than taken from the
+// base URL's host: the Worker may be served from a subdomain of the zone it
+// sends mail from, in which case the two differ.
+function getMailDomain(): string {
+	return process.env.MAIL_DOMAIN || envVars.MAIL_DOMAIN || getDomain();
 }
 
 // ============================================================================
@@ -727,7 +734,9 @@ async function cmdSendEmail(opts: any) {
 	}
 
 	console.log(chalk.bold(`\n  Email sent\n`));
-	console.log(`  From:      ${chalk.cyan(`${drop}${topic ? `+${topic}` : ""}@${getDomain()}`)}`);
+	console.log(
+		`  From:      ${chalk.cyan(`${drop}${topic ? `+${topic}` : ""}@${getMailDomain()}`)}`,
+	);
 	console.log(`  To:        ${data.recipients.to.join(", ") || chalk.dim("(none)")}`);
 	if (data.recipients.cc?.length) console.log(`  Cc:        ${data.recipients.cc.join(", ")}`);
 	if (data.recipients.bcc?.length) console.log(`  Bcc:       ${data.recipients.bcc.join(", ")}`);
@@ -1801,8 +1810,8 @@ program
 // send-email - send an email on behalf of a drop box
 program
 	.command("send-email")
-	.description(`Send an email on behalf of a drop box (From: {drop}@${getDomain()})`)
-	.option("-d, --drop <box>", `Sending box (From: {box}@${getDomain()})`)
+	.description(`Send an email on behalf of a drop box (From: {drop}@${getMailDomain()})`)
+	.option("-d, --drop <box>", `Sending box (From: {box}@${getMailDomain()})`)
 	.option("--to <addr>", `Recipient, repeatable. Accepts '"Name" <a@b.com>'`, collectArg, [])
 	.option("--cc <addr>", "Cc recipient (repeatable)", collectArg, [])
 	.option("--bcc <addr>", "Bcc recipient (repeatable)", collectArg, [])
@@ -1827,7 +1836,7 @@ program
 		collectArg,
 		[],
 	)
-	.option("--topic <topic>", `Send from {box}+{topic}@${getDomain()}`)
+	.option("--topic <topic>", `Send from {box}+{topic}@${getMailDomain()}`)
 	.option("--in-reply-to <dropId|msgId>", "Thread as a reply to a received drop")
 	.option("--template <file.yml>", "Load fields from a YAML template (flags override)")
 	.option("--upload", "Force all local attachments through R2 (default: auto above 1MB)")

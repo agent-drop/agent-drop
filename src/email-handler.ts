@@ -91,7 +91,7 @@ export async function handleEmail(
 				await enqueueRelay(env, {
 					maskId: relay.maskId,
 					direction: "reply",
-					from: `${relay.maskId}@${env.DOMAIN}`,
+					from: `${relay.maskId}@${env.MAIL_DOMAIN}`,
 					to: relay.sender,
 					subject: parsed.subject || "(no subject)",
 					textBody: parsed.text ? stripQuotedText(parsed.text) : undefined,
@@ -117,7 +117,7 @@ export async function handleEmail(
 			const parser = new PostalMime();
 			const parsed = await parser.parse(rawBytes);
 
-			const replyTo = buildRelayAddress(from, maskLookup.id, env.DOMAIN);
+			const replyTo = buildRelayAddress(from, maskLookup.id, env.MAIL_DOMAIN);
 
 			await enqueueRelay(env, {
 				maskId: maskLookup.id,

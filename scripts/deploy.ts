@@ -17,9 +17,9 @@ import path from "node:path";
 import {
 	checkDeployIdentity,
 	describeSpawnFailure,
-	IDENTITY_VARS,
 	type IdentityFields,
 	readDeployIdentity,
+	REQUIRED_IDENTITY_VARS,
 } from "./deploy-identity.ts";
 
 /**
@@ -28,7 +28,7 @@ import {
  */
 const DEPLOY_REDIRECT = "web/.wrangler/deploy/config.json";
 
-const missing = Object.values(IDENTITY_VARS).filter((key) => !process.env[key]);
+const missing = REQUIRED_IDENTITY_VARS.filter((key) => !process.env[key]);
 if (missing.length) {
 	console.error(`Missing required .env vars: ${missing.join(", ")}`);
 	console.error("Copy .env.example to .env and fill in real values.");

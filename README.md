@@ -123,13 +123,22 @@ deploy time.
 cp .env.example .env
 ```
 
-| Var | What |
-|-----|------|
-| `DOMAIN` | apex domain the Worker serves + sends from; route becomes `$DOMAIN/*` |
-| `BRAND` | display name across the web UI + CLI |
-| `CLOUDFLARE_ACCOUNT_ID` | your CF account id |
-| `D1_DATABASE_ID` | the id printed in step 1 |
-| `GOOGLE_CLIENT_ID` | OAuth client id (public) |
+| Var                     | What                                                      |
+|-------------------------|-----------------------------------------------------------|
+| `DOMAIN`                | host the Worker serves from; route becomes `$DOMAIN/*`    |
+| `MAIL_DOMAIN`           | domain boxes send + receive mail on. Defaults to `DOMAIN` |
+| `ZONE_NAME`             | Cloudflare zone owning the route. Defaults to `DOMAIN`    |
+| `BRAND`                 | display name across the web UI + CLI                      |
+| `CLOUDFLARE_ACCOUNT_ID` | your CF account id                                        |
+| `D1_DATABASE_ID`        | the id printed in step 1                                  |
+| `GOOGLE_CLIENT_ID`      | OAuth client id (public)                                  |
+
+Set all three domain vars to the same apex for the simple case. They come apart
+when the apex is already serving something else: put the Worker on a subdomain
+(`DOMAIN=drop.example.com`) while mail keeps the short address
+(`MAIL_DOMAIN=example.com`), and name the zone that owns the route
+(`ZONE_NAME=example.com`) — `zone_name` must be a real Cloudflare zone, which a
+subdomain is not.
 
 ### 3 · Migrate the database + set secrets
 

@@ -24,14 +24,32 @@ export const PLACEHOLDERS = {
 /** The `.env` variable backing each placeholder. */
 export const IDENTITY_VARS = {
 	domain: "DOMAIN",
+	mailDomain: "MAIL_DOMAIN",
+	zoneName: "ZONE_NAME",
 	brand: "BRAND",
 	accountId: "CLOUDFLARE_ACCOUNT_ID",
 	d1DatabaseId: "D1_DATABASE_ID",
 	googleClientId: "GOOGLE_CLIENT_ID",
 } as const;
 
+/**
+ * The vars a deploy cannot proceed without. `MAIL_DOMAIN` and `ZONE_NAME` are
+ * absent on purpose: both fall back to `DOMAIN`, so a deployment whose Worker
+ * host, mail domain and zone are all the same apex never has to set them.
+ */
+export const REQUIRED_IDENTITY_VARS = [
+	IDENTITY_VARS.domain,
+	IDENTITY_VARS.brand,
+	IDENTITY_VARS.accountId,
+	IDENTITY_VARS.d1DatabaseId,
+	IDENTITY_VARS.googleClientId,
+] as const;
+
 export interface DeployIdentity {
+	/** The HTTP host the Worker serves from -- not necessarily the mail domain. */
 	domain: string;
+	mailDomain: string;
+	zoneName: string;
 	brand: string;
 	accountId: string;
 	d1DatabaseId: string;
@@ -58,6 +76,8 @@ export interface IdentityFields {
 export function readDeployIdentity(env: Record<string, string | undefined>): DeployIdentity {
 	return {
 		domain: env[IDENTITY_VARS.domain] || PLACEHOLDERS.domain,
+		mailDomain: env[IDENTITY_VARS.mailDomain] || env[IDENTITY_VARS.domain] || PLACEHOLDERS.domain,
+		zoneName: env[IDENTITY_VARS.zoneName] || env[IDENTITY_VARS.domain] || PLACEHOLDERS.domain,
 		brand: env[IDENTITY_VARS.brand] || PLACEHOLDERS.brand,
 		accountId: env[IDENTITY_VARS.accountId] || PLACEHOLDERS.accountId,
 		d1DatabaseId: env[IDENTITY_VARS.d1DatabaseId] || PLACEHOLDERS.d1DatabaseId,
@@ -77,10 +97,13 @@ function substituteRoute(route: unknown, identity: DeployIdentity): unknown {
 	if (typeof route === "string") return substitute(route, identity);
 	if (!route || typeof route !== "object") return route;
 	const next = { ...(route as Record<string, unknown>) };
-	for (const key of ["pattern", "zone_name", "custom_domain"]) {
+	for (const key of ["pattern", "custom_domain"]) {
 		const value = next[key];
 		if (typeof value === "string") next[key] = substitute(value, identity);
 	}
+	// Same placeholder literal as `pattern`, different meaning: a zone, not a
+	// host. Resolved by key, like BRAND in the vars loop below.
+	if (typeof next.zone_name === "string") next.zone_name = identity.zoneName;
 	return next;
 }
 
@@ -106,6 +129,11 @@ export function applyDeployIdentity(config: IdentityFields, identity: DeployIden
 		// BRAND is a free-text display name, not a token, so it is set rather than
 		// substituted -- the committed value doubles as the default.
 		if (typeof config.vars.BRAND === "string") config.vars.BRAND = identity.brand;
+		// Shares DOMAIN's placeholder literal because it shares its default;
+		// substituting it would silently give it the Worker host.
+		if (typeof config.vars.MAIL_DOMAIN === "string") {
+			config.vars.MAIL_DOMAIN = identity.mailDomain;
+		}
 	}
 }
 
@@ -164,6 +192,11 @@ export function checkDeployIdentity(config: IdentityFields, identity: DeployIden
 	if (config.vars?.DOMAIN !== identity.domain) {
 		problems.push(`vars.DOMAIN is "${config.vars?.DOMAIN}", expected "${identity.domain}"`);
 	}
+	if (config.vars?.MAIL_DOMAIN !== identity.mailDomain) {
+		problems.push(
+			`vars.MAIL_DOMAIN is "${config.vars?.MAIL_DOMAIN}", expected "${identity.mailDomain}"`,
+		);
+	}
 	if (config.vars?.BRAND !== identity.brand) {
 		problems.push(`vars.BRAND is "${config.vars?.BRAND}", expected "${identity.brand}"`);
 	}
@@ -177,6 +210,15 @@ export function checkDeployIdentity(config: IdentityFields, identity: DeployIden
 	);
 	if (!routes.some((pattern) => pattern?.includes(identity.domain))) {
 		problems.push(`no route matches domain "${identity.domain}" (routes: ${routes.join(", ")})`);
+	}
+	// `zone_name` must name a real Cloudflare zone, which a subdomain is not.
+	// Checked here because the route check above reads `pattern` and stops.
+	for (const route of config.routes ?? []) {
+		if (!route || typeof route !== "object") continue;
+		const zoneName = (route as { zone_name?: unknown }).zone_name;
+		if (typeof zoneName === "string" && zoneName !== identity.zoneName) {
+			problems.push(`route zone_name is "${zoneName}", expected "${identity.zoneName}"`);
+		}
 	}
 	return problems;
 }

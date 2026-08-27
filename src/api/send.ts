@@ -155,7 +155,7 @@ async function prepareEmail(
 	const html = body.markdown ? renderMarkdownEmail(body.markdown, body.subject) : body.html;
 
 	// From address: optional +topic, optional display name
-	const addr = `${inbox}${body.topic ? `+${body.topic}` : ""}@${env.DOMAIN}`;
+	const addr = `${inbox}${body.topic ? `+${body.topic}` : ""}@${env.MAIL_DOMAIN}`;
 
 	// Threading: resolve inReplyTo (a drop id -> its message-id, or a raw <message-id>)
 	let inReplyTo: string | undefined;
@@ -237,7 +237,7 @@ export async function handleCompose(request: Request, env: Env, inbox: string): 
 	});
 }
 
-// POST /api/send/:inbox - send an email on behalf of a box (From: {inbox}@DOMAIN)
+// POST /api/send/:inbox - send an email on behalf of a box (From: {inbox}@MAIL_DOMAIN)
 export async function handleSend(request: Request, env: Env, inbox: string): Promise<Response> {
 	const body = (await request.json()) as EmailBody;
 	const prepared = await prepareEmail(env, inbox, body);

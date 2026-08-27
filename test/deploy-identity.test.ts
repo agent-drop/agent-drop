@@ -15,6 +15,8 @@ import {
 
 const REAL: DeployIdentity = {
 	domain: "drops.example-real.dev",
+	mailDomain: "example-real.dev",
+	zoneName: "example-real.dev",
 	brand: "FRST",
 	accountId: "aaaaaaaabbbbbbbbccccccccdddddddd",
 	d1DatabaseId: "11111111-2222-3333-4444-555555555555",
@@ -34,6 +36,8 @@ describe("readDeployIdentity", () => {
 	test("falls back to the committed placeholders when nothing is set", () => {
 		expect(readDeployIdentity({})).toEqual({
 			domain: PLACEHOLDERS.domain,
+			mailDomain: PLACEHOLDERS.domain,
+			zoneName: PLACEHOLDERS.domain,
 			brand: PLACEHOLDERS.brand,
 			accountId: PLACEHOLDERS.accountId,
 			d1DatabaseId: PLACEHOLDERS.d1DatabaseId,
@@ -44,12 +48,22 @@ describe("readDeployIdentity", () => {
 	test("reads every field from its documented .env var", () => {
 		const identity = readDeployIdentity({
 			[IDENTITY_VARS.domain]: REAL.domain,
+			[IDENTITY_VARS.mailDomain]: REAL.mailDomain,
+			[IDENTITY_VARS.zoneName]: REAL.zoneName,
 			[IDENTITY_VARS.brand]: REAL.brand,
 			[IDENTITY_VARS.accountId]: REAL.accountId,
 			[IDENTITY_VARS.d1DatabaseId]: REAL.d1DatabaseId,
 			[IDENTITY_VARS.googleClientId]: REAL.googleClientId,
 		});
 		expect(identity).toEqual(REAL);
+	});
+
+	// The compatibility guarantee: a deployment whose Worker host, mail domain
+	// and zone are all one apex never has to know these two vars exist.
+	test("MAIL_DOMAIN and ZONE_NAME fall back to DOMAIN when unset", () => {
+		const identity = readDeployIdentity({ [IDENTITY_VARS.domain]: REAL.domain });
+		expect(identity.mailDomain).toBe(REAL.domain);
+		expect(identity.zoneName).toBe(REAL.domain);
 	});
 
 	test("treats an empty string as unset rather than as a real value", () => {
@@ -66,6 +80,7 @@ describe("the committed wrangler.toml", () => {
 		expect(config.account_id).toBe(PLACEHOLDERS.accountId);
 		expect(config.d1_databases?.[0]?.database_id).toBe(PLACEHOLDERS.d1DatabaseId);
 		expect(config.vars?.DOMAIN).toBe(PLACEHOLDERS.domain);
+		expect(config.vars?.MAIL_DOMAIN).toBe(PLACEHOLDERS.domain);
 		expect(config.vars?.BRAND).toBe(PLACEHOLDERS.brand);
 		expect(config.vars?.R2_ACCOUNT_ID).toBe(PLACEHOLDERS.accountId);
 		expect(config.vars?.GOOGLE_CLIENT_ID_PUBLIC).toBe(PLACEHOLDERS.googleClientId);
@@ -106,6 +121,7 @@ describe("applyDeployIdentity", () => {
 			d1_databases: [{ database_id: PLACEHOLDERS.d1DatabaseId }],
 			vars: {
 				DOMAIN: PLACEHOLDERS.domain,
+				MAIL_DOMAIN: PLACEHOLDERS.domain,
 				BRAND: PLACEHOLDERS.brand,
 				R2_ACCOUNT_ID: PLACEHOLDERS.accountId,
 				GOOGLE_CLIENT_ID_PUBLIC: PLACEHOLDERS.googleClientId,
@@ -115,10 +131,11 @@ describe("applyDeployIdentity", () => {
 		applyDeployIdentity(config, REAL);
 		expect(config).toEqual({
 			account_id: REAL.accountId,
-			routes: [{ pattern: `${REAL.domain}/*`, zone_name: REAL.domain }],
+			routes: [{ pattern: `${REAL.domain}/*`, zone_name: REAL.zoneName }],
 			d1_databases: [{ database_id: REAL.d1DatabaseId }],
 			vars: {
 				DOMAIN: REAL.domain,
+				MAIL_DOMAIN: REAL.mailDomain,
 				BRAND: REAL.brand,
 				R2_ACCOUNT_ID: REAL.accountId,
 				GOOGLE_CLIENT_ID_PUBLIC: REAL.googleClientId,
@@ -170,8 +187,9 @@ describe("checkDeployIdentity", () => {
 	test("reports a config that was built without .env", () => {
 		const config = committedConfig();
 		const problems = checkDeployIdentity(config, REAL);
-		// Every identity-bearing field is wrong, and the route no longer matches.
-		expect(problems.length).toBe(6);
+		// Every identity-bearing field is wrong, and neither the route pattern nor
+		// its zone_name matches.
+		expect(problems.length).toBe(8);
 		expect(problems.join("\n")).toContain(PLACEHOLDERS.accountId);
 	});
 
@@ -193,8 +211,19 @@ describe("checkDeployIdentity", () => {
 
 	test("catches a route pointing at the wrong domain", () => {
 		const config = injected();
-		config.routes = [{ pattern: "someone-elses.dev/*", zone_name: "someone-elses.dev" }];
+		config.routes = [{ pattern: "someone-elses.dev/*", zone_name: REAL.zoneName }];
 		expect(checkDeployIdentity(config, REAL)).toHaveLength(1);
+	});
+
+	// The failure this guard exists for: `zone_name` names a Cloudflare zone, so
+	// a Worker on a subdomain must not carry its own host there. Left unchecked,
+	// wrangler fails at zone lookup with an error that reads like a bad token.
+	test("catches a zone_name that copied the Worker host", () => {
+		const config = injected();
+		config.routes = [{ pattern: `${REAL.domain}/*`, zone_name: REAL.domain }];
+		expect(checkDeployIdentity(config, REAL)).toEqual([
+			`route zone_name is "${REAL.domain}", expected "${REAL.zoneName}"`,
+		]);
 	});
 
 	test("accepts a route given as a bare string", () => {
