@@ -119,7 +119,7 @@ R2_SECRET_ACCESS_KEY=...       # R2 API token secret
 
 All vars except `API_KEY` are set as wrangler secrets on the Worker.
 
-**Also in `~/.secrets`:** `AGENT_DROP_ADMIN_KEY` and `AGENT_DROP_API_KEY` (for CLI usage from any directory).
+**Also in passage:** `AGENT_DROP_ADMIN_KEY` and `AGENT_DROP_API_KEY` (`key NAME` reads env/NAME, `key-set NAME` stores it). The CLI takes each from the shell env var first, then passage, then this `.env`, so it works from any directory with nothing exported. The Google OAuth client secret JSON is `key projects/agent-drop/google-oauth-client.json`.
 
 ## API Endpoints
 

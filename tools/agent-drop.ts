@@ -11,6 +11,7 @@ import { formatOutput, addCommonOptions, createLogger } from "./lib/cli-utils";
 import { signRequest } from "./lib/hook-sign";
 import { emitEvents } from "./lib/queue-emit";
 import { previewRule } from "./lib/rule-preview";
+import { lookupSecret, type SecretLookup, setSecretHint } from "./lib/secrets";
 import { replayableHeaders } from "../src/lib/webhook-headers";
 import chalk from "chalk";
 import * as fs from "node:fs";
@@ -35,17 +36,29 @@ function loadEnvFile(filePath: string): Record<string, string> {
 	return vars;
 }
 
-// Load the project .env (env vars from the shell / ~/.secrets take precedence)
+// Load the project .env (the shell env and passage take precedence)
 const envVars = loadEnvFile(AGENT_DROP_ENV);
 
+// Shell env var, else passage (`key NAME`, which replaced the ~/.secrets export).
+// Memoized: every API call asks, and a passage read is an age decrypt.
+const secretLookups = new Map<string, SecretLookup>();
+function cliSecret(name: string): SecretLookup {
+	let lookup = secretLookups.get(name);
+	if (!lookup) {
+		lookup = lookupSecret(name);
+		secretLookups.set(name, lookup);
+	}
+	return lookup;
+}
+
 function getAdminKey(): string {
-	const key = process.env.AGENT_DROP_ADMIN_KEY || envVars.ADMIN_API_KEY;
+	const admin = cliSecret("AGENT_DROP_ADMIN_KEY");
+	const key = admin.found ? admin.value : envVars.ADMIN_API_KEY;
 	if (!key) {
-		console.error(
-			chalk.red(
-				"No admin key found. Set AGENT_DROP_ADMIN_KEY or add ADMIN_API_KEY to agent-drop/.env",
-			),
-		);
+		console.error(chalk.red("No admin key found."));
+		if (!admin.found) console.error(chalk.dim(admin.problem));
+		console.error(chalk.dim(setSecretHint("AGENT_DROP_ADMIN_KEY")));
+		console.error(chalk.dim("Or add ADMIN_API_KEY to agent-drop/.env"));
 		process.exit(1);
 	}
 	return key;
@@ -53,7 +66,8 @@ function getAdminKey(): string {
 
 function getApiKey(): string {
 	// For inbox/send routes, use the ad_* API key
-	const key = process.env.AGENT_DROP_API_KEY || envVars.API_KEY;
+	const api = cliSecret("AGENT_DROP_API_KEY");
+	const key = api.found ? api.value : envVars.API_KEY;
 	if (!key) {
 		// Fall back to admin key (works for admin-only routes)
 		return getAdminKey();
@@ -768,19 +782,21 @@ DESCRIPTION
   --compose to assemble the raw .eml without sending), and host static sites.
 
 AUTHENTICATION
-  Two keys are used (both auto-loaded from context/projects/agent-drop/.env):
-    - Admin key (ADMIN_API_KEY): for drops, boxes, keys, targets
-    - API key (API_KEY): for inbox reads and sends
+  Two keys are used, each taken from the first place that has it:
+    - Admin key, for drops, boxes, keys, targets:
+        AGENT_DROP_ADMIN_KEY env var, else passage (\`key AGENT_DROP_ADMIN_KEY\`),
+        else ADMIN_API_KEY in agent-drop/.env
+    - API key, for inbox reads and sends:
+        AGENT_DROP_API_KEY env var, else passage (\`key AGENT_DROP_API_KEY\`),
+        else API_KEY in agent-drop/.env, else the admin key
 
-  Override via env vars:
-    - AGENT_DROP_ADMIN_KEY overrides ADMIN_API_KEY
-    - AGENT_DROP_API_KEY overrides API_KEY
+  Store a key in passage with: key-set AGENT_DROP_ADMIN_KEY / key-set AGENT_DROP_API_KEY
 
 ENVIRONMENT
   AGENT_DROP_URL        API base URL (default https://frst.dev via DOMAIN in .env).
                         If unset you get the "Example Domain" 404 page.
-  AGENT_DROP_ADMIN_KEY  Override admin API key
-  AGENT_DROP_API_KEY    Override API key (for inbox/send routes)
+  AGENT_DROP_ADMIN_KEY  Admin API key (overrides passage and .env)
+  AGENT_DROP_API_KEY    API key for inbox/send routes (overrides passage and .env)
 
 EXAMPLES
   # List recent drops across all inboxes
