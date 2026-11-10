@@ -1,8 +1,6 @@
-import { generateApiKey } from "../lib/auth";
+import { API_KEY_PERMISSIONS, generateApiKey, isApiKeyPermission } from "../lib/auth";
 import { normalizeInbox } from "../lib/normalize";
 import type { Env, ApiKey } from "../types";
-
-export const API_KEY_PERMISSIONS = ["read", "write", "admin"] as const;
 
 export async function handleKeys(request: Request, env: Env, url: URL): Promise<Response> {
 	const method = request.method;
@@ -23,10 +21,7 @@ export async function handleKeys(request: Request, env: Env, url: URL): Promise<
 			body.permissions === undefined || body.permissions === null || body.permissions === ""
 				? "read"
 				: body.permissions;
-		if (
-			typeof permissions !== "string" ||
-			!API_KEY_PERMISSIONS.includes(permissions as (typeof API_KEY_PERMISSIONS)[number])
-		) {
+		if (!isApiKeyPermission(permissions)) {
 			return Response.json(
 				{ error: `permissions must be one of: ${API_KEY_PERMISSIONS.join(", ")}` },
 				{ status: 400 },

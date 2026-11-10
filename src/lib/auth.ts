@@ -1,6 +1,13 @@
 import { constantTimeEqual } from "./compare";
 import type { Env } from "../types";
 
+export const API_KEY_PERMISSIONS = ["read", "write", "admin"] as const;
+export type ApiKeyPermission = (typeof API_KEY_PERMISSIONS)[number];
+
+export function isApiKeyPermission(value: unknown): value is ApiKeyPermission {
+	return typeof value === "string" && API_KEY_PERMISSIONS.includes(value as ApiKeyPermission);
+}
+
 export async function hashKey(key: string): Promise<string> {
 	const encoded = new TextEncoder().encode(key);
 	const hash = await crypto.subtle.digest("SHA-256", encoded);
@@ -34,6 +41,9 @@ export async function validateApiKey(
 		.first<{ name: string; inbox_scope: string | null; permissions: string }>();
 
 	if (!row) {
+		return { valid: false, inboxScope: null, permissions: "", keyName: null };
+	}
+	if (!isApiKeyPermission(row.permissions)) {
 		return { valid: false, inboxScope: null, permissions: "", keyName: null };
 	}
 
