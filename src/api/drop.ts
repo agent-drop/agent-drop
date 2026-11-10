@@ -1,7 +1,12 @@
 import { generateId } from "../lib/id";
+import { readBodyCapped } from "../lib/body-limit";
 import { slugifyFilename } from "../lib/normalize";
 import { fireRules } from "../lib/rules";
 import type { Env, Drop } from "../types";
+
+export const MAX_DIRECT_MULTIPART_BYTES = 25 * 1024 * 1024;
+export const MAX_DIRECT_UPLOAD_BYTES = 20 * 1024 * 1024;
+export const MAX_DIRECT_UPLOAD_FILES = 32;
 
 export interface DropContext {
 	authMethod: "api_key" | "drop_token" | "email";
@@ -47,24 +52,64 @@ export async function handleDrop(
 	});
 
 	if (contentType.includes("multipart/form-data")) {
-		const formData = await request.formData();
-		const subject = (formData.get("subject") as string) || null;
-		const bodyText = (formData.get("text") as string) || null;
+		const declaredHeader = request.headers.get("content-length");
+		const declared = declaredHeader === null ? Number.NaN : Number(declaredHeader);
+		if (Number.isFinite(declared) && declared > MAX_DIRECT_MULTIPART_BYTES) {
+			return Response.json({ error: "multipart request body is too large" }, { status: 413 });
+		}
+
+		const bodyRead = await readBodyCapped(request.body, MAX_DIRECT_MULTIPART_BYTES);
+		if (!bodyRead.ok) {
+			return Response.json(
+				{
+					error:
+						bodyRead.reason === "too-large"
+							? "multipart request body is too large"
+							: "could not read multipart request body",
+				},
+				{ status: bodyRead.reason === "too-large" ? 413 : 400 },
+			);
+		}
+
+		let formData: FormData;
+		try {
+			formData = await new Response(bodyRead.bytes, {
+				headers: { "Content-Type": contentType },
+			}).formData();
+		} catch {
+			return Response.json({ error: "invalid multipart form data" }, { status: 400 });
+		}
+
+		const subjectValue = formData.get("subject");
+		const textValue = formData.get("text");
+		const subject = typeof subjectValue === "string" ? subjectValue || null : null;
+		const bodyText = typeof textValue === "string" ? textValue || null : null;
+		const files = Array.from(formData.values()).filter(
+			(value): value is File => typeof value !== "string",
+		);
+		if (files.length > MAX_DIRECT_UPLOAD_FILES) {
+			return Response.json(
+				{ error: `too many files (max ${MAX_DIRECT_UPLOAD_FILES})` },
+				{ status: 413 },
+			);
+		}
+		if (files.some((file) => file.size > MAX_DIRECT_UPLOAD_BYTES)) {
+			return Response.json(
+				{ error: `file exceeds direct-upload limit (${MAX_DIRECT_UPLOAD_BYTES} bytes)` },
+				{ status: 413 },
+			);
+		}
 
 		let attachmentCount = 0;
 		const filenames: string[] = [];
-		for (const [, value] of formData.entries()) {
-			// FormDataEntryValue is `File | string`; narrowing off the primitive is the
-			// only form TS accepts here (`instanceof` rejects a union with a primitive).
-			if (typeof value !== "string") {
-				const slugged = slugifyFilename(value.name);
-				await env.BUCKET.put(`${r2Prefix}/uploads/${slugged}`, await value.arrayBuffer(), {
-					httpMetadata: { contentType: value.type },
-					customMetadata: { originalFilename: value.name },
-				});
-				filenames.push(slugged);
-				attachmentCount++;
-			}
+		for (const file of files) {
+			const slugged = slugifyFilename(file.name);
+			await env.BUCKET.put(`${r2Prefix}/uploads/${slugged}`, file, {
+				httpMetadata: { contentType: file.type },
+				customMetadata: { originalFilename: file.name },
+			});
+			filenames.push(slugged);
+			attachmentCount++;
 		}
 
 		await env.DB.prepare(

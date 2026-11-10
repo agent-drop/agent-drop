@@ -193,6 +193,8 @@ curl -X POST $KEY -H "Content-Type: application/json" \
   https://frst.dev/api/drop/{name}
 
 # Upload files
+# Direct multipart accepts up to 32 files, 20 MiB each, in a 25 MiB request.
+# Use the presigned upload endpoints below for larger files.
 curl -X POST $KEY -F "file=@document.pdf" \
   https://frst.dev/api/drop/{name}
 

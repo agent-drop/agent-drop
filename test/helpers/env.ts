@@ -130,8 +130,13 @@ export function makeBucket(objects: Record<string, string | Uint8Array> = {}): R
 				delete objects[key];
 			}
 		},
-		put: async (key: string, body: string | Uint8Array | ArrayBuffer) => {
-			objects[key] = body instanceof ArrayBuffer ? new Uint8Array(body) : body;
+		put: async (key: string, body: string | Uint8Array | ArrayBuffer | Blob) => {
+			objects[key] =
+				body instanceof Blob
+					? new Uint8Array(await body.arrayBuffer())
+					: body instanceof ArrayBuffer
+						? new Uint8Array(body)
+						: body;
 			return { key };
 		},
 		get: async (key: string) => {
