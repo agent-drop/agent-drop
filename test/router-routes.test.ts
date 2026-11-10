@@ -543,12 +543,56 @@ describe("presigned upload routes", () => {
 			"POST",
 			"/api/upload/multipart/lisa",
 			{ Authorization: "Bearer ad_writer" },
-			{ fileName: "big.zip", fileSize: 60 * 1024 * 1024 },
+			{ fileName: "big.zip", fileSize: 700 * 1024 * 1024 },
 		);
 		expect(res.status).toBe(200);
 		const body = (await res.json()) as { uploadId: string; parts: { partNumber: number }[] };
 		expect(body.uploadId).toBe("up-42");
-		expect(body.parts).toHaveLength(2);
+		expect(body.parts).toHaveLength(14);
+	});
+
+	test("POST /api/upload/multipart/:name rejects invalid sizes before calling R2", async () => {
+		const env = makeEnv();
+		await seedApiKey(env, "ad_writer", { permissions: "write" });
+		let r2Calls = 0;
+		globalThis.fetch = (async () => {
+			r2Calls++;
+			return new Response("unexpected");
+		}) as unknown as typeof fetch;
+
+		for (const fileSize of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+			const res = await send(
+				env,
+				"POST",
+				"/api/upload/multipart/lisa",
+				{ Authorization: "Bearer ad_writer" },
+				{ fileName: "big.zip", fileSize },
+			);
+			expect(res.status).toBe(400);
+		}
+
+		expect(r2Calls).toBe(0);
+	});
+
+	test("POST /api/upload/multipart/:name caps the number of signed parts", async () => {
+		const env = makeEnv();
+		await seedApiKey(env, "ad_writer", { permissions: "write" });
+		let r2Calls = 0;
+		globalThis.fetch = (async () => {
+			r2Calls++;
+			return new Response("unexpected");
+		}) as unknown as typeof fetch;
+
+		const res = await send(
+			env,
+			"POST",
+			"/api/upload/multipart/lisa",
+			{ Authorization: "Bearer ad_writer" },
+			{ fileName: "too-big.zip", fileSize: 50 * 1024 * 1024 * 100 + 1 },
+		);
+
+		expect(res.status).toBe(413);
+		expect(r2Calls).toBe(0);
 	});
 
 	test("POST /api/upload/multipart/:name rejects a read-only key", async () => {
