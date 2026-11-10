@@ -330,7 +330,9 @@ Every drop records:
 | `country` | Country code (via CF-IPCountry) |
 | `city` | City (via CF geo) |
 | `from_name` | Sender name (email only) |
+| `from_header` | First RFC 5322 From header; unlike `from_addr`, this is not the envelope sender (email only) |
 | `message_id` | Email Message-ID header (email only) |
+| `sender_auth` | Trusted Cloudflare SPF, DKIM, and DMARC verdicts, or `null` (email only) |
 
 Stored as JSON in the `metadata` column.
 
@@ -341,7 +343,8 @@ Inbound emails are processed by `email-handler.ts`:
 - **Quote stripping** - `stripQuotedText` removes forwarded/reply chains from plain text; `stripQuotedHtml` does the same for HTML
 - Raw email stored in R2; stripped body stored in D1
 - Attachments extracted and stored in R2 under `{drop-id}/attachments/`
-- `from_name` and `message_id` captured in drop metadata
+- `from_name`, `from_header`, and `message_id` captured in drop metadata
+- `sender_auth` records the first `Authentication-Results` field only when its authentication service is exactly `mx.cloudflare.net`; missing, malformed, or untrusted results become `null`
 
 ## Inbox Name Normalization
 
@@ -668,7 +671,14 @@ Webhooks POST JSON to the target URL. A **drop** publishes `drop.created`:
     "metadata": {
       "auth_method": "email",
       "from_name": "Accounting Dept",
-      "message_id": "<abc123@mail.example.com>"
+      "from_header": "Accounting Dept <accounting@example.com>",
+      "message_id": "<abc123@mail.example.com>",
+      "sender_auth": {
+        "authserv": "mx.cloudflare.net",
+        "spf": ["pass"],
+        "dkim": ["pass"],
+        "dmarc": ["pass"]
+      }
     },
     "created_at": 1775112960019
   },
