@@ -10,7 +10,9 @@ import {
 	parseAddress,
 	toEmailAttachment,
 	toRecipients,
+	validateHeaderValue,
 	validateHeaders,
+	validateMessageId,
 	validateRecipients,
 } from "../src/lib/email-builder";
 
@@ -87,6 +89,33 @@ describe("validateRecipients", () => {
 		expect(error).toMatch(/too many recipients: 51/);
 		expect(error).toContain(String(MAX_RECIPIENTS));
 	});
+
+	test("rejects a recipient that can inject another header line", () => {
+		expect(validateRecipients(["safe@example.com\r\nBcc: stolen@example.com"], [], [])).toMatch(
+			/control character/,
+		);
+	});
+});
+
+describe("header structure", () => {
+	test("rejects CR, LF, NUL, tabs, and DEL without rejecting Unicode", () => {
+		for (const control of ["\r", "\n", "\0", "\t", "\u007f"]) {
+			expect(validateHeaderValue("subject", `safe${control}unsafe`)).toMatch(/control character/);
+		}
+		expect(validateHeaderValue("subject", "Résumé ✅")).toBeNull();
+	});
+
+	test("accepts one Message-ID token and rejects fragments or lists", () => {
+		expect(validateMessageId("<one@example.com>")).toBeNull();
+		for (const value of [
+			"one@example.com",
+			"<one>",
+			"<one@example.com> <two@example.com>",
+			"<one@example.com>\r\nBcc: stolen@example.com",
+		]) {
+			expect(validateMessageId(value)).not.toBeNull();
+		}
+	});
 });
 
 describe("validateHeaders", () => {
@@ -141,6 +170,12 @@ describe("validateHeaders", () => {
 		// A 4-byte emoji repeated past the value cap is under it by .length.
 		const value = "\u{1F600}".repeat(600); // 600 chars, 2400 bytes
 		expect(validateHeaders({ "X-Emoji": value })).toMatch(/header value too long/);
+	});
+
+	test("rejects controls before measuring otherwise-short headers", () => {
+		expect(validateHeaders({ "X-Safe": "ok\r\nBcc: stolen@example.com" })).toMatch(
+			/control character/,
+		);
 	});
 });
 

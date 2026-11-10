@@ -3,7 +3,9 @@ import {
 	type ResolvedAttachment,
 	toEmailAttachment,
 	toRecipients,
+	validateHeaderValue,
 	validateHeaders,
+	validateMessageId,
 	validateRecipients,
 } from "../lib/email-builder";
 import { readBodyCapped } from "../lib/body-limit";
@@ -95,6 +97,18 @@ async function resolveAttachment(
 ): Promise<{ attachment: ResolvedAttachment; size: number }> {
 	if (!a || typeof a !== "object") {
 		throw new AttachmentResolutionError("each attachment must be an object");
+	}
+	for (const [label, value] of [
+		["attachment filename", a.filename],
+		["attachment contentType", a.contentType],
+		["attachment cid", a.cid],
+	] as const) {
+		if (value === undefined) continue;
+		if (typeof value !== "string") {
+			throw new AttachmentResolutionError(`${label} must be a string`);
+		}
+		const error = validateHeaderValue(label, value);
+		if (error) throw new AttachmentResolutionError(error);
 	}
 	const inline = !!a.inline || !!a.cid;
 	const maxBytes = Math.min(MAX_ATTACHMENT_BYTES, remainingBytes);
@@ -285,6 +299,20 @@ async function prepareEmail(
 	if (!body.subject) {
 		return Response.json({ error: "subject is required" }, { status: 400 });
 	}
+	for (const [label, value] of [
+		["subject", body.subject],
+		["replyTo", body.replyTo],
+		["fromName", body.fromName],
+		["topic", body.topic],
+		["inReplyTo", body.inReplyTo],
+	] as const) {
+		if (value === undefined || value === null) continue;
+		if (typeof value !== "string") {
+			return Response.json({ error: `${label} must be a string` }, { status: 400 });
+		}
+		const error = validateHeaderValue(label, value);
+		if (error) return Response.json({ error }, { status: 400 });
+	}
 	if (!body.text && !body.html && !body.markdown && !body.attachments?.length) {
 		return Response.json(
 			{ error: "text, html, markdown, or attachments are required" },
@@ -329,12 +357,16 @@ async function prepareEmail(
 			if (row?.metadata) {
 				try {
 					const m = JSON.parse(row.metadata);
-					if (m.message_id) inReplyTo = m.message_id;
+					if (typeof m.message_id === "string") inReplyTo = m.message_id;
 				} catch {
 					/* ignore malformed metadata */
 				}
 			}
 		}
+	}
+	if (inReplyTo) {
+		const messageIdError = validateMessageId(inReplyTo);
+		if (messageIdError) return Response.json({ error: messageIdError }, { status: 400 });
 	}
 
 	// Resolve attachment sources into bytes

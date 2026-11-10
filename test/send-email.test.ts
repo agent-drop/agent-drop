@@ -656,6 +656,49 @@ describe("prepareEmail -- validation", () => {
 		expect(response.status).toBe(400);
 		expect(email.sends).toHaveLength(0);
 	});
+
+	test("rejects controls in every request field that becomes a header", async () => {
+		const injected = "safe\r\nBcc: stolen@example.com";
+		const cases = [
+			{ ...PLAIN, subject: injected },
+			{ ...PLAIN, replyTo: injected },
+			{ ...PLAIN, fromName: injected },
+			{ ...PLAIN, topic: injected },
+			{ ...PLAIN, inReplyTo: `<one@example.com>\r\nBcc: stolen@example.com` },
+			{ ...PLAIN, to: injected },
+			{ ...PLAIN, attachments: [{ filename: injected, dataBase64: "eA==" }] },
+			{ ...PLAIN, attachments: [{ contentType: injected, dataBase64: "eA==" }] },
+			{ ...PLAIN, attachments: [{ cid: injected, dataBase64: "eA==" }] },
+		];
+
+		for (const body of cases) {
+			const { email, response } = await send(body);
+			expect(response.status).toBe(400);
+			expect(((await response.json()) as { error: string }).error).toMatch(/control character/);
+			expect(email.sends).toHaveLength(0);
+		}
+	});
+
+	test("rejects a raw inReplyTo value that is not one Message-ID token", async () => {
+		const { email, response } = await send({ ...PLAIN, inReplyTo: "<missing-domain>" });
+
+		expect(response.status).toBe(400);
+		expect(email.sends).toHaveLength(0);
+	});
+
+	test("preserves normal Unicode in header-derived fields", async () => {
+		const { email, response } = await send({
+			...PLAIN,
+			subject: "Résumé ✅",
+			fromName: "Åsa",
+			attachments: [{ filename: "résumé-✅.txt", dataBase64: "eA==" }],
+		});
+
+		expect(response.status).toBe(200);
+		expect(onlyBuilder(email).subject).toBe("Résumé ✅");
+		expect(onlyBuilder(email).from).toEqual({ name: "Åsa", email: "lisa@drop.test" });
+		expect(onlyBuilder(email).attachments?.[0].filename).toBe("résumé-✅.txt");
+	});
 });
 
 describe("handleCompose -- the dry-run preview", () => {
@@ -746,5 +789,23 @@ describe("handleCompose -- the dry-run preview", () => {
 		);
 
 		expect(response.status).toBe(400);
+	});
+
+	test("a raw Message-ID cannot inject another MIME header into the preview", async () => {
+		const email = makeEmail();
+		const env = makeEnv({ EMAIL: email as unknown as Env["EMAIL"] });
+		const response = await handleCompose(
+			jsonRequest("https://drop.test/api/compose/lisa", {
+				...PLAIN,
+				inReplyTo: "<one@example.com>\r\nBcc: stolen@example.com",
+			}),
+			env,
+			"lisa",
+		);
+
+		expect(response.status).toBe(400);
+		const body = await response.text();
+		expect(body).not.toContain("Bcc:");
+		expect(email.sends).toHaveLength(0);
 	});
 });
