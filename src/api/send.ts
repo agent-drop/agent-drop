@@ -44,7 +44,19 @@ function asList(v: string | string[] | undefined): string[] {
 }
 
 // Resolve an attachment source (base64 / R2 / URL) into bytes
-async function resolveAttachment(env: Env, a: AttachmentInput): Promise<ResolvedAttachment> {
+function outboundTempPrefix(inbox: string): string {
+	return `outbound/temp/${inbox}/`;
+}
+
+function isOwnedOutboundKey(inbox: string, key: string): boolean {
+	return key.startsWith(outboundTempPrefix(inbox));
+}
+
+async function resolveAttachment(
+	env: Env,
+	inbox: string,
+	a: AttachmentInput,
+): Promise<ResolvedAttachment> {
 	const inline = !!a.inline || !!a.cid;
 
 	if (a.dataBase64) {
@@ -58,6 +70,9 @@ async function resolveAttachment(env: Env, a: AttachmentInput): Promise<Resolved
 	}
 
 	if (a.r2Key) {
+		if (!isOwnedOutboundKey(inbox, a.r2Key)) {
+			throw new Error("R2 attachment key is not owned by this inbox");
+		}
 		const obj = await env.BUCKET.get(a.r2Key);
 		if (!obj) throw new Error(`attachment not found in R2: ${a.r2Key}`);
 		return {
@@ -180,7 +195,9 @@ async function prepareEmail(
 	// Resolve attachment sources into bytes
 	let resolved: ResolvedAttachment[];
 	try {
-		resolved = await Promise.all((body.attachments || []).map((a) => resolveAttachment(env, a)));
+		resolved = await Promise.all(
+			(body.attachments || []).map((a) => resolveAttachment(env, inbox, a)),
+		);
 	} catch (err) {
 		return Response.json(
 			{ error: err instanceof Error ? err.message : "attachment resolution failed" },
@@ -252,7 +269,7 @@ export async function handleSend(request: Request, env: Env, inbox: string): Pro
 	if (body.deleteAfterSend) {
 		const keys = (body.attachments || [])
 			.map((a) => a.r2Key)
-			.filter((k): k is string => !!k && k.startsWith("outbound/temp/"));
+			.filter((k): k is string => !!k && isOwnedOutboundKey(inbox, k));
 		await Promise.all(keys.map((k) => env.BUCKET.delete(k)));
 	}
 

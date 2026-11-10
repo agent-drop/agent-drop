@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { handleCompose, handleSend } from "../src/api/send";
 import type { Env } from "../src/types";
 import { type FakeEmail, makeEmail, onlyBuilder } from "./helpers/email";
-import { jsonRequest, makeEnv, type TestEnv } from "./helpers/env";
+import { jsonRequest, makeBucket, makeEnv, type TestEnv } from "./helpers/env";
 
 /**
  * The representative message set the PLAN names for phase 3, asserted against
@@ -198,6 +198,76 @@ describe("handleSend -- one send for the whole recipient list", () => {
 		};
 		expect(row.ses_message_id).toBe("cf-xyz-9");
 		expect(row.to_addr).toBe("bob@example.com, team@example.com");
+	});
+});
+
+describe("handleSend -- outbound R2 attachment ownership", () => {
+	test("reads an attachment uploaded under the sending inbox", async () => {
+		const email = makeEmail();
+		const key = "outbound/temp/lisa/upload/report.txt";
+		const env = makeEnv({
+			BUCKET: makeBucket({ [key]: "owned attachment" }),
+			EMAIL: email as unknown as Env["EMAIL"],
+		});
+
+		const response = await handleSend(
+			jsonRequest("https://drop.test/api/send/lisa", {
+				...PLAIN,
+				attachments: [{ r2Key: key }],
+			}),
+			env,
+			"lisa",
+		);
+
+		expect(response.status).toBe(200);
+		expect(
+			new TextDecoder().decode(onlyBuilder(email).attachments?.[0].content as ArrayBuffer),
+		).toBe("owned attachment");
+	});
+
+	test("rejects an R2 key outside the sending inbox before reading it", async () => {
+		const email = makeEmail();
+		const env = makeEnv({
+			BUCKET: makeBucket({ "sites/bob/private/index.html": "secret" }),
+			EMAIL: email as unknown as Env["EMAIL"],
+		});
+
+		const response = await handleSend(
+			jsonRequest("https://drop.test/api/send/lisa", {
+				...PLAIN,
+				attachments: [{ r2Key: "sites/bob/private/index.html" }],
+			}),
+			env,
+			"lisa",
+		);
+
+		expect(response.status).toBe(400);
+		expect((await response.json()) as { error: string }).toEqual({
+			error: "R2 attachment key is not owned by this inbox",
+		});
+		expect(email.sends).toHaveLength(0);
+	});
+
+	test("deleteAfterSend cannot delete another inbox's temporary object", async () => {
+		const bucket = makeBucket({ "outbound/temp/bob/upload/report.txt": "keep me" });
+		const env = makeEnv({ BUCKET: bucket, EMAIL: makeEmail() as unknown as Env["EMAIL"] });
+		const response = await handleSend(
+			jsonRequest("https://drop.test/api/send/lisa", {
+				...PLAIN,
+				deleteAfterSend: true,
+				attachments: [
+					{
+						dataBase64: "b3duZWQgYnl0ZXM=",
+						r2Key: "outbound/temp/bob/upload/report.txt",
+					},
+				],
+			}),
+			env,
+			"lisa",
+		);
+
+		expect(response.status).toBe(200);
+		expect(bucket.deletes).toEqual([]);
 	});
 });
 
