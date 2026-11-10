@@ -122,12 +122,14 @@ const OPEN_ROUTES: Route<OpenRoute>[] = [
 	{
 		method: "GET",
 		match: exact("/api/drops"),
-		run: asAdminOrAdminKey(({ env, url }) => handleDropsList(env, url)),
+		run: asAdminOrAdminKey(({ env, url }, _params, inboxScope) =>
+			handleDropsList(env, url, inboxScope),
+		),
 	},
 	{
 		method: "GET",
 		match: exact("/api/boxes"),
-		run: asAdminOrAdminKey(({ env }) => handleBoxesList(env)),
+		run: asAdminOrAdminKey(({ env }, _params, inboxScope) => handleBoxesList(env, inboxScope)),
 	},
 
 	// Writes into a box, by API key, drop token or Google identity.

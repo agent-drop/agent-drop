@@ -325,6 +325,19 @@ describe("GET /api/drops and GET /api/boxes", () => {
 		expect(res.status).toBe(200);
 	});
 
+	test("/api/drops filters an admin API key to its inbox scope", async () => {
+		const env = makeEnv();
+		await seedApiKey(env, "ad_lisa_admin", { permissions: "admin", inboxScope: "lisa" });
+		await seedDrops(env);
+
+		const body = (await (
+			await get(env, "/api/drops", { Authorization: "Bearer ad_lisa_admin" })
+		).json()) as { count: number; drops: { inbox: string }[] };
+
+		expect(body.count).toBe(1);
+		expect(body.drops.map((drop) => drop.inbox)).toEqual(["lisa"]);
+	});
+
 	test("/api/drops rejects an API key with only write permissions", async () => {
 		const env = makeEnv();
 		await seedApiKey(env, "ad_writer", { permissions: "write" });
@@ -367,6 +380,26 @@ describe("GET /api/drops and GET /api/boxes", () => {
 		expect(body.count).toBe(2);
 		expect(body.boxes.find((b) => b.inbox === "lisa")?.active_tokens).toBe(1);
 		expect(body.boxes.find((b) => b.inbox === "bob")?.active_tokens).toBe(0);
+	});
+
+	test("/api/boxes filters drops and token counts to an admin API key's scope", async () => {
+		const env = makeEnv();
+		await seedApiKey(env, "ad_lisa_admin", { permissions: "admin", inboxScope: "lisa" });
+		await seedDrops(env);
+		await seedDropToken(env, "tok-lisa", "lisa");
+		await seedDropToken(env, "tok-bob", "bob");
+
+		const body = (await (
+			await get(env, "/api/boxes", { Authorization: "Bearer ad_lisa_admin" })
+		).json()) as {
+			count: number;
+			boxes: { inbox: string; active_tokens: number }[];
+		};
+
+		expect(body).toEqual({
+			count: 1,
+			boxes: [expect.objectContaining({ inbox: "lisa", active_tokens: 1 })],
+		});
 	});
 
 	test("/api/boxes rejects an anonymous caller", async () => {
