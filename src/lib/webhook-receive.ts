@@ -16,6 +16,7 @@
  * synchronous after the insert is a bug waiting for a slow day.
  */
 
+import { readBodyCapped } from "./body-limit";
 import { fanOutEvent } from "./hook-fanout";
 import { normalizeInbox, normalizeSlug } from "./normalize";
 import { recordAuthFailure } from "./ratelimit";
@@ -168,14 +169,13 @@ async function receive(
 	if (Number.isFinite(declared) && declared > maxBytes) return fail(413, "body too large");
 
 	// The one read of the body, as bytes. Everything downstream works from these.
-	let bytes: Uint8Array;
-	try {
-		bytes = new Uint8Array(await request.arrayBuffer());
-	} catch {
-		return fail(400, "could not read request body");
+	const bodyRead = await readBodyCapped(request.body, maxBytes);
+	if (!bodyRead.ok) {
+		return bodyRead.reason === "too-large"
+			? fail(413, "body too large")
+			: fail(400, "could not read request body");
 	}
-	// A chunked request declares no length, so the real check is this one.
-	if (bytes.byteLength > maxBytes) return fail(413, "body too large");
+	const { bytes } = bodyRead;
 
 	const sha256 = await sha256Hex(bytes);
 	const text = decodeUtf8(bytes);

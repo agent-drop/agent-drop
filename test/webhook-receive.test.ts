@@ -315,10 +315,13 @@ describe("the status table", () => {
 
 	test("a body over the cap is 413 even when no length was declared", async () => {
 		await seedReceiver(env, { inbox: "lisa", slug: "chunked", maxBodyBytes: 10 });
+		let cancelled = false;
 		const stream = new ReadableStream({
 			start(controller) {
 				controller.enqueue(new TextEncoder().encode("x".repeat(50)));
-				controller.close();
+			},
+			cancel() {
+				cancelled = true;
 			},
 		});
 
@@ -335,6 +338,29 @@ describe("the status table", () => {
 		);
 
 		expect(res.status).toBe(413);
+		expect(cancelled).toBe(true);
+		expect(rows("SELECT * FROM webhook_events")).toEqual([]);
+	});
+
+	test("a chunked body at exactly the cap is accepted byte-for-byte", async () => {
+		await seedReceiver(env, { inbox: "lisa", slug: "exact", maxBodyBytes: 10 });
+		const stream = new ReadableStream({
+			start(controller) {
+				controller.enqueue(new TextEncoder().encode("hello"));
+				controller.enqueue(new TextEncoder().encode("world"));
+				controller.close();
+			},
+		});
+
+		const request = new Request("https://drop.test/h/lisa/exact", {
+			method: "POST",
+			body: stream,
+			duplex: "half",
+		});
+		const res = await serveWebhook(request, env, new URL(request.url), ctx);
+
+		expect(res.status).toBe(200);
+		expect(onlyEvent().body_text).toBe("helloworld");
 	});
 
 	test("our own failure is 503 -- the only case a provider should retry", async () => {
