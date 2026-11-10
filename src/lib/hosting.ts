@@ -77,8 +77,15 @@ function typeFromKey(key: string): string {
 	return EXT_TYPES[ext] || "application/octet-stream";
 }
 
-function notFound(msg = "Not found"): Response {
-	return new Response(msg, { status: 404, headers: { "Content-Type": "text/plain" } });
+function privateCacheHeaders(): HeadersInit {
+	return { "Content-Type": "text/plain", "Cache-Control": "private, no-store" };
+}
+
+function notFound(msg = "Not found", privateSite = false): Response {
+	return new Response(msg, {
+		status: 404,
+		headers: privateSite ? privateCacheHeaders() : { "Content-Type": "text/plain" },
+	});
 }
 
 /**
@@ -115,11 +122,15 @@ export async function serveHostedSite(request: Request, env: Env, url: URL): Pro
 		.first<{ auth_token: string | null; expires_at: number | null }>();
 
 	if (!row) return notFound();
+	const privateSite = !!row.auth_token;
 	if (row.expires_at && row.expires_at < Date.now()) {
-		return new Response("Site expired", { status: 410, headers: { "Content-Type": "text/plain" } });
+		return new Response("Site expired", {
+			status: 410,
+			headers: privateSite ? privateCacheHeaders() : { "Content-Type": "text/plain" },
+		});
 	}
 	if (row.auth_token && url.searchParams.get("auth") !== row.auth_token) {
-		return new Response("Unauthorized", { status: 401, headers: { "Content-Type": "text/plain" } });
+		return new Response("Unauthorized", { status: 401, headers: privateCacheHeaders() });
 	}
 
 	const rest = segs
@@ -132,7 +143,11 @@ export async function serveHostedSite(request: Request, env: Env, url: URL): Pro
 	if (rest.length === 0) {
 		// /f/{box}/{site} -> redirect to .../ so relative links resolve correctly.
 		if (!url.pathname.endsWith("/")) {
-			return Response.redirect(siteUrl(env, inbox, site), 301);
+			const destination = new URL(siteUrl(env, inbox, site));
+			destination.search = url.search;
+			const headers = new Headers({ Location: destination.toString() });
+			if (privateSite) headers.set("Cache-Control", "private, no-store");
+			return new Response(null, { status: 301, headers });
 		}
 		key = `${prefix}/index.html`;
 	} else {
@@ -148,13 +163,13 @@ export async function serveHostedSite(request: Request, env: Env, url: URL): Pro
 	if (!obj && !key.includes(".")) {
 		obj = await env.BUCKET.get(`${key}/index.html`);
 	}
-	if (!obj) return notFound();
+	if (!obj) return notFound("Not found", privateSite);
 
 	const headers = new Headers();
 	obj.writeHttpMetadata(headers);
 	if (!headers.has("Content-Type")) headers.set("Content-Type", typeFromKey(key));
 	headers.set("etag", obj.httpEtag);
-	headers.set("Cache-Control", "public, max-age=3600");
+	headers.set("Cache-Control", privateSite ? "private, no-store" : "public, max-age=3600");
 	headers.set("X-Content-Type-Options", "nosniff");
 
 	if (request.method === "HEAD") return new Response(null, { headers });

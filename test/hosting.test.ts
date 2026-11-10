@@ -145,6 +145,7 @@ describe("serveHostedSite", () => {
 		expect(res.status).toBe(200);
 		expect(await res.text()).toBe("<h1>root</h1>");
 		expect(res.headers.get("X-Content-Type-Options")).toBe("nosniff");
+		expect(res.headers.get("Cache-Control")).toBe("public, max-age=3600");
 	});
 
 	test("redirects the no-slash root to the slashed form so relative links resolve", async () => {
@@ -187,10 +188,35 @@ describe("serveHostedSite", () => {
 		expect((await get("/f/lisa/expired/")).status).toBe(410);
 	});
 
-	test("401s a private site without the token, 200s with it", async () => {
-		expect((await get("/f/lisa/locked/")).status).toBe(401);
-		expect((await get("/f/lisa/locked/?auth=wrong")).status).toBe(401);
-		expect((await get("/f/lisa/locked/?auth=s3cr3t")).status).toBe(200);
+	test("marks private successes and auth failures private and uncacheable", async () => {
+		for (const path of ["/f/lisa/locked/", "/f/lisa/locked/?auth=wrong"]) {
+			const response = await get(path);
+			expect(response.status).toBe(401);
+			expect(response.headers.get("Cache-Control")).toBe("private, no-store");
+		}
+
+		for (const method of ["GET", "HEAD"]) {
+			const response = await get("/f/lisa/locked/?auth=s3cr3t", method);
+			expect(response.status).toBe(200);
+			expect(response.headers.get("Cache-Control")).toBe("private, no-store");
+		}
+	});
+
+	test("preserves a private token across the canonical slash redirect without caching it", async () => {
+		const response = await get("/f/lisa/locked?auth=s3cr3t&view=compact");
+
+		expect(response.status).toBe(301);
+		expect(response.headers.get("Location")).toBe(
+			`https://${TEST_DOMAIN}/f/lisa/locked/?auth=s3cr3t&view=compact`,
+		);
+		expect(response.headers.get("Cache-Control")).toBe("private, no-store");
+	});
+
+	test("does not cache a missing file from an authenticated private site", async () => {
+		const response = await get("/f/lisa/locked/missing.txt?auth=s3cr3t");
+
+		expect(response.status).toBe(404);
+		expect(response.headers.get("Cache-Control")).toBe("private, no-store");
 	});
 
 	test("redirects to the app when box or site is missing from the path", async () => {
