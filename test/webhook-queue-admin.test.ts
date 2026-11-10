@@ -444,8 +444,20 @@ describe("hook-rotate", () => {
 		const rotated = await json<{ slug: string }>(
 			await send("POST", "/api/hooks/receivers/lisa/stripe-prod-k7f2q9/rotate", ADMIN, {}),
 		);
-		expect(rotated.slug).toMatch(/^stripe-prod-[0-9a-z]{6}$/);
+		expect(rotated.slug).toMatch(/^stripe-prod-[0-9a-hjkmnp-tv-z]{26}$/);
 		expect(rotated.slug).not.toBe("stripe-prod-k7f2q9");
+	});
+
+	test("rotates a current long suffix without growing the slug", async () => {
+		const current = "stripe-prod-k7f2q9m4v6x8z1a3b5c7d9e2fg";
+		await seedReceiver(env, { inbox: "lisa", slug: current });
+
+		const rotated = await json<{ slug: string }>(
+			await send("POST", `/api/hooks/receivers/lisa/${current}/rotate`, ADMIN, {}),
+		);
+
+		expect(rotated.slug).toMatch(/^stripe-prod-[0-9a-hjkmnp-tv-z]{26}$/);
+		expect(rotated.slug).not.toBe(current);
 	});
 });
 

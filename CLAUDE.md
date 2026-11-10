@@ -706,7 +706,7 @@ fields it wanted. The `rule` and `captures` frames are identical.
   "hook": {
     "id": "01m025m0f5...",
     "inbox": "lisa",
-    "slug": "stripe-prod-k7f2q9",
+    "slug": "stripe-prod-k7f2q9m4v6x8z1a3b5c7d9e2fg",
     "event_type": "charge.succeeded",
     "routing_key": "cus_42",
     "method": "POST",
@@ -721,7 +721,7 @@ fields it wanted. The `rule` and `captures` frames are identical.
     "created_at": 1775112960019
   },
   "rule": { "id": "43858f85-...", "pattern": "lisa" },
-  "captures": { "inbox": "lisa", "slug": "stripe-prod-k7f2q9", "...": "..." }
+  "captures": { "inbox": "lisa", "slug": "stripe-prod-k7f2q9m4v6x8z1a3b5c7d9e2fg", "...": "..." }
 }
 ```
 
@@ -931,8 +931,10 @@ https://frst.dev/h/{box}/{slug}/anything/after    <- stored as `subpath`, same r
 public, unauthenticated, body-swallowing endpoint has no business in there.
 
 For a receiver with `auth_mode: none` **the URL is the credential**, so
-`hook-create` appends a random suffix (`stripe-prod-k7f2q9`) unless `--slug`
-says otherwise, and says so out loud.
+`hook-create` appends a 130-bit random suffix
+(`stripe-prod-k7f2q9m4v6x8z1a3b5c7d9e2fg`) unless `--slug` says otherwise, and
+says so out loud. An exact slug on an `authMode: none` receiver is deliberately
+public/guessable; use the generated default unless that is intentional.
 
 ### Request handling (`src/lib/webhook-receive.ts`)
 

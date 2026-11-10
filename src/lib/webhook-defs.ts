@@ -4,7 +4,6 @@
  * to import the request handler to learn what a URL looks like.
  */
 
-import { generateId } from "./id";
 import { HANDSHAKE_MODES } from "./webhook-handshake";
 import { VERIFIER_MODES } from "./webhook-verify";
 import type { Env } from "../types";
@@ -30,13 +29,28 @@ export function hookUrl(env: Env, inbox: string, slug: string): string {
 	return `https://${env.DOMAIN}/${HOOK_PREFIX}/${inbox}/${slug}`;
 }
 
+export const GENERATED_SLUG_SUFFIX_LENGTH = 26;
+export const MAX_WEBHOOK_SLUG_LENGTH = 64;
+const SLUG_ALPHABET = "0123456789abcdefghjkmnpqrstvwxyz";
+
 /**
- * A random slug suffix, so a URL that IS the credential is not guessable.
- *
- * Six characters of the id alphabet is ~30 bits. That is fine behind the
- * per-receiver rate limit, which is what actually stops enumeration -- raise it
- * when a receiver is the sole credential for something that matters.
+ * A random slug suffix, so a URL that IS the credential is not guessable. Each
+ * Crockford-base32 character carries five unbiased random bits; 26 carry 130.
  */
-export function slugSuffix(length = 6): string {
-	return generateId().slice(-length);
+export function slugSuffix(length = GENERATED_SLUG_SUFFIX_LENGTH): string {
+	const bytes = crypto.getRandomValues(new Uint8Array(length));
+	return Array.from(bytes, (byte) => SLUG_ALPHABET[byte & 31]).join("");
+}
+
+/** Add a generated suffix without ever producing a slug longer than 64 characters. */
+export function generatedSlug(base: string): string {
+	const suffix = slugSuffix();
+	const maxBaseLength = MAX_WEBHOOK_SLUG_LENGTH - suffix.length - 1;
+	const boundedBase = base.slice(0, maxBaseLength).replace(/-+$/, "") || "hook";
+	return `${boundedBase}-${suffix}`;
+}
+
+/** Preserve the chosen name when rotating either a legacy or current generated slug. */
+export function generatedSlugBase(slug: string): string {
+	return slug.replace(/-(?:[0-9a-z]{6}|[0-9a-z]{26})$/, "") || slug;
 }

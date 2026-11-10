@@ -82,7 +82,7 @@ curl -H "Authorization: Bearer ad_..." https://your-domain/api/inbox/research/la
 ```bash
 # Point a provider at a URL you own, then let an agent drain the queue.
 drop hook-create research stripe-prod --auth stripe --secret whsec_...
-#   → https://your-domain/h/research/stripe-prod-k7f2q9   (paste into Stripe)
+#   → https://your-domain/h/research/stripe-prod-k7f2q9m4v6x8z1a3b5c7d9e2fg (paste into Stripe)
 
 drop queue-get research --limit 10 --lease 60 --json | jq        # lease, work…
 drop queue-remove research EVENT_ID                              # …then ack

@@ -11,8 +11,8 @@ import { normalizeSlug } from "../lib/normalize";
 import { isKnownPreset, presetNames } from "../lib/webhook-extract";
 import type { HandshakeConfig } from "../lib/webhook-handshake";
 import {
+	generatedSlug,
 	hookUrl,
-	slugSuffix,
 	SUPPORTED_AUTH_MODES,
 	SUPPORTED_HANDSHAKE_MODES,
 } from "../lib/webhook-defs";
@@ -80,7 +80,7 @@ export function normalizeMethods(raw: string | undefined): string {
 export function slugFor(body: CreateBody): string | null {
 	if (body.slug) return normalizeSlug(body.slug);
 	const base = normalizeSlug(body.name || body.label || "hook") || "hook";
-	return `${base}-${slugSuffix()}`;
+	return generatedSlug(base);
 }
 
 /** Refuse a mode nothing implements rather than silently not checking it. */
