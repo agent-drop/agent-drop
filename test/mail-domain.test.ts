@@ -5,7 +5,13 @@ import { forwardViaBinding } from "../src/lib/relay";
 import { hookUrl } from "../src/lib/webhook-defs";
 import type { Env } from "../src/types";
 import { makeEmail, onlyBuilder } from "./helpers/email";
-import { jsonRequest, makeEnv, TEST_DOMAIN, TEST_MAIL_DOMAIN } from "./helpers/env";
+import {
+	jsonRequest,
+	makeEnv,
+	TEST_DOMAIN,
+	TEST_HOST_DOMAIN,
+	TEST_MAIL_DOMAIN,
+} from "./helpers/env";
 
 /**
  * MAIL_DOMAIN and DOMAIN are one value in every other test, because that is what
@@ -18,7 +24,7 @@ function splitEnv(overrides: Partial<Env> = {}) {
 	return makeEnv({ MAIL_DOMAIN: TEST_MAIL_DOMAIN, ...overrides });
 }
 
-describe("MAIL_DOMAIN addresses, DOMAIN URLs", () => {
+describe("mail, application, and hosting domains", () => {
 	test("the fixtures really do differ", () => {
 		expect(TEST_MAIL_DOMAIN).not.toBe(TEST_DOMAIN);
 	});
@@ -60,9 +66,9 @@ describe("MAIL_DOMAIN addresses, DOMAIN URLs", () => {
 		});
 	});
 
-	test("webhook and hosting URLs stay on DOMAIN", () => {
+	test("webhook URLs stay on DOMAIN while hosted sites use HOST_DOMAIN", () => {
 		const env = splitEnv();
 		expect(hookUrl(env, "lisa", "stripe-prod")).toBe(`https://${TEST_DOMAIN}/h/lisa/stripe-prod`);
-		expect(siteUrl(env, "lisa", "marketing")).toBe(`https://${TEST_DOMAIN}/f/lisa/marketing/`);
+		expect(siteUrl(env, "lisa", "marketing")).toBe(`https://${TEST_HOST_DOMAIN}/f/lisa/marketing/`);
 	});
 });

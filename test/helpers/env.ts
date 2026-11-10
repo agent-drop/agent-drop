@@ -3,6 +3,7 @@ import { type FakeD1, makeD1 } from "./d1";
 
 export const TEST_ADMIN_KEY = "admin-secret-do-not-guess";
 export const TEST_DOMAIN = "drop.test";
+export const TEST_HOST_DOMAIN = "files.drop.test";
 /** Only test/mail-domain.test.ts uses this; makeEnv defaults to TEST_DOMAIN. */
 export const TEST_MAIL_DOMAIN = "mail.test";
 
@@ -47,6 +48,7 @@ export function makeEnv(overrides: Partial<Env> = {}): TestEnv {
 		BUCKET: {} as R2Bucket,
 		ASSETS: {} as Fetcher,
 		DOMAIN: TEST_DOMAIN,
+		HOST_DOMAIN: TEST_HOST_DOMAIN,
 		MAIL_DOMAIN: TEST_DOMAIN,
 		BRAND: "Agent Drop",
 		R2_ACCOUNT_ID: "test-account",

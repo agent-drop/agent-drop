@@ -15,6 +15,7 @@ import {
 
 const REAL: DeployIdentity = {
 	domain: "drops.example-real.dev",
+	hostDomain: "files.example-real.dev",
 	mailDomain: "example-real.dev",
 	zoneName: "example-real.dev",
 	brand: "FRST",
@@ -36,6 +37,7 @@ describe("readDeployIdentity", () => {
 	test("falls back to the committed placeholders when nothing is set", () => {
 		expect(readDeployIdentity({})).toEqual({
 			domain: PLACEHOLDERS.domain,
+			hostDomain: PLACEHOLDERS.hostDomain,
 			mailDomain: PLACEHOLDERS.domain,
 			zoneName: PLACEHOLDERS.domain,
 			brand: PLACEHOLDERS.brand,
@@ -48,6 +50,7 @@ describe("readDeployIdentity", () => {
 	test("reads every field from its documented .env var", () => {
 		const identity = readDeployIdentity({
 			[IDENTITY_VARS.domain]: REAL.domain,
+			[IDENTITY_VARS.hostDomain]: REAL.hostDomain,
 			[IDENTITY_VARS.mailDomain]: REAL.mailDomain,
 			[IDENTITY_VARS.zoneName]: REAL.zoneName,
 			[IDENTITY_VARS.brand]: REAL.brand,
@@ -80,13 +83,16 @@ describe("the committed wrangler.toml", () => {
 		expect(config.account_id).toBe(PLACEHOLDERS.accountId);
 		expect(config.d1_databases?.[0]?.database_id).toBe(PLACEHOLDERS.d1DatabaseId);
 		expect(config.vars?.DOMAIN).toBe(PLACEHOLDERS.domain);
+		expect(config.vars?.HOST_DOMAIN).toBe(PLACEHOLDERS.hostDomain);
 		expect(config.vars?.MAIL_DOMAIN).toBe(PLACEHOLDERS.domain);
 		expect(config.vars?.BRAND).toBe(PLACEHOLDERS.brand);
 		expect(config.vars?.R2_ACCOUNT_ID).toBe(PLACEHOLDERS.accountId);
 		expect(config.vars?.GOOGLE_CLIENT_ID_PUBLIC).toBe(PLACEHOLDERS.googleClientId);
 		expect(config.routes).toEqual([
 			{ pattern: `${PLACEHOLDERS.domain}/*`, zone_name: PLACEHOLDERS.domain },
+			{ pattern: `${PLACEHOLDERS.hostDomain}/*`, zone_name: PLACEHOLDERS.domain },
 		]);
+		expect((config.assets as { run_worker_first?: unknown }).run_worker_first).toBe(true);
 	});
 
 	// The counterpart guarantee: every placeholder the file carries is one the
@@ -97,6 +103,7 @@ describe("the committed wrangler.toml", () => {
 		applyDeployIdentity(config, REAL);
 		const serialized = JSON.stringify(config);
 		for (const token of [
+			PLACEHOLDERS.hostDomain,
 			PLACEHOLDERS.domain,
 			PLACEHOLDERS.accountId,
 			PLACEHOLDERS.d1DatabaseId,
@@ -117,10 +124,14 @@ describe("applyDeployIdentity", () => {
 	test("replaces the account id, route, database id and vars", () => {
 		const config: IdentityFields = {
 			account_id: PLACEHOLDERS.accountId,
-			routes: [{ pattern: `${PLACEHOLDERS.domain}/*`, zone_name: PLACEHOLDERS.domain }],
+			routes: [
+				{ pattern: `${PLACEHOLDERS.domain}/*`, zone_name: PLACEHOLDERS.domain },
+				{ pattern: `${PLACEHOLDERS.hostDomain}/*`, zone_name: PLACEHOLDERS.domain },
+			],
 			d1_databases: [{ database_id: PLACEHOLDERS.d1DatabaseId }],
 			vars: {
 				DOMAIN: PLACEHOLDERS.domain,
+				HOST_DOMAIN: PLACEHOLDERS.hostDomain,
 				MAIL_DOMAIN: PLACEHOLDERS.domain,
 				BRAND: PLACEHOLDERS.brand,
 				R2_ACCOUNT_ID: PLACEHOLDERS.accountId,
@@ -131,10 +142,14 @@ describe("applyDeployIdentity", () => {
 		applyDeployIdentity(config, REAL);
 		expect(config).toEqual({
 			account_id: REAL.accountId,
-			routes: [{ pattern: `${REAL.domain}/*`, zone_name: REAL.zoneName }],
+			routes: [
+				{ pattern: `${REAL.domain}/*`, zone_name: REAL.zoneName },
+				{ pattern: `${REAL.hostDomain}/*`, zone_name: REAL.zoneName },
+			],
 			d1_databases: [{ database_id: REAL.d1DatabaseId }],
 			vars: {
 				DOMAIN: REAL.domain,
+				HOST_DOMAIN: REAL.hostDomain,
 				MAIL_DOMAIN: REAL.mailDomain,
 				BRAND: REAL.brand,
 				R2_ACCOUNT_ID: REAL.accountId,
@@ -145,9 +160,11 @@ describe("applyDeployIdentity", () => {
 	});
 
 	test("handles the string form of a route", () => {
-		const config: IdentityFields = { routes: [`${PLACEHOLDERS.domain}/*`] };
+		const config: IdentityFields = {
+			routes: [`${PLACEHOLDERS.domain}/*`, `${PLACEHOLDERS.hostDomain}/*`],
+		};
 		applyDeployIdentity(config, REAL);
-		expect(config.routes).toEqual([`${REAL.domain}/*`]);
+		expect(config.routes).toEqual([`${REAL.domain}/*`, `${REAL.hostDomain}/*`]);
 	});
 
 	test("leaves fields that carry no placeholder alone", () => {
@@ -189,7 +206,7 @@ describe("checkDeployIdentity", () => {
 		const problems = checkDeployIdentity(config, REAL);
 		// Every identity-bearing field is wrong, and neither the route pattern nor
 		// its zone_name matches.
-		expect(problems.length).toBe(8);
+		expect(problems.length).toBe(11);
 		expect(problems.join("\n")).toContain(PLACEHOLDERS.accountId);
 	});
 
@@ -198,6 +215,15 @@ describe("checkDeployIdentity", () => {
 		config.account_id = PLACEHOLDERS.accountId;
 		expect(checkDeployIdentity(config, REAL)).toEqual([
 			`account_id is "${PLACEHOLDERS.accountId}", expected "${REAL.accountId}"`,
+		]);
+	});
+
+	test("rejects a hosting origin equal to the application origin", () => {
+		const identity = { ...REAL, hostDomain: REAL.domain };
+		const config = committedConfig();
+		applyDeployIdentity(config, identity);
+		expect(checkDeployIdentity(config, identity)).toEqual([
+			"HOST_DOMAIN must differ from DOMAIN to isolate uploaded content",
 		]);
 	});
 
@@ -211,8 +237,19 @@ describe("checkDeployIdentity", () => {
 
 	test("catches a route pointing at the wrong domain", () => {
 		const config = injected();
-		config.routes = [{ pattern: "someone-elses.dev/*", zone_name: REAL.zoneName }];
+		config.routes = [
+			{ pattern: "someone-elses.dev/*", zone_name: REAL.zoneName },
+			{ pattern: `${REAL.hostDomain}/*`, zone_name: REAL.zoneName },
+		];
 		expect(checkDeployIdentity(config, REAL)).toHaveLength(1);
+	});
+
+	test("catches a missing dedicated-host route", () => {
+		const config = injected();
+		config.routes = [{ pattern: `${REAL.domain}/*`, zone_name: REAL.zoneName }];
+		expect(checkDeployIdentity(config, REAL)).toEqual([
+			`no route matches host domain "${REAL.hostDomain}" (routes: ${REAL.domain}/*)`,
+		]);
 	});
 
 	// The failure this guard exists for: `zone_name` names a Cloudflare zone, so
@@ -220,7 +257,10 @@ describe("checkDeployIdentity", () => {
 	// wrangler fails at zone lookup with an error that reads like a bad token.
 	test("catches a zone_name that copied the Worker host", () => {
 		const config = injected();
-		config.routes = [{ pattern: `${REAL.domain}/*`, zone_name: REAL.domain }];
+		config.routes = [
+			{ pattern: `${REAL.domain}/*`, zone_name: REAL.domain },
+			{ pattern: `${REAL.hostDomain}/*`, zone_name: REAL.zoneName },
+		];
 		expect(checkDeployIdentity(config, REAL)).toEqual([
 			`route zone_name is "${REAL.domain}", expected "${REAL.zoneName}"`,
 		]);
@@ -228,7 +268,7 @@ describe("checkDeployIdentity", () => {
 
 	test("accepts a route given as a bare string", () => {
 		const config = injected();
-		config.routes = [`${REAL.domain}/*`];
+		config.routes = [`${REAL.domain}/*`, `${REAL.hostDomain}/*`];
 		expect(checkDeployIdentity(config, REAL)).toEqual([]);
 	});
 });

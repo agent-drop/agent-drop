@@ -79,6 +79,11 @@ function getDomain(): string {
 	}
 }
 
+// User-uploaded HTML lives on a separate origin from the app and its API keys.
+function getHostDomain(): string {
+	return process.env.HOST_DOMAIN || envVars.HOST_DOMAIN || getDomain();
+}
+
 // The domain box addresses live on. Read separately rather than taken from the
 // base URL's host: the Worker may be served from a subdomain of the zone it
 // sends mail from, in which case the two differ.
@@ -1858,7 +1863,7 @@ program
 	});
 
 // ============================================================================
-// host - publish static files to {domain}/f/{box}/{site}/
+// host - publish static files to {host-domain}/f/{box}/{site}/
 // ============================================================================
 
 function walkFiles(root: string): string[] {
@@ -1874,7 +1879,7 @@ function walkFiles(root: string): string[] {
 
 program
 	.command("host <box> <site> [paths...]")
-	.description(`Publish static files publicly at https://${getDomain()}/f/<box>/<site>/`)
+	.description(`Publish static files publicly at https://${getHostDomain()}/f/<box>/<site>/`)
 	.option("--ttl <dur>", "Auto-expire after a duration (e.g. 24h, 7d)")
 	.option("--base <dir>", "Compute relative paths from this dir (preserves structure)")
 	.option("--auth <token>", "Make the site private: require ?auth=<token> to view")
@@ -1906,7 +1911,7 @@ program
 			if (files.length === 0) throw new Error("no files found to upload");
 
 			console.log(
-				chalk.bold(`\n  Hosting ${files.length} file(s) -> ${getDomain()}/f/${box}/${site}/\n`),
+				chalk.bold(`\n  Hosting ${files.length} file(s) -> ${getHostDomain()}/f/${box}/${site}/\n`),
 			);
 			// Byte total is not tracked client-side -- `finalize` derives fileCount
 			// and totalBytes from R2 and returns them (printed below).

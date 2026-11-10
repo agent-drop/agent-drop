@@ -7,7 +7,7 @@
  * plugin's `config` hook (see `vite.config.ts`), which writes them into the
  * generated `dist/<worker>/wrangler.json` that `scripts/deploy.ts` deploys.
  *
- * Injection is STRUCTURAL, not a whole-file string replace: only the four
+ * Injection is STRUCTURAL, not a whole-file string replace: only the identity
  * fields that actually carry a placeholder are touched, so a placeholder token
  * appearing incidentally elsewhere (an absolute path, a comment) is left alone.
  */
@@ -15,6 +15,7 @@
 /** The literal placeholder tokens committed to `wrangler.toml`. */
 export const PLACEHOLDERS = {
 	domain: "example.com",
+	hostDomain: "files.example.com",
 	accountId: "your-cloudflare-account-id",
 	d1DatabaseId: "your-d1-database-id",
 	googleClientId: "your-google-client-id",
@@ -24,6 +25,7 @@ export const PLACEHOLDERS = {
 /** The `.env` variable backing each placeholder. */
 export const IDENTITY_VARS = {
 	domain: "DOMAIN",
+	hostDomain: "HOST_DOMAIN",
 	mailDomain: "MAIL_DOMAIN",
 	zoneName: "ZONE_NAME",
 	brand: "BRAND",
@@ -34,11 +36,12 @@ export const IDENTITY_VARS = {
 
 /**
  * The vars a deploy cannot proceed without. `MAIL_DOMAIN` and `ZONE_NAME` are
- * absent on purpose: both fall back to `DOMAIN`, so a deployment whose Worker
- * host, mail domain and zone are all the same apex never has to set them.
+ * absent on purpose because both fall back to `DOMAIN`. `HOST_DOMAIN` is
+ * required and must stay distinct from the application origin.
  */
 export const REQUIRED_IDENTITY_VARS = [
 	IDENTITY_VARS.domain,
+	IDENTITY_VARS.hostDomain,
 	IDENTITY_VARS.brand,
 	IDENTITY_VARS.accountId,
 	IDENTITY_VARS.d1DatabaseId,
@@ -48,6 +51,8 @@ export const REQUIRED_IDENTITY_VARS = [
 export interface DeployIdentity {
 	/** The HTTP host the Worker serves from -- not necessarily the mail domain. */
 	domain: string;
+	/** The isolated HTTP host that serves user-uploaded sites. */
+	hostDomain: string;
 	mailDomain: string;
 	zoneName: string;
 	brand: string;
@@ -76,6 +81,7 @@ export interface IdentityFields {
 export function readDeployIdentity(env: Record<string, string | undefined>): DeployIdentity {
 	return {
 		domain: env[IDENTITY_VARS.domain] || PLACEHOLDERS.domain,
+		hostDomain: env[IDENTITY_VARS.hostDomain] || PLACEHOLDERS.hostDomain,
 		mailDomain: env[IDENTITY_VARS.mailDomain] || env[IDENTITY_VARS.domain] || PLACEHOLDERS.domain,
 		zoneName: env[IDENTITY_VARS.zoneName] || env[IDENTITY_VARS.domain] || PLACEHOLDERS.domain,
 		brand: env[IDENTITY_VARS.brand] || PLACEHOLDERS.brand,
@@ -90,6 +96,7 @@ function substitute(value: string, identity: DeployIdentity): string {
 		.replaceAll(PLACEHOLDERS.accountId, identity.accountId)
 		.replaceAll(PLACEHOLDERS.d1DatabaseId, identity.d1DatabaseId)
 		.replaceAll(PLACEHOLDERS.googleClientId, identity.googleClientId)
+		.replaceAll(PLACEHOLDERS.hostDomain, identity.hostDomain)
 		.replaceAll(PLACEHOLDERS.domain, identity.domain);
 }
 
@@ -129,6 +136,9 @@ export function applyDeployIdentity(config: IdentityFields, identity: DeployIden
 		// BRAND is a free-text display name, not a token, so it is set rather than
 		// substituted -- the committed value doubles as the default.
 		if (typeof config.vars.BRAND === "string") config.vars.BRAND = identity.brand;
+		if (typeof config.vars.HOST_DOMAIN === "string") {
+			config.vars.HOST_DOMAIN = identity.hostDomain;
+		}
 		// Shares DOMAIN's placeholder literal because it shares its default;
 		// substituting it would silently give it the Worker host.
 		if (typeof config.vars.MAIL_DOMAIN === "string") {
@@ -182,6 +192,9 @@ export function renderBrandTokens(html: string, identity: DeployIdentity): strin
  */
 export function checkDeployIdentity(config: IdentityFields, identity: DeployIdentity): string[] {
 	const problems: string[] = [];
+	if (identity.hostDomain.toLowerCase() === identity.domain.toLowerCase()) {
+		problems.push("HOST_DOMAIN must differ from DOMAIN to isolate uploaded content");
+	}
 	if (config.account_id !== identity.accountId) {
 		problems.push(`account_id is "${config.account_id}", expected "${identity.accountId}"`);
 	}
@@ -191,6 +204,11 @@ export function checkDeployIdentity(config: IdentityFields, identity: DeployIden
 	}
 	if (config.vars?.DOMAIN !== identity.domain) {
 		problems.push(`vars.DOMAIN is "${config.vars?.DOMAIN}", expected "${identity.domain}"`);
+	}
+	if (config.vars?.HOST_DOMAIN !== identity.hostDomain) {
+		problems.push(
+			`vars.HOST_DOMAIN is "${config.vars?.HOST_DOMAIN}", expected "${identity.hostDomain}"`,
+		);
 	}
 	if (config.vars?.MAIL_DOMAIN !== identity.mailDomain) {
 		problems.push(
@@ -208,8 +226,15 @@ export function checkDeployIdentity(config: IdentityFields, identity: DeployIden
 	const routes = (config.routes ?? []).map((route) =>
 		typeof route === "string" ? route : (route as { pattern?: string })?.pattern,
 	);
-	if (!routes.some((pattern) => pattern?.includes(identity.domain))) {
+	const routeMatches = (pattern: string | undefined, hostname: string) =>
+		pattern === hostname || pattern?.startsWith(`${hostname}/`);
+	if (!routes.some((pattern) => routeMatches(pattern, identity.domain))) {
 		problems.push(`no route matches domain "${identity.domain}" (routes: ${routes.join(", ")})`);
+	}
+	if (!routes.some((pattern) => routeMatches(pattern, identity.hostDomain))) {
+		problems.push(
+			`no route matches host domain "${identity.hostDomain}" (routes: ${routes.join(", ")})`,
+		);
 	}
 	// `zone_name` must name a real Cloudflare zone, which a subdomain is not.
 	// Checked here because the route check above reads `pattern` and stops.
