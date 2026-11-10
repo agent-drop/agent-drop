@@ -97,6 +97,9 @@ crons = ["17 * * * *"]
 # {box}@... resolves to. Identical unless the Worker sits on a subdomain.
 DOMAIN = "example.com"
 MAIL_DOMAIN = "example.com"
+# Disabled by default. Set an ISO-8601 cutoff only for a bounded migration from
+# the old sender-bearing reply addresses; do not leave it enabled indefinitely.
+RELAY_LEGACY_REPLY_UNTIL = ""
 BRAND = "Agent Drop"
 R2_ACCOUNT_ID = "your-cloudflare-account-id"
 SES_REGION = "eu-central-1"

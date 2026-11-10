@@ -3,9 +3,11 @@ import { generateId } from "./lib/id";
 import { normalizeInbox, slugifyFilename } from "./lib/normalize";
 import {
 	isRelayReply,
-	parseRelayAddress,
+	parseLegacyRelayAddress,
+	parseRelayToken,
+	resolveRelayAddress,
 	findRelayRule,
-	buildRelayAddress,
+	createRelayAddress,
 	enqueueRelay,
 	forwardViaBinding,
 } from "./lib/relay";
@@ -75,34 +77,39 @@ export async function handleEmail(
 
 	// Check if this is a relay reply (someone replying through a mask)
 	if (isRelayReply(localPart)) {
-		const relay = parseRelayAddress(localPart);
-		if (relay) {
-			// Verify mask exists and is active
-			const mask = await env.DB.prepare("SELECT id FROM email_masks WHERE id = ? AND active = 1")
-				.bind(relay.maskId)
-				.first();
-
-			if (mask) {
-				// Parse the reply to get body
-				const rawBytes = await new Response(message.raw).arrayBuffer();
-				const parser = new PostalMime();
-				const parsed = await parser.parse(rawBytes);
-
-				await enqueueRelay(env, {
-					maskId: relay.maskId,
-					direction: "reply",
-					from: `${relay.maskId}@${env.MAIL_DOMAIN}`,
-					to: relay.sender,
-					subject: parsed.subject || "(no subject)",
-					textBody: parsed.text ? stripQuotedText(parsed.text) : undefined,
-					htmlBody: parsed.html ? stripQuotedHtml(parsed.html) : undefined,
-					inReplyTo: message.headers.get("in-reply-to") || undefined,
-					references: message.headers.get("references") || undefined,
-				});
+		const relay = await resolveRelayAddress(env, localPart);
+		if (!relay) {
+			const legacy = parseLegacyRelayAddress(localPart);
+			const activeLegacyMask = legacy
+				? await env.DB.prepare("SELECT id FROM email_masks WHERE id = ? AND active = 1")
+						.bind(legacy.maskId)
+						.first()
+				: null;
+			if (parseRelayToken(localPart) || activeLegacyMask) {
+				// A guessed token or an unsigned route for a live mask is never allowed
+				// to fall through and become an ordinary inbox delivery.
+				message.setReject("Invalid relay reply address");
 				return;
 			}
+		} else {
+			// Parse the reply to get body
+			const rawBytes = await new Response(message.raw).arrayBuffer();
+			const parser = new PostalMime();
+			const parsed = await parser.parse(rawBytes);
+
+			await enqueueRelay(env, {
+				maskId: relay.maskId,
+				direction: "reply",
+				from: `${relay.maskId}@${env.MAIL_DOMAIN}`,
+				to: relay.sender,
+				subject: parsed.subject || "(no subject)",
+				textBody: parsed.text ? stripQuotedText(parsed.text) : undefined,
+				htmlBody: parsed.html ? stripQuotedHtml(parsed.html) : undefined,
+				inReplyTo: message.headers.get("in-reply-to") || undefined,
+				references: message.headers.get("references") || undefined,
+			});
+			return;
 		}
-		// If mask not found, fall through to normal drop handling
 	}
 
 	// Check if this is a direct email to a mask (inbound relay)
@@ -117,7 +124,7 @@ export async function handleEmail(
 			const parser = new PostalMime();
 			const parsed = await parser.parse(rawBytes);
 
-			const replyTo = buildRelayAddress(from, maskLookup.id, env.MAIL_DOMAIN);
+			const replyTo = await createRelayAddress(env, from, maskLookup.id);
 
 			await enqueueRelay(env, {
 				maskId: maskLookup.id,

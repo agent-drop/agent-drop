@@ -25,6 +25,7 @@ export const PLACEHOLDERS = {
 export const IDENTITY_VARS = {
 	domain: "DOMAIN",
 	mailDomain: "MAIL_DOMAIN",
+	legacyRelayReplyUntil: "RELAY_LEGACY_REPLY_UNTIL",
 	zoneName: "ZONE_NAME",
 	brand: "BRAND",
 	accountId: "CLOUDFLARE_ACCOUNT_ID",
@@ -49,6 +50,7 @@ export interface DeployIdentity {
 	/** The HTTP host the Worker serves from -- not necessarily the mail domain. */
 	domain: string;
 	mailDomain: string;
+	legacyRelayReplyUntil: string;
 	zoneName: string;
 	brand: string;
 	accountId: string;
@@ -77,6 +79,7 @@ export function readDeployIdentity(env: Record<string, string | undefined>): Dep
 	return {
 		domain: env[IDENTITY_VARS.domain] || PLACEHOLDERS.domain,
 		mailDomain: env[IDENTITY_VARS.mailDomain] || env[IDENTITY_VARS.domain] || PLACEHOLDERS.domain,
+		legacyRelayReplyUntil: env[IDENTITY_VARS.legacyRelayReplyUntil] || "",
 		zoneName: env[IDENTITY_VARS.zoneName] || env[IDENTITY_VARS.domain] || PLACEHOLDERS.domain,
 		brand: env[IDENTITY_VARS.brand] || PLACEHOLDERS.brand,
 		accountId: env[IDENTITY_VARS.accountId] || PLACEHOLDERS.accountId,
@@ -133,6 +136,9 @@ export function applyDeployIdentity(config: IdentityFields, identity: DeployIden
 		// substituting it would silently give it the Worker host.
 		if (typeof config.vars.MAIL_DOMAIN === "string") {
 			config.vars.MAIL_DOMAIN = identity.mailDomain;
+		}
+		if (typeof config.vars.RELAY_LEGACY_REPLY_UNTIL === "string") {
+			config.vars.RELAY_LEGACY_REPLY_UNTIL = identity.legacyRelayReplyUntil;
 		}
 	}
 }
@@ -195,6 +201,11 @@ export function checkDeployIdentity(config: IdentityFields, identity: DeployIden
 	if (config.vars?.MAIL_DOMAIN !== identity.mailDomain) {
 		problems.push(
 			`vars.MAIL_DOMAIN is "${config.vars?.MAIL_DOMAIN}", expected "${identity.mailDomain}"`,
+		);
+	}
+	if (config.vars?.RELAY_LEGACY_REPLY_UNTIL !== identity.legacyRelayReplyUntil) {
+		problems.push(
+			`vars.RELAY_LEGACY_REPLY_UNTIL is "${config.vars?.RELAY_LEGACY_REPLY_UNTIL}", expected "${identity.legacyRelayReplyUntil}"`,
 		);
 	}
 	if (config.vars?.BRAND !== identity.brand) {

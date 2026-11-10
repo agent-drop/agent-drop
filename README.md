@@ -140,10 +140,15 @@ when the apex is already serving something else: put the Worker on a subdomain
 (`ZONE_NAME=example.com`) — `zone_name` must be a real Cloudflare zone, which a
 subdomain is not.
 
+`RELAY_LEGACY_REPLY_UNTIL` is intentionally unset. Existing relay deployments
+may set it to a short, absolute ISO-8601 cutoff while old reply addresses age
+out. New opaque reply routes do not expire; leaving legacy compatibility on
+would preserve the forgery the token routes replace.
+
 ### 3 · Migrate the database + set secrets
 
 ```bash
-bun run db:migrate     # 0001 … 0010, against the remote DB
+bun run db:migrate     # 0001 … 0011, against the remote DB
 
 # Secrets — set once, stored on the Worker (never in the repo):
 bunx wrangler secret put ADMIN_API_KEY          # full-access admin key you choose
@@ -231,7 +236,7 @@ src/
   lib/                auth, hosting, rules, relay, google-auth, normalize, id,
                       webhook-* (receive, verify, handshake, store, throttle), reapers
 web/                  Vite + React SPA (Landing, InboxView, DropZone, GoogleSignIn)
-migrations/           D1 schema (0001 … 0010)
+migrations/           D1 schema (0001 … 0011)
 scripts/deploy.ts     Deploy wrapper (renders wrangler.toml from .env)
 tools/agent-drop.ts   CLI
 wrangler.toml         Worker config (R2 / D1 / Queue bindings)

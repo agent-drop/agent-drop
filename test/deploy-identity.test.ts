@@ -16,6 +16,7 @@ import {
 const REAL: DeployIdentity = {
 	domain: "drops.example-real.dev",
 	mailDomain: "example-real.dev",
+	legacyRelayReplyUntil: "2027-02-01T00:00:00Z",
 	zoneName: "example-real.dev",
 	brand: "FRST",
 	accountId: "aaaaaaaabbbbbbbbccccccccdddddddd",
@@ -37,6 +38,7 @@ describe("readDeployIdentity", () => {
 		expect(readDeployIdentity({})).toEqual({
 			domain: PLACEHOLDERS.domain,
 			mailDomain: PLACEHOLDERS.domain,
+			legacyRelayReplyUntil: "",
 			zoneName: PLACEHOLDERS.domain,
 			brand: PLACEHOLDERS.brand,
 			accountId: PLACEHOLDERS.accountId,
@@ -49,6 +51,7 @@ describe("readDeployIdentity", () => {
 		const identity = readDeployIdentity({
 			[IDENTITY_VARS.domain]: REAL.domain,
 			[IDENTITY_VARS.mailDomain]: REAL.mailDomain,
+			[IDENTITY_VARS.legacyRelayReplyUntil]: REAL.legacyRelayReplyUntil,
 			[IDENTITY_VARS.zoneName]: REAL.zoneName,
 			[IDENTITY_VARS.brand]: REAL.brand,
 			[IDENTITY_VARS.accountId]: REAL.accountId,
@@ -81,6 +84,7 @@ describe("the committed wrangler.toml", () => {
 		expect(config.d1_databases?.[0]?.database_id).toBe(PLACEHOLDERS.d1DatabaseId);
 		expect(config.vars?.DOMAIN).toBe(PLACEHOLDERS.domain);
 		expect(config.vars?.MAIL_DOMAIN).toBe(PLACEHOLDERS.domain);
+		expect(config.vars?.RELAY_LEGACY_REPLY_UNTIL).toBe("");
 		expect(config.vars?.BRAND).toBe(PLACEHOLDERS.brand);
 		expect(config.vars?.R2_ACCOUNT_ID).toBe(PLACEHOLDERS.accountId);
 		expect(config.vars?.GOOGLE_CLIENT_ID_PUBLIC).toBe(PLACEHOLDERS.googleClientId);
@@ -122,6 +126,7 @@ describe("applyDeployIdentity", () => {
 			vars: {
 				DOMAIN: PLACEHOLDERS.domain,
 				MAIL_DOMAIN: PLACEHOLDERS.domain,
+				RELAY_LEGACY_REPLY_UNTIL: "",
 				BRAND: PLACEHOLDERS.brand,
 				R2_ACCOUNT_ID: PLACEHOLDERS.accountId,
 				GOOGLE_CLIENT_ID_PUBLIC: PLACEHOLDERS.googleClientId,
@@ -136,6 +141,7 @@ describe("applyDeployIdentity", () => {
 			vars: {
 				DOMAIN: REAL.domain,
 				MAIL_DOMAIN: REAL.mailDomain,
+				RELAY_LEGACY_REPLY_UNTIL: REAL.legacyRelayReplyUntil,
 				BRAND: REAL.brand,
 				R2_ACCOUNT_ID: REAL.accountId,
 				GOOGLE_CLIENT_ID_PUBLIC: REAL.googleClientId,
@@ -189,7 +195,7 @@ describe("checkDeployIdentity", () => {
 		const problems = checkDeployIdentity(config, REAL);
 		// Every identity-bearing field is wrong, and neither the route pattern nor
 		// its zone_name matches.
-		expect(problems.length).toBe(8);
+		expect(problems.length).toBe(9);
 		expect(problems.join("\n")).toContain(PLACEHOLDERS.accountId);
 	});
 

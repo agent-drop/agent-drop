@@ -5,7 +5,28 @@ import { toEmailAttachment } from "./email-builder";
 import { generateId } from "./id";
 import { bareAddr, buildRawEmail } from "./mime";
 
-// Encode sender email for use in relay address
+const RELAY_TOKEN_ALPHABET = "0123456789abcdefghjkmnpqrstvwxyz";
+const RELAY_TOKEN_CHARS = 26;
+const RELAY_TOKEN_PATTERN = /^reply\+([0-9a-hjkmnp-tv-z]{26})$/;
+
+export interface RelayReplyRoute {
+	sender: string;
+	maskId: string;
+}
+
+function randomRelayToken(): string {
+	const bytes = crypto.getRandomValues(new Uint8Array(RELAY_TOKEN_CHARS));
+	return Array.from(bytes, (byte) => RELAY_TOKEN_ALPHABET[byte & 31]).join("");
+}
+
+async function relayTokenHash(token: string): Promise<string> {
+	const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
+	return Array.from(new Uint8Array(digest))
+		.map((byte) => byte.toString(16).padStart(2, "0"))
+		.join("");
+}
+
+// Legacy transition only: encode a sender into the old forgeable address.
 // sender@example.com -> sender_at_example.com
 export function encodeEmail(email: string): string {
 	return email.replace(/@/g, "_at_");
@@ -20,26 +41,93 @@ export function decodeEmail(encoded: string): string {
 	return `${encoded.slice(0, idx)}@${encoded.slice(idx + 4)}`;
 }
 
-// Build relay reply-to address
+// Build a pre-token relay reply-to address for bounded migration support.
 // sender@example.com + mask j-7k9m -> sender_at_example.com+j-7k9m@{domain}
-export function buildRelayAddress(senderEmail: string, maskId: string, domain: string): string {
+export function buildLegacyRelayAddress(
+	senderEmail: string,
+	maskId: string,
+	domain: string,
+): string {
 	return `${encodeEmail(senderEmail)}+${maskId}@${domain}`;
 }
 
-// Parse a relay reply address from the local part
+// Parse a pre-token relay reply address from the local part.
 // sender_at_example.com+j-7k9m -> { sender: "sender@example.com", maskId: "j-7k9m" }
-export function parseRelayAddress(localPart: string): { sender: string; maskId: string } | null {
+export function parseLegacyRelayAddress(localPart: string): RelayReplyRoute | null {
 	const plusIdx = localPart.lastIndexOf("+");
 	if (plusIdx < 0) return null;
 	const encoded = localPart.slice(0, plusIdx);
 	const maskId = localPart.slice(plusIdx + 1);
-	if (!encoded.includes("_at_")) return null;
+	if (!encoded.includes("_at_") || !maskId) return null;
 	return { sender: decodeEmail(encoded), maskId };
 }
 
-// Check if a local part is a relay reply (contains encoded sender)
-export function isRelayReply(localPart: string): boolean {
+export function parseRelayToken(localPart: string): string | null {
+	return localPart.match(RELAY_TOKEN_PATTERN)?.[1] ?? null;
+}
+
+export function isLegacyRelayReply(localPart: string): boolean {
 	return localPart.includes("_at_") && localPart.includes("+");
+}
+
+// Recognize both current opaque routes and deliberately transitional legacy
+// addresses. Resolution decides whether the legacy cutoff still permits one.
+export function isRelayReply(localPart: string): boolean {
+	return parseRelayToken(localPart) !== null || isLegacyRelayReply(localPart);
+}
+
+export function legacyRelayRepliesEnabled(env: Env, now = Date.now()): boolean {
+	const configured = env.RELAY_LEGACY_REPLY_UNTIL?.trim();
+	if (!configured) return false;
+	const cutoff = Date.parse(configured);
+	return Number.isFinite(cutoff) && now < cutoff;
+}
+
+/**
+ * Create a reusable opaque reply address and persist only its digest.
+ *
+ * The 130-bit token keeps the local part at 32 characters regardless of the
+ * original sender's address length. Routes intentionally do not expire: an old
+ * email thread must remain replyable until its mask is disabled or deleted.
+ */
+export async function createRelayAddress(
+	env: Env,
+	sender: string,
+	maskId: string,
+): Promise<string> {
+	const token = randomRelayToken();
+	await env.DB.prepare(
+		"INSERT INTO relay_reply_routes (token_hash, mask_id, sender, created_at) VALUES (?, ?, ?, ?)",
+	)
+		.bind(await relayTokenHash(token), maskId, sender, Date.now())
+		.run();
+	return `reply+${token}@${env.MAIL_DOMAIN}`;
+}
+
+/** Resolve an opaque route, or a legacy sender-bearing route during its cutoff. */
+export async function resolveRelayAddress(
+	env: Env,
+	localPart: string,
+): Promise<RelayReplyRoute | null> {
+	const token = parseRelayToken(localPart);
+	if (token) {
+		return env.DB.prepare(
+			`SELECT route.sender AS sender, route.mask_id AS maskId
+			 FROM relay_reply_routes AS route
+			 JOIN email_masks AS mask ON mask.id = route.mask_id AND mask.active = 1
+			 WHERE route.token_hash = ?`,
+		)
+			.bind(await relayTokenHash(token))
+			.first<RelayReplyRoute>();
+	}
+
+	if (!legacyRelayRepliesEnabled(env)) return null;
+	const legacy = parseLegacyRelayAddress(localPart);
+	if (!legacy) return null;
+	const mask = await env.DB.prepare("SELECT id FROM email_masks WHERE id = ? AND active = 1")
+		.bind(legacy.maskId)
+		.first();
+	return mask ? legacy : null;
 }
 
 // Find the relay rule that matches a mask ID
