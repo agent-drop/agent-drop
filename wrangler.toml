@@ -46,7 +46,9 @@ binding = "WEBHOOK_QUEUE"
 
 [[queues.consumers]]
 queue = "agent-drop-webhooks"
-max_retries = 50
+# The 2s -> 20min capped ladder needs 81 retries to cross the 24-hour age
+# guard. Two spare platform retries leave margin; the consumer acks at the guard.
+max_retries = 82
 max_batch_size = 5
 max_batch_timeout = 10
 retry_delay = 2

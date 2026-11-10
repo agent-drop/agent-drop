@@ -1,6 +1,6 @@
 import { EmailMessage } from "cloudflare:email";
 import { AwsClient } from "aws4fetch";
-import type { Env } from "../types";
+import type { Env, RelayQueueMessage } from "../types";
 import { toEmailAttachment } from "./email-builder";
 import { generateId } from "./id";
 import { bareAddr, buildRawEmail } from "./mime";
@@ -321,16 +321,31 @@ export async function enqueueRelay(
 	return logId;
 }
 
-// Process a relay message from the queue
-export async function processRelayMessage(msg: Message<any>, env: Env): Promise<void> {
-	const relay = msg.body;
-	const MAX_AGE_MS = 24 * 60 * 60 * 1000;
+export const RELAY_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+export const RELAY_MAX_BACKOFF_SECONDS = 1200;
 
-	if (Date.now() - relay.firstAttemptAt > MAX_AGE_MS) {
+function relayAttemptOf(msg: { attempts?: number }): number {
+	return msg.attempts && msg.attempts > 0 ? msg.attempts : 1;
+}
+
+export function relayBackoffFor(attempt: number): number {
+	return Math.min(2 ** attempt, RELAY_MAX_BACKOFF_SECONDS);
+}
+
+// Process a relay message from the queue. Queue retry() re-enqueues the body
+// unchanged, so the platform's Message.attempts is the only counter that grows.
+export async function processRelayMessage(
+	msg: Message<RelayQueueMessage>,
+	env: Env,
+): Promise<void> {
+	const relay = msg.body;
+	const attempt = relayAttemptOf(msg);
+
+	if (Date.now() - relay.firstAttemptAt > RELAY_MAX_AGE_MS) {
 		await env.DB.prepare(
-			"UPDATE delivery_log SET status = 'failed', error = 'exceeded 24h retry window', completed_at = ? WHERE id = ?",
+			"UPDATE delivery_log SET status = 'failed', error = 'exceeded 24h retry window', attempts = ?, completed_at = ? WHERE id = ?",
 		)
-			.bind(Date.now(), relay.logId)
+			.bind(attempt, Date.now(), relay.logId)
 			.run();
 		msg.ack();
 		return;
@@ -342,17 +357,16 @@ export async function processRelayMessage(msg: Message<any>, env: Env): Promise<
 		await env.DB.prepare(
 			"UPDATE delivery_log SET status = 'success', attempts = ?, completed_at = ?, error = ? WHERE id = ?",
 		)
-			.bind(relay.attempt + 1, Date.now(), `cf:${messageId}`, relay.logId)
+			.bind(attempt, Date.now(), `cf:${messageId}`, relay.logId)
 			.run();
 		msg.ack();
 	} catch (err: any) {
 		await env.DB.prepare(
 			"UPDATE delivery_log SET status = 'retrying', error = ?, attempts = ? WHERE id = ?",
 		)
-			.bind(err.message || "SES error", relay.attempt + 1, relay.logId)
+			.bind(err.message || "email delivery error", attempt, relay.logId)
 			.run();
 
-		const delaySec = Math.min(2 ** (relay.attempt + 1), 1200);
-		msg.retry({ delaySeconds: delaySec });
+		msg.retry({ delaySeconds: relayBackoffFor(attempt) });
 	}
 }

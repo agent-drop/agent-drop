@@ -905,6 +905,11 @@ drop mask-remove j-shop       # delete permanently
 
 Relay emails are queued via CF Queue (same as webhooks). Exponential backoff 2s -> 20min cap, retry up to 24h. Logged in `delivery_log` with type `relay`.
 
+The relay consumer reads Cloudflare's 1-based `Message.attempts`; `retry()`
+re-enqueues an immutable body, so its deprecated `attempt` field never changes.
+The shared consumer allows 82 retries: the capped ladder crosses 24 hours after
+retry 81, then the age guard records `failed` and acknowledges the message.
+
 ### D1 Tables
 
 - `email_masks` - mask ID, label, active flag

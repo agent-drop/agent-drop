@@ -67,6 +67,10 @@ export interface RelayQueueMessage {
 	from: string;
 	to: string;
 	subject: string;
+	/**
+	 * @deprecated Always 0 and ignored. Queue retry() re-enqueues the body
+	 * unchanged; the consumer uses the platform's Message.attempts instead.
+	 */
 	attempt: number;
 	firstAttemptAt: number;
 }
