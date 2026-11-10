@@ -13,7 +13,7 @@
 - [x] Implement PR 2: hosted-content origin isolation.
 - [x] Implement PR 3: authenticated relay reply routes and retry correctness.
 - [x] Run focused regressions and the full verification suite on every branch.
-- [ ] Show exact commits and PR text for explicit approval.
+- [x] Show exact commits and PR text for explicit approval.
 - [ ] Only after approval, push branches and create public PRs.
 
 ## Baseline
