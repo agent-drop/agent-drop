@@ -323,8 +323,8 @@ async function prepareEmail(
 		if (body.inReplyTo.startsWith("<")) {
 			inReplyTo = body.inReplyTo;
 		} else {
-			const row = await env.DB.prepare("SELECT metadata FROM drops WHERE id = ?")
-				.bind(body.inReplyTo)
+			const row = await env.DB.prepare("SELECT metadata FROM drops WHERE id = ? AND inbox = ?")
+				.bind(body.inReplyTo, inbox)
 				.first<{ metadata: string | null }>();
 			if (row?.metadata) {
 				try {

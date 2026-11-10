@@ -190,6 +190,33 @@ describe("handleSend -- one send for the whole recipient list", () => {
 		expect(onlyBuilder(email).headers).toBeUndefined();
 	});
 
+	test("a drop id from another inbox cannot supply threading headers", async () => {
+		const email = makeEmail();
+		const env = makeEnv({ EMAIL: email as unknown as Env["EMAIL"] });
+		await env.DB.prepare(
+			"INSERT INTO drops (id, inbox, channel, metadata, created_at) VALUES (?, ?, 'email', ?, ?)",
+		)
+			.bind(
+				"01knbobthread",
+				"bob",
+				JSON.stringify({ message_id: "<bob-secret@mail.example.com>" }),
+				Date.now(),
+			)
+			.run();
+
+		const response = await handleSend(
+			jsonRequest("https://drop.test/api/send/lisa", {
+				...PLAIN,
+				inReplyTo: "01knbobthread",
+			}),
+			env,
+			"lisa",
+		);
+
+		expect(response.status).toBe(200);
+		expect(onlyBuilder(email).headers).toBeUndefined();
+	});
+
 	test("logs the outbound row with the platform message id", async () => {
 		const email = makeEmail({ messageId: "cf-xyz-9" });
 		const env = makeEnv({ EMAIL: email as unknown as Env["EMAIL"] });
