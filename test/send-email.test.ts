@@ -1,5 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { handleCompose, handleSend } from "../src/api/send";
+import {
+	handleCompose,
+	handleSend,
+	MAX_ATTACHMENTS,
+	MAX_ATTACHMENT_TOTAL_BYTES,
+	MAX_EMAIL_REQUEST_BYTES,
+	MAX_INLINE_ATTACHMENT_BYTES,
+} from "../src/api/send";
 import type { Env } from "../src/types";
 import { type FakeEmail, makeEmail, onlyBuilder } from "./helpers/email";
 import { jsonRequest, makeBucket, makeEnv, type TestEnv } from "./helpers/env";
@@ -379,6 +386,193 @@ describe("handleSend -- attachments reach the binding as bytes", () => {
 		const [attachment] = onlyBuilder(email).attachments ?? [];
 		expect(attachment.disposition).toBe("inline");
 		expect(attachment.contentId).toBe("logo");
+	});
+});
+
+describe("handleSend -- attachment resource budgets", () => {
+	test("accepts exactly the documented attachment-count limit", async () => {
+		const attachments = Array.from({ length: MAX_ATTACHMENTS }, (_, i) => ({
+			filename: `${i}.txt`,
+			dataBase64: "eA==",
+		}));
+		const { email, response } = await send({ ...PLAIN, attachments });
+
+		expect(response.status).toBe(200);
+		expect(onlyBuilder(email).attachments).toHaveLength(MAX_ATTACHMENTS);
+	});
+
+	test("rejects an attachment count over the limit before resolving any source", async () => {
+		const attachments = Array.from({ length: MAX_ATTACHMENTS + 1 }, (_, i) => ({
+			url: `https://example.com/${i}.txt`,
+		}));
+		const { email, response } = await send({ ...PLAIN, attachments });
+
+		expect(response.status).toBe(413);
+		expect((await response.json()) as { error: string }).toEqual({
+			error: `too many attachments (max ${MAX_ATTACHMENTS})`,
+		});
+		expect(email.sends).toHaveLength(0);
+	});
+
+	test("rejects inline base64 that decodes above its per-file limit", async () => {
+		const dataBase64 = Buffer.alloc(MAX_INLINE_ATTACHMENT_BYTES + 1).toString("base64");
+		const { email, response } = await send({
+			...PLAIN,
+			attachments: [{ filename: "large.bin", dataBase64 }],
+		});
+
+		expect(response.status).toBe(413);
+		expect(email.sends).toHaveLength(0);
+	});
+
+	test("uses R2 metadata to reject an over-budget attachment before reading its body", async () => {
+		let bodyRead = false;
+		const key = "outbound/temp/lisa/upload/large.bin";
+		const bucket = {
+			get: async () => ({
+				key,
+				size: MAX_ATTACHMENT_TOTAL_BYTES + 1,
+				arrayBuffer: async () => {
+					bodyRead = true;
+					return new ArrayBuffer(0);
+				},
+			}),
+		} as unknown as R2Bucket;
+		const email = makeEmail();
+		const env = makeEnv({ BUCKET: bucket, EMAIL: email as unknown as Env["EMAIL"] });
+
+		const response = await handleSend(
+			jsonRequest("https://drop.test/api/send/lisa", {
+				...PLAIN,
+				attachments: [{ r2Key: key }],
+			}),
+			env,
+			"lisa",
+		);
+
+		expect(response.status).toBe(413);
+		expect(bodyRead).toBe(false);
+		expect(email.sends).toHaveLength(0);
+	});
+
+	test("resolves sequentially and stops before reading an attachment that exceeds the remainder", async () => {
+		const first = "outbound/temp/lisa/upload/first.bin";
+		const second = "outbound/temp/lisa/upload/second.bin";
+		const nineMiB = 9 * 1024 * 1024;
+		const bodyReads: string[] = [];
+		const bucket = {
+			get: async (key: string) => ({
+				key,
+				size: nineMiB,
+				arrayBuffer: async () => {
+					bodyReads.push(key);
+					return new ArrayBuffer(nineMiB);
+				},
+			}),
+		} as unknown as R2Bucket;
+		const email = makeEmail();
+		const env = makeEnv({ BUCKET: bucket, EMAIL: email as unknown as Env["EMAIL"] });
+
+		const response = await handleSend(
+			jsonRequest("https://drop.test/api/send/lisa", {
+				...PLAIN,
+				attachments: [{ r2Key: first }, { r2Key: second }],
+			}),
+			env,
+			"lisa",
+		);
+
+		expect(response.status).toBe(413);
+		expect(bodyReads).toEqual([first]);
+		expect(email.sends).toHaveLength(0);
+	});
+
+	test("keeps HTTP(S) URL attachments while rejecting oversized declared responses", async () => {
+		const realFetch = globalThis.fetch;
+		let cancelled = false;
+		globalThis.fetch = (async () => {
+			const stream = new ReadableStream<Uint8Array>({
+				cancel() {
+					cancelled = true;
+				},
+			});
+			return new Response(stream, {
+				headers: { "Content-Length": String(MAX_ATTACHMENT_TOTAL_BYTES + 1) },
+			});
+		}) as unknown as typeof fetch;
+
+		try {
+			const { email, response } = await send({
+				...PLAIN,
+				attachments: [{ url: "https://example.com/large.bin" }],
+			});
+			expect(response.status).toBe(413);
+			expect(cancelled).toBe(true);
+			expect(email.sends).toHaveLength(0);
+		} finally {
+			globalThis.fetch = realFetch;
+		}
+	});
+
+	test("still fetches a normal remote URL attachment byte-for-byte", async () => {
+		const realFetch = globalThis.fetch;
+		globalThis.fetch = (async () =>
+			new Response("remote report", {
+				headers: { "Content-Type": "text/plain", "Content-Length": "13" },
+			})) as unknown as typeof fetch;
+
+		try {
+			const { email, response } = await send({
+				...PLAIN,
+				attachments: [{ url: "https://example.com/report.txt" }],
+			});
+			expect(response.status).toBe(200);
+			const content = onlyBuilder(email).attachments?.[0].content as ArrayBufferView;
+			expect(new TextDecoder().decode(content)).toBe("remote report");
+		} finally {
+			globalThis.fetch = realFetch;
+		}
+	});
+
+	test("rejects non-HTTP attachment URLs without fetching them", async () => {
+		const realFetch = globalThis.fetch;
+		let fetched = false;
+		globalThis.fetch = (async () => {
+			fetched = true;
+			return new Response("unexpected");
+		}) as unknown as typeof fetch;
+
+		try {
+			const { email, response } = await send({
+				...PLAIN,
+				attachments: [{ url: "data:text/plain,hello" }],
+			});
+			expect(response.status).toBe(400);
+			expect(fetched).toBe(false);
+			expect(email.sends).toHaveLength(0);
+		} finally {
+			globalThis.fetch = realFetch;
+		}
+	});
+
+	test("rejects an oversized JSON request from Content-Length before parsing it", async () => {
+		const email = makeEmail();
+		const env = makeEnv({ EMAIL: email as unknown as Env["EMAIL"] });
+		const response = await handleSend(
+			new Request("https://drop.test/api/send/lisa", {
+				method: "POST",
+				headers: {
+					"Content-Type": "application/json",
+					"Content-Length": String(MAX_EMAIL_REQUEST_BYTES + 1),
+				},
+				body: JSON.stringify(PLAIN),
+			}),
+			env,
+			"lisa",
+		);
+
+		expect(response.status).toBe(413);
+		expect(email.sends).toHaveLength(0);
 	});
 });
 

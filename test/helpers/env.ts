@@ -139,6 +139,7 @@ export function makeBucket(objects: Record<string, string | Uint8Array> = {}): R
 			const body = objects[key];
 			return {
 				key,
+				size: sizeOf(body),
 				body: new Response(body).body,
 				httpEtag: `"etag-${key}"`,
 				writeHttpMetadata: (_headers: Headers) => {},

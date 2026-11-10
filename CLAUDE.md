@@ -202,7 +202,9 @@ curl -X POST $KEY -F "file=@document.pdf" \
 # attachments[], deleteAfterSend.
 # Attachments resolve from one of: dataBase64 (inline), r2Key (uploaded), or url (fetched).
 # Worker hands an EmailMessageBuilder to the Email Sending binding, which assembles the MIME.
-# One send carries the whole to/cc/bcc list. Limits: 50 combined recipients, 25 MiB total.
+# One send carries the whole to/cc/bcc list. Limits: 50 combined recipients,
+# 32 attachments, 5 MiB per inline base64 attachment, and 16 MiB decoded attachment data
+# in total (leaving room under the 25 MiB message cap).
 curl -X POST $KEY -H "Content-Type: application/json" \
   -d '{"to":["bob@example.com"],"cc":["team@example.com"],"subject":"Hi","text":"Hello",
        "html":"<b>Hi</b> <img src=\"cid:logo\">",
@@ -475,8 +477,10 @@ the HTML a browser needs:
 
 **Attachment transport:** local files <1MB ride inline as base64; files >1MB (or any with
 `--upload`) are presigned + PUT to R2 (`outbound-tmp/`) and pulled by the Worker at send time;
-URLs are fetched server-side. Cloudflare caps the assembled message at 25 MiB, and the
-recipient list at 50 combined to/cc/bcc.
+URLs are fetched server-side over HTTP(S). The Worker accepts at most 32 attachments, 5 MiB
+per inline base64 attachment, and 16 MiB of decoded attachment data in total, leaving room
+below Cloudflare's 25 MiB assembled-message cap; the recipient list remains capped at 50
+combined to/cc/bcc.
 
 **YAML template** keys are camelCase, mirroring the flags (`drop`/`from`, `to`, `cc`, `bcc`,
 `replyTo`, `fromName`, `subject`, `body`, `bodyHtml`, `markdown`, `topic`, `inReplyTo`,
