@@ -247,6 +247,59 @@ describe("admin-only routes", () => {
 		expect(body.key).toStartWith("ad_");
 	});
 
+	test("POST /api/keys validates permissions before minting a key", async () => {
+		for (const permissions of ["read", "write", "admin"]) {
+			const env = makeEnv();
+			const accepted = await send(env, "POST", "/api/keys", ADMIN, {
+				name: `${permissions}-key`,
+				permissions,
+			});
+			expect(accepted.status).toBe(201);
+			expect(
+				env.DB.raw
+					.query("SELECT permissions FROM api_keys WHERE name = ?")
+					.get(`${permissions}-key`),
+			).toEqual({ permissions });
+		}
+
+		const env = makeEnv();
+		for (const permissions of ["owner", false, 42, ["admin"]]) {
+			const rejected = await send(env, "POST", "/api/keys", ADMIN, {
+				name: "cursed-key",
+				permissions,
+			});
+			expect(rejected.status).toBe(400);
+		}
+		expect(env.DB.raw.query("SELECT COUNT(*) AS n FROM api_keys").get()).toEqual({ n: 0 });
+	});
+
+	test("POST /api/keys normalizes valid scopes and rejects invalid ones", async () => {
+		const env = makeEnv();
+		const accepted = await send(env, "POST", "/api/keys", ADMIN, {
+			name: "gray-key",
+			inbox_scope: "Mr.Gray",
+		});
+		expect(accepted.status).toBe(201);
+		expect(
+			env.DB.raw.query("SELECT inbox_scope FROM api_keys WHERE name = 'gray-key'").get(),
+		).toEqual({
+			inbox_scope: "mrgray",
+		});
+
+		for (const inbox_scope of ["9starts-wrong", "!!!", " ", 42]) {
+			const rejected = await send(env, "POST", "/api/keys", ADMIN, {
+				name: "bad-scope",
+				inbox_scope,
+			});
+			expect(rejected.status).toBe(400);
+		}
+		expect(
+			env.DB.raw.query("SELECT COUNT(*) AS n FROM api_keys WHERE name = 'bad-scope'").get(),
+		).toEqual({
+			n: 0,
+		});
+	});
+
 	test("DELETE /api/keys/:id reaches the sub-path route", async () => {
 		const env = makeEnv();
 		const created = (await (

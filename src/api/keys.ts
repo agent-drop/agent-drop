@@ -1,27 +1,50 @@
 import { generateApiKey } from "../lib/auth";
+import { normalizeInbox } from "../lib/normalize";
 import type { Env, ApiKey } from "../types";
+
+export const API_KEY_PERMISSIONS = ["read", "write", "admin"] as const;
 
 export async function handleKeys(request: Request, env: Env, url: URL): Promise<Response> {
 	const method = request.method;
 
 	// POST /api/keys - create key
 	if (method === "POST") {
-		const body = (await request.json()) as {
-			name: string;
-			inbox_scope?: string;
-			permissions?: string;
-		};
-
-		if (!body.name) {
-			return Response.json({ error: "name required" }, { status: 400 });
+		let body: Record<string, unknown>;
+		try {
+			body = (await request.json()) as Record<string, unknown>;
+		} catch {
+			return Response.json({ error: "invalid JSON body" }, { status: 400 });
 		}
 
-		const key = await generateApiKey(
-			env,
-			body.name,
-			body.inbox_scope || null,
-			body.permissions || "read",
-		);
+		if (typeof body.name !== "string" || !body.name.trim()) {
+			return Response.json({ error: "name required" }, { status: 400 });
+		}
+		const permissions =
+			body.permissions === undefined || body.permissions === null || body.permissions === ""
+				? "read"
+				: body.permissions;
+		if (
+			typeof permissions !== "string" ||
+			!API_KEY_PERMISSIONS.includes(permissions as (typeof API_KEY_PERMISSIONS)[number])
+		) {
+			return Response.json(
+				{ error: `permissions must be one of: ${API_KEY_PERMISSIONS.join(", ")}` },
+				{ status: 400 },
+			);
+		}
+
+		let inboxScope: string | null = null;
+		if (body.inbox_scope !== undefined && body.inbox_scope !== null && body.inbox_scope !== "") {
+			if (typeof body.inbox_scope !== "string") {
+				return Response.json({ error: "inbox_scope must be a valid inbox name" }, { status: 400 });
+			}
+			inboxScope = normalizeInbox(body.inbox_scope);
+			if (!inboxScope) {
+				return Response.json({ error: "inbox_scope must be a valid inbox name" }, { status: 400 });
+			}
+		}
+
+		const key = await generateApiKey(env, body.name, inboxScope, permissions);
 
 		return Response.json({ key, name: body.name }, { status: 201 });
 	}
