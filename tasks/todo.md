@@ -9,7 +9,7 @@
 - [x] Reconcile the initial assessment with the counter-assessment and reduce scope.
 - [x] Document every finding, correction, fix, and compatibility implication.
 - [x] Obtain approval for the revised three-PR plan before implementation.
-- [ ] Implement PR 1: API boundaries and bounded input.
+- [x] Implement PR 1: API boundaries and bounded input.
 - [ ] Implement PR 2: hosted-content origin isolation.
 - [ ] Implement PR 3: authenticated relay reply routes and retry correctness.
 - [ ] Run focused regressions and the full verification suite on every branch.
@@ -29,18 +29,18 @@
 
 ### PR 1: Close API Boundaries and Bound Input
 
-- [ ] Restrict outbound R2 reads and cleanup to `outbound/temp/{inbox}/`.
-- [ ] Filter `/api/drops` and `/api/boxes` for scoped admin keys.
-- [ ] Validate multipart `fileSize` before R2 initialization or signing.
-- [ ] Cap webhook bodies while streaming.
-- [ ] Preserve direct multipart and URL attachments with explicit memory budgets.
-- [ ] Mark private hosted responses `private, no-store`.
-- [ ] Increase generated webhook suffix entropy without banning exact slugs.
-- [ ] Scope `inReplyTo` lookup to the sending inbox.
-- [ ] Validate API-key permission values and scopes.
-- [ ] Fail malformed Google tokens closed.
-- [ ] Reject control characters in header-derived fields.
-- [ ] Add focused regression tests.
+- [x] Restrict outbound R2 reads and cleanup to `outbound/temp/{inbox}/`.
+- [x] Filter `/api/drops` and `/api/boxes` for scoped admin keys.
+- [x] Validate multipart `fileSize` before R2 initialization or signing.
+- [x] Cap webhook bodies while streaming.
+- [x] Preserve direct multipart and URL attachments with explicit memory budgets.
+- [x] Mark private hosted responses `private, no-store`.
+- [x] Increase generated webhook suffix entropy without banning exact slugs.
+- [x] Scope `inReplyTo` lookup to the sending inbox.
+- [x] Validate API-key permission values and scopes.
+- [x] Fail malformed Google tokens closed.
+- [x] Reject control characters in header-derived fields.
+- [x] Add focused regression tests.
 
 ### PR 2: Isolate Hosted Content
 
@@ -84,3 +84,11 @@
 ## Review
 
 The initial seven-PR proposal was too broad. The revised plan preserves documented behavior, limits compatibility changes to real trust-boundary corrections, and separates security work from maintenance and assurance improvements.
+
+### PR 1 Result
+
+- Thirteen focused fix commits close the approved API-boundary and bounded-input findings without removing direct multipart uploads, drop-token uploads, remote URL attachments, exact webhook slugs, or private hosted links.
+- Focused regressions and the full suite pass: 784 tests, 4,635 assertions, 0 failures across 38 files.
+- Typecheck, production build, and deployment dry run pass.
+- Lint reports only the pre-existing unused `NOW` warning and `useTemplate` informational finding.
+- The final tracked diff contains no secrets, generated build output, local files, or unrelated changes. Pre-existing untracked `.claude/` files remain untouched.
