@@ -281,13 +281,16 @@ curl -X POST $KEY -H "Content-Type: application/json" \
 #           "uploadUrl":"https://...r2...?X-Amz-Signature=...",
 #           "fileName":"report.pdf","originalFileName":"report.pdf"}
 
-# Initiate a multipart upload (large files). Part count is derived from fileSize
-# at 50 MiB per part; the response presigns every part. fileSize must be a positive
-# integer, at most 100 parts (5000 MiB), else 400 / 413.
+# Initiate a multipart upload (large files). The response presigns every part,
+# at most 100 of them. The part size scales with the file: 50 MiB while 100 x 50
+# MiB covers it, then ceil(fileSize / 100) rounded up to a whole MiB, and it is
+# returned as `partSize`. Slice by EXACTLY that value -- R2 requires every part
+# but the last to be the same size. fileSize must be a positive
+# integer, at most 100 x 5 GiB (R2's max part size) = 500 GiB, else 400 / 413.
 curl -X POST $KEY -H "Content-Type: application/json" \
   -d '{"fileName":"big.zip","contentType":"application/zip","fileSize":734003200}' \
   https://frst.dev/api/upload/multipart/{name}
-# Returns: {"dropId":"...","uploadId":"...","objectKey":"...",
+# Returns: {"dropId":"...","uploadId":"...","objectKey":"...","partSize":52428800,
 #           "parts":[{"partNumber":1,"url":"https://...r2..."},...]}
 
 # Complete a multipart upload. dropId and uploadId ONLY -- the worker lists the
@@ -1439,7 +1442,7 @@ src/
     keys.ts             -- API key CRUD (validates permissions + inbox_scope)
     targets.ts          -- Temporary drop token CRUD
     users.ts            -- Allowed users CRUD (Google OAuth allowlist)
-    upload.ts           -- Presigned R2 upload (presign, multipart capped at 100 x 50 MiB parts, complete, confirm)
+    upload.ts           -- Presigned R2 upload (presign, multipart: 100 parts max, partSize scales with the file, complete, confirm)
     rules.ts            -- Rules CRUD + delivery log
     masks.ts            -- Email mask CRUD
     hooks.ts            -- Webhook receiver CRUD (asAdmin, prefix-routed)
