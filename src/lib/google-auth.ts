@@ -13,19 +13,34 @@ interface GoogleJWTPayload {
 	iat: number;
 }
 
-// Cache Google's JWKS keys in memory (Worker instance lifetime)
-let cachedKeys: { keys: JsonWebKey[]; fetchedAt: number } | null = null;
+interface GoogleJWK extends JsonWebKey {
+	kid?: string;
+}
 
-async function getGoogleKeys(): Promise<JsonWebKey[]> {
+export const MAX_GOOGLE_TOKEN_LENGTH = 16 * 1024;
+const UNKNOWN_KID_REFRESH_COOLDOWN_MS = 60_000;
+
+// Cache Google's JWKS keys in memory (Worker instance lifetime)
+let cachedKeys: { keys: GoogleJWK[]; fetchedAt: number } | null = null;
+let lastUnknownKidRefreshAt = 0;
+
+async function getGoogleKeys(
+	forceRefresh = false,
+): Promise<{ keys: GoogleJWK[]; cacheHit: boolean }> {
 	// Cache for 1 hour
-	if (cachedKeys && Date.now() - cachedKeys.fetchedAt < 3600000) {
-		return cachedKeys.keys;
+	if (!forceRefresh && cachedKeys && Date.now() - cachedKeys.fetchedAt < 3600000) {
+		return { keys: cachedKeys.keys, cacheHit: true };
 	}
 
 	const res = await fetch("https://www.googleapis.com/oauth2/v3/certs");
-	const data = (await res.json()) as { keys: JsonWebKey[] };
-	cachedKeys = { keys: data.keys, fetchedAt: Date.now() };
-	return data.keys;
+	if (!res.ok) throw new Error(`google jwks request failed (${res.status})`);
+	const data = (await res.json()) as { keys?: unknown };
+	if (!Array.isArray(data?.keys) || data.keys.some((key) => !key || typeof key !== "object")) {
+		throw new Error("google jwks response is malformed");
+	}
+	const keys = data.keys as GoogleJWK[];
+	cachedKeys = { keys, fetchedAt: Date.now() };
+	return { keys, cacheHit: false };
 }
 
 function base64UrlDecode(str: string): Uint8Array {
@@ -35,20 +50,38 @@ function base64UrlDecode(str: string): Uint8Array {
 	return Uint8Array.from(binary, (c) => c.charCodeAt(0));
 }
 
-async function verifyJWT(token: string, clientId: string): Promise<GoogleJWTPayload | null> {
+async function verifyJWTUnchecked(
+	token: string,
+	clientId: string,
+): Promise<GoogleJWTPayload | null> {
+	if (token.length > MAX_GOOGLE_TOKEN_LENGTH) return null;
 	const parts = token.split(".");
 	if (parts.length !== 3) return null;
 
 	const [headerB64, payloadB64, signatureB64] = parts;
 
 	// Decode header to find key ID
-	const header = JSON.parse(new TextDecoder().decode(base64UrlDecode(headerB64)));
+	const header = JSON.parse(new TextDecoder().decode(base64UrlDecode(headerB64))) as {
+		alg?: unknown;
+		kid?: unknown;
+	};
 	const kid = header.kid;
-	if (!kid || header.alg !== "RS256") return null;
+	if (typeof kid !== "string" || !kid || header.alg !== "RS256") return null;
 
-	// Find matching key
-	const keys = await getGoogleKeys();
-	const jwk = keys.find((k: any) => k.kid === kid);
+	// Google may rotate keys while an isolate still holds the prior set. Refresh
+	// once on a cache miss, with a cooldown so random key ids cannot turn token
+	// validation into an outbound-request amplifier.
+	let keySet = await getGoogleKeys();
+	let jwk = keySet.keys.find((key) => key.kid === kid);
+	if (
+		!jwk &&
+		keySet.cacheHit &&
+		Date.now() - lastUnknownKidRefreshAt >= UNKNOWN_KID_REFRESH_COOLDOWN_MS
+	) {
+		lastUnknownKidRefreshAt = Date.now();
+		keySet = await getGoogleKeys(true);
+		jwk = keySet.keys.find((key) => key.kid === kid);
+	}
 	if (!jwk) return null;
 
 	// Import the key
@@ -70,9 +103,10 @@ async function verifyJWT(token: string, clientId: string): Promise<GoogleJWTPayl
 	const payload = JSON.parse(
 		new TextDecoder().decode(base64UrlDecode(payloadB64)),
 	) as GoogleJWTPayload;
+	if (!payload || typeof payload !== "object") return null;
 
 	// Check expiry
-	if (payload.exp * 1000 < Date.now()) return null;
+	if (!Number.isFinite(payload.exp) || payload.exp * 1000 < Date.now()) return null;
 
 	// Check issuer
 	if (payload.iss !== "accounts.google.com" && payload.iss !== "https://accounts.google.com") {
@@ -83,9 +117,23 @@ async function verifyJWT(token: string, clientId: string): Promise<GoogleJWTPayl
 	if (payload.aud !== clientId) return null;
 
 	// Check email is verified
-	if (!payload.email_verified) return null;
+	if (!payload.email_verified || typeof payload.email !== "string" || !payload.email) return null;
 
 	return payload;
+}
+
+async function verifyJWT(token: string, clientId: string): Promise<GoogleJWTPayload | null> {
+	try {
+		return await verifyJWTUnchecked(token, clientId);
+	} catch {
+		return null;
+	}
+}
+
+/** Clear isolate-local state so tests never depend on execution order. */
+export function clearGoogleKeyCache(): void {
+	cachedKeys = null;
+	lastUnknownKidRefreshAt = 0;
 }
 
 export async function validateGoogleToken(

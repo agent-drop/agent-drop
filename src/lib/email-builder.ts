@@ -19,6 +19,28 @@ export const MAX_HEADER_BYTES = 16 * 1024;
 export const MAX_HEADER_NAME_BYTES = 100;
 export const MAX_HEADER_VALUE_BYTES = 2048;
 
+function hasHeaderControl(value: string): boolean {
+	for (let i = 0; i < value.length; i++) {
+		const code = value.charCodeAt(i);
+		if (code <= 0x1f || code === 0x7f) return true;
+	}
+	return false;
+}
+
+/** Reject bytes that can terminate or reshape an RFC header line. */
+export function validateHeaderValue(label: string, value: string): string | null {
+	return hasHeaderControl(value) ? `${label} contains a disallowed control character` : null;
+}
+
+/** The send API accepts one Message-ID token, not a header fragment or list. */
+export function validateMessageId(value: string): string | null {
+	const controlError = validateHeaderValue("inReplyTo", value);
+	if (controlError) return controlError;
+	return /^<[^<>\s@]+@[^<>\s@]+>$/.test(value)
+		? null
+		: "inReplyTo must be one Message-ID in <local@domain> form";
+}
+
 /** An attachment resolved to bytes, before it is shaped for the binding. */
 export interface ResolvedAttachment {
 	filename: string;
@@ -67,6 +89,16 @@ export function validateRecipients(to: string[], cc: string[], bcc: string[]): s
 	if (total > MAX_RECIPIENTS) {
 		return `too many recipients: ${total} (max ${MAX_RECIPIENTS} combined to/cc/bcc)`;
 	}
+	for (const [label, recipients] of [
+		["to", to],
+		["cc", cc],
+		["bcc", bcc],
+	] as const) {
+		for (const recipient of recipients) {
+			const error = validateHeaderValue(`${label} recipient`, recipient);
+			if (error) return error;
+		}
+	}
 	return null;
 }
 
@@ -87,6 +119,10 @@ export function validateHeaders(headers: Record<string, string>): string | null 
 
 	let total = 0;
 	for (const [name, value] of entries) {
+		const nameControlError = validateHeaderValue("header name", name);
+		if (nameControlError) return nameControlError;
+		const valueControlError = validateHeaderValue(`header value for ${name}`, value);
+		if (valueControlError) return valueControlError;
 		const nameBytes = utf8.encode(name).length;
 		const valueBytes = utf8.encode(value).length;
 		if (nameBytes > MAX_HEADER_NAME_BYTES) {

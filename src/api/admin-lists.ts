@@ -8,7 +8,11 @@
 import type { Env } from "../types";
 
 /** GET /api/drops - every drop across every inbox, newest first. */
-export async function handleDropsList(env: Env, url: URL): Promise<Response> {
+export async function handleDropsList(
+	env: Env,
+	url: URL,
+	inboxScope: string | null = null,
+): Promise<Response> {
 	const limit = Math.min(Number.parseInt(url.searchParams.get("limit") || "50", 10), 200);
 	const since = url.searchParams.get("since");
 	const channel = url.searchParams.get("channel");
@@ -16,6 +20,10 @@ export async function handleDropsList(env: Env, url: URL): Promise<Response> {
 	let query = "SELECT * FROM drops WHERE 1=1";
 	const params: (string | number)[] = [];
 
+	if (inboxScope) {
+		query += " AND inbox = ?";
+		params.push(inboxScope);
+	}
 	if (since) {
 		query += " AND created_at > ?";
 		params.push(Number.parseInt(since, 10));
@@ -39,11 +47,15 @@ export async function handleDropsList(env: Env, url: URL): Promise<Response> {
 }
 
 /** GET /api/boxes - one row per inbox, with drop stats and live token counts. */
-export async function handleBoxesList(env: Env): Promise<Response> {
+export async function handleBoxesList(
+	env: Env,
+	inboxScope: string | null = null,
+): Promise<Response> {
 	// Both queries share ONE session, so the token counts cannot come from a
 	// replica older than the one the box list came from.
 	const db = env.DB.withSession("first-unconstrained");
 
+	const dropsWhere = inboxScope ? "WHERE inbox = ?" : "";
 	const { results } = await db
 		.prepare(`
 			SELECT
@@ -54,16 +66,20 @@ export async function handleBoxesList(env: Env): Promise<Response> {
 				SUM(CASE WHEN read_at IS NULL THEN 1 ELSE 0 END) as unread,
 				GROUP_CONCAT(DISTINCT channel) as channels
 			FROM drops
+			${dropsWhere}
 			GROUP BY inbox
 			ORDER BY last_drop_at DESC
 		`)
+		.bind(...(inboxScope ? [inboxScope] : []))
 		.all<{ inbox: string }>();
 
+	const tokenScope = inboxScope ? " AND inbox = ?" : "";
 	const { results: tokens } = await db
 		.prepare(
-			"SELECT inbox, COUNT(*) as active_tokens FROM drop_tokens WHERE expires_at > ? GROUP BY inbox",
+			`SELECT inbox, COUNT(*) as active_tokens FROM drop_tokens
+			 WHERE expires_at > ?${tokenScope} GROUP BY inbox`,
 		)
-		.bind(Date.now())
+		.bind(Date.now(), ...(inboxScope ? [inboxScope] : []))
 		.all<{ inbox: string; active_tokens: number }>();
 
 	const tokenMap = new Map(tokens.map((t) => [t.inbox, t.active_tokens]));

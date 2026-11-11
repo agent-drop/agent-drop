@@ -152,15 +152,19 @@ export function asAdmin(handle: OpenRoute): OpenRoute {
 }
 
 /** The master admin credential, or an API key carrying admin permissions. */
-export function asAdminOrAdminKey(handle: OpenRoute): OpenRoute {
+export function asAdminOrAdminKey(
+	handle: (scope: RequestScope, params: Params, inboxScope: string | null) => Promise<Response>,
+): OpenRoute {
 	return async (scope, params) => {
-		if (!(await isAdmin(scope.request, scope.env))) {
-			const auth = await validateApiKey(scope.env, scope.request, scope.ctx);
-			if (!auth.valid || auth.permissions !== "admin") {
-				return denyCredential(scope, 403, { error: "admin required" });
-			}
+		if (await isAdmin(scope.request, scope.env)) {
+			return handle(scope, params, null);
 		}
-		return handle(scope, params);
+
+		const auth = await validateApiKey(scope.env, scope.request, scope.ctx);
+		if (!auth.valid || auth.permissions !== "admin") {
+			return denyCredential(scope, 403, { error: "admin required" });
+		}
+		return handle(scope, params, auth.inboxScope);
 	};
 }
 

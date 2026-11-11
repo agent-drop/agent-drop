@@ -2,9 +2,11 @@ import type { Env } from "../types";
 import { normalizeInbox } from "./normalize";
 
 // Top-level reserved path prefix for public static hosting:
-//   {host-domain}/f/{box}/{site}/...  ->  R2  sites/{box}/{site}/...
-// HOST_DOMAIN is deliberately separate from the application origin: uploaded
-// HTML can run scripts, but those scripts cannot read the SPA's localStorage.
+//   {domain}/f/{box}/{site}/...  ->  R2  sites/{box}/{site}/...
+// Kept as a path prefix under the Worker's own host rather than a per-site
+// subdomain, so it can never collide with other subdomains of the zone. /f/* is
+// added to run_worker_first so these requests reach the Worker instead of the
+// SPA fallback.
 export const HOST_PREFIX = "f";
 
 /**
@@ -75,15 +77,22 @@ function typeFromKey(key: string): string {
 	return EXT_TYPES[ext] || "application/octet-stream";
 }
 
-function notFound(msg = "Not found"): Response {
-	return new Response(msg, { status: 404, headers: { "Content-Type": "text/plain" } });
+function privateCacheHeaders(): HeadersInit {
+	return { "Content-Type": "text/plain", "Cache-Control": "private, no-store" };
+}
+
+function notFound(msg = "Not found", privateSite = false): Response {
+	return new Response(msg, {
+		status: 404,
+		headers: privateSite ? privateCacheHeaders() : { "Content-Type": "text/plain" },
+	});
 }
 
 /**
  * Public URL for a hosted site.
  */
 export function siteUrl(env: Env, inbox: string, site: string): string {
-	return `https://${env.HOST_DOMAIN}/${HOST_PREFIX}/${inbox}/${site}/`;
+	return `https://${env.DOMAIN}/${HOST_PREFIX}/${inbox}/${site}/`;
 }
 
 /**
@@ -113,11 +122,15 @@ export async function serveHostedSite(request: Request, env: Env, url: URL): Pro
 		.first<{ auth_token: string | null; expires_at: number | null }>();
 
 	if (!row) return notFound();
+	const privateSite = !!row.auth_token;
 	if (row.expires_at && row.expires_at < Date.now()) {
-		return new Response("Site expired", { status: 410, headers: { "Content-Type": "text/plain" } });
+		return new Response("Site expired", {
+			status: 410,
+			headers: privateSite ? privateCacheHeaders() : { "Content-Type": "text/plain" },
+		});
 	}
 	if (row.auth_token && url.searchParams.get("auth") !== row.auth_token) {
-		return new Response("Unauthorized", { status: 401, headers: { "Content-Type": "text/plain" } });
+		return new Response("Unauthorized", { status: 401, headers: privateCacheHeaders() });
 	}
 
 	const rest = segs
@@ -132,7 +145,9 @@ export async function serveHostedSite(request: Request, env: Env, url: URL): Pro
 		if (!url.pathname.endsWith("/")) {
 			const destination = new URL(siteUrl(env, inbox, site));
 			destination.search = url.search;
-			return Response.redirect(destination.toString(), 301);
+			const headers = new Headers({ Location: destination.toString() });
+			if (privateSite) headers.set("Cache-Control", "private, no-store");
+			return new Response(null, { status: 301, headers });
 		}
 		key = `${prefix}/index.html`;
 	} else {
@@ -148,13 +163,13 @@ export async function serveHostedSite(request: Request, env: Env, url: URL): Pro
 	if (!obj && !key.includes(".")) {
 		obj = await env.BUCKET.get(`${key}/index.html`);
 	}
-	if (!obj) return notFound();
+	if (!obj) return notFound("Not found", privateSite);
 
 	const headers = new Headers();
 	obj.writeHttpMetadata(headers);
 	if (!headers.has("Content-Type")) headers.set("Content-Type", typeFromKey(key));
 	headers.set("etag", obj.httpEtag);
-	headers.set("Cache-Control", "public, max-age=3600");
+	headers.set("Cache-Control", privateSite ? "private, no-store" : "public, max-age=3600");
 	headers.set("X-Content-Type-Options", "nosniff");
 
 	if (request.method === "HEAD") return new Response(null, { headers });

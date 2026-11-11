@@ -3,9 +3,12 @@ import {
 	type ResolvedAttachment,
 	toEmailAttachment,
 	toRecipients,
+	validateHeaderValue,
 	validateHeaders,
+	validateMessageId,
 	validateRecipients,
 } from "../lib/email-builder";
+import { readBodyCapped } from "../lib/body-limit";
 import { generateId } from "../lib/id";
 import { renderMarkdownEmail } from "../lib/markdown";
 import { renderBuilderPreview } from "../lib/mime";
@@ -23,10 +26,44 @@ interface AttachmentInput {
 	cid?: string;
 }
 
+/** Keep decoded attachments comfortably below the binding's 25 MiB message cap. */
+export const MAX_ATTACHMENT_BYTES = 16 * 1024 * 1024;
+export const MAX_ATTACHMENT_TOTAL_BYTES = 16 * 1024 * 1024;
+export const MAX_ATTACHMENTS = 32;
+/** Inline JSON is intentionally smaller; the CLI already moves files above 1 MB through R2. */
+export const MAX_INLINE_ATTACHMENT_BYTES = 5 * 1024 * 1024;
+/** Enough for one max-size inline attachment after base64 expansion, plus JSON metadata. */
+export const MAX_EMAIL_REQUEST_BYTES = 8 * 1024 * 1024;
+const REMOTE_ATTACHMENT_TIMEOUT_MS = 15_000;
+
+class AttachmentResolutionError extends Error {
+	constructor(
+		message: string,
+		readonly status = 400,
+	) {
+		super(message);
+	}
+}
+
 // Decode base64 into bytes. The Email Sending binding treats a string `content`
 // as RAW content, so a base64 string would arrive as base64 text in the mail.
-function base64ToBytes(encoded: string): ArrayBuffer {
-	const binary = atob(encoded);
+function base64ToBytes(encoded: string, maxBytes: number, limitMessage: string): ArrayBuffer {
+	const compact = encoded.replace(/\s/g, "");
+	const padding = compact.endsWith("==") ? 2 : compact.endsWith("=") ? 1 : 0;
+	const estimatedBytes = Math.floor((compact.length * 3) / 4) - padding;
+	if (estimatedBytes > maxBytes) {
+		throw new AttachmentResolutionError(limitMessage, 413);
+	}
+
+	let binary: string;
+	try {
+		binary = atob(compact);
+	} catch {
+		throw new AttachmentResolutionError("attachment dataBase64 is not valid base64");
+	}
+	if (binary.length > maxBytes) {
+		throw new AttachmentResolutionError(limitMessage, 413);
+	}
 	const bytes = new Uint8Array(binary.length);
 	for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
 	return bytes.buffer;
@@ -44,45 +81,144 @@ function asList(v: string | string[] | undefined): string[] {
 }
 
 // Resolve an attachment source (base64 / R2 / URL) into bytes
-async function resolveAttachment(env: Env, a: AttachmentInput): Promise<ResolvedAttachment> {
+function outboundTempPrefix(inbox: string): string {
+	return `outbound/temp/${inbox}/`;
+}
+
+function isOwnedOutboundKey(inbox: string, key: string): boolean {
+	return key.startsWith(outboundTempPrefix(inbox));
+}
+
+async function resolveAttachment(
+	env: Env,
+	inbox: string,
+	a: AttachmentInput,
+	remainingBytes: number,
+): Promise<{ attachment: ResolvedAttachment; size: number }> {
+	if (!a || typeof a !== "object") {
+		throw new AttachmentResolutionError("each attachment must be an object");
+	}
+	for (const [label, value] of [
+		["attachment filename", a.filename],
+		["attachment contentType", a.contentType],
+		["attachment cid", a.cid],
+	] as const) {
+		if (value === undefined) continue;
+		if (typeof value !== "string") {
+			throw new AttachmentResolutionError(`${label} must be a string`);
+		}
+		const error = validateHeaderValue(label, value);
+		if (error) throw new AttachmentResolutionError(error);
+	}
 	const inline = !!a.inline || !!a.cid;
+	const maxBytes = Math.min(MAX_ATTACHMENT_BYTES, remainingBytes);
 
-	if (a.dataBase64) {
+	if (a.dataBase64 !== undefined && a.dataBase64 !== "") {
+		if (typeof a.dataBase64 !== "string") {
+			throw new AttachmentResolutionError("attachment dataBase64 must be a string");
+		}
+		const inlineMaxBytes = Math.min(maxBytes, MAX_INLINE_ATTACHMENT_BYTES);
+		const content = base64ToBytes(
+			a.dataBase64,
+			inlineMaxBytes,
+			maxBytes < MAX_INLINE_ATTACHMENT_BYTES
+				? "attachments exceed the 16 MiB decoded-byte budget"
+				: "inline attachment exceeds the 5 MiB decoded-byte limit",
+		);
 		return {
-			filename: a.filename || "attachment",
-			contentType: a.contentType || "application/octet-stream",
-			content: base64ToBytes(a.dataBase64),
-			inline,
-			cid: a.cid,
+			attachment: {
+				filename: a.filename || "attachment",
+				contentType: a.contentType || "application/octet-stream",
+				content,
+				inline,
+				cid: a.cid,
+			},
+			size: content.byteLength,
 		};
 	}
 
-	if (a.r2Key) {
+	if (a.r2Key !== undefined) {
+		if (typeof a.r2Key !== "string") {
+			throw new AttachmentResolutionError("attachment r2Key must be a string");
+		}
+		if (!isOwnedOutboundKey(inbox, a.r2Key)) {
+			throw new AttachmentResolutionError("R2 attachment key is not owned by this inbox");
+		}
 		const obj = await env.BUCKET.get(a.r2Key);
-		if (!obj) throw new Error(`attachment not found in R2: ${a.r2Key}`);
+		if (!obj) throw new AttachmentResolutionError(`attachment not found in R2: ${a.r2Key}`);
+		if (obj.size > maxBytes) {
+			throw new AttachmentResolutionError("attachments exceed the 16 MiB decoded-byte budget", 413);
+		}
+		const content = await obj.arrayBuffer();
+		if (content.byteLength > maxBytes) {
+			throw new AttachmentResolutionError("attachments exceed the 16 MiB decoded-byte budget", 413);
+		}
 		return {
-			filename: a.filename || obj.customMetadata?.originalFilename || basename(a.r2Key),
-			contentType: a.contentType || obj.httpMetadata?.contentType || "application/octet-stream",
-			content: await obj.arrayBuffer(),
-			inline,
-			cid: a.cid,
+			attachment: {
+				filename: a.filename || obj.customMetadata?.originalFilename || basename(a.r2Key),
+				contentType: a.contentType || obj.httpMetadata?.contentType || "application/octet-stream",
+				content,
+				inline,
+				cid: a.cid,
+			},
+			size: content.byteLength,
 		};
 	}
 
-	if (a.url) {
-		const r = await fetch(a.url);
-		if (!r.ok) throw new Error(`failed to fetch attachment url (${r.status}): ${a.url}`);
+	if (a.url !== undefined) {
+		if (typeof a.url !== "string") {
+			throw new AttachmentResolutionError("attachment url must be a string");
+		}
+		let url: URL;
+		try {
+			url = new URL(a.url);
+		} catch {
+			throw new AttachmentResolutionError("attachment url is invalid");
+		}
+		if (url.protocol !== "https:" && url.protocol !== "http:") {
+			throw new AttachmentResolutionError("attachment url must use http or https");
+		}
+
+		let r: Response;
+		try {
+			r = await fetch(url, { signal: AbortSignal.timeout(REMOTE_ATTACHMENT_TIMEOUT_MS) });
+		} catch {
+			throw new AttachmentResolutionError(`failed to fetch attachment url: ${a.url}`);
+		}
+		if (!r.ok) {
+			throw new AttachmentResolutionError(`failed to fetch attachment url (${r.status}): ${a.url}`);
+		}
+		const declaredHeader = r.headers.get("content-length");
+		const declared = declaredHeader === null ? Number.NaN : Number(declaredHeader);
+		if (Number.isFinite(declared) && declared > maxBytes) {
+			await r.body?.cancel("attachment too large").catch(() => {});
+			throw new AttachmentResolutionError("attachments exceed the 16 MiB decoded-byte budget", 413);
+		}
+		const bodyRead = await readBodyCapped(r.body, maxBytes);
+		if (!bodyRead.ok) {
+			throw new AttachmentResolutionError(
+				bodyRead.reason === "too-large"
+					? "attachments exceed the 16 MiB decoded-byte budget"
+					: "could not read attachment url response",
+				bodyRead.reason === "too-large" ? 413 : 400,
+			);
+		}
 		return {
-			filename: a.filename || basename(a.url),
-			contentType:
-				a.contentType || r.headers.get("content-type")?.split(";")[0] || "application/octet-stream",
-			content: await r.arrayBuffer(),
-			inline,
-			cid: a.cid,
+			attachment: {
+				filename: a.filename || basename(a.url),
+				contentType:
+					a.contentType ||
+					r.headers.get("content-type")?.split(";")[0] ||
+					"application/octet-stream",
+				content: bodyRead.bytes,
+				inline,
+				cid: a.cid,
+			},
+			size: bodyRead.bytes.byteLength,
 		};
 	}
 
-	throw new Error("attachment must have one of: dataBase64, r2Key, url");
+	throw new AttachmentResolutionError("attachment must have one of: dataBase64, r2Key, url");
 }
 
 interface EmailBody {
@@ -104,6 +240,35 @@ interface EmailBody {
 	inReplyTo?: string;
 	attachments?: AttachmentInput[];
 	deleteAfterSend?: boolean;
+}
+
+async function readEmailBody(request: Request): Promise<EmailBody | Response> {
+	const declaredHeader = request.headers.get("content-length");
+	const declared = declaredHeader === null ? Number.NaN : Number(declaredHeader);
+	if (Number.isFinite(declared) && declared > MAX_EMAIL_REQUEST_BYTES) {
+		return Response.json({ error: "email request body is too large" }, { status: 413 });
+	}
+
+	const bodyRead = await readBodyCapped(request.body, MAX_EMAIL_REQUEST_BYTES);
+	if (!bodyRead.ok) {
+		return Response.json(
+			{
+				error:
+					bodyRead.reason === "too-large"
+						? "email request body is too large"
+						: "could not read email request body",
+			},
+			{ status: bodyRead.reason === "too-large" ? 413 : 400 },
+		);
+	}
+
+	try {
+		const parsed = JSON.parse(new TextDecoder().decode(bodyRead.bytes));
+		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error();
+		return parsed as EmailBody;
+	} catch {
+		return Response.json({ error: "email request body must be a JSON object" }, { status: 400 });
+	}
 }
 
 interface PreparedEmail {
@@ -134,10 +299,33 @@ async function prepareEmail(
 	if (!body.subject) {
 		return Response.json({ error: "subject is required" }, { status: 400 });
 	}
+	for (const [label, value] of [
+		["subject", body.subject],
+		["replyTo", body.replyTo],
+		["fromName", body.fromName],
+		["topic", body.topic],
+		["inReplyTo", body.inReplyTo],
+	] as const) {
+		if (value === undefined || value === null) continue;
+		if (typeof value !== "string") {
+			return Response.json({ error: `${label} must be a string` }, { status: 400 });
+		}
+		const error = validateHeaderValue(label, value);
+		if (error) return Response.json({ error }, { status: 400 });
+	}
 	if (!body.text && !body.html && !body.markdown && !body.attachments?.length) {
 		return Response.json(
 			{ error: "text, html, markdown, or attachments are required" },
 			{ status: 400 },
+		);
+	}
+	if (body.attachments !== undefined && !Array.isArray(body.attachments)) {
+		return Response.json({ error: "attachments must be an array" }, { status: 400 });
+	}
+	if ((body.attachments?.length ?? 0) > MAX_ATTACHMENTS) {
+		return Response.json(
+			{ error: `too many attachments (max ${MAX_ATTACHMENTS})` },
+			{ status: 413 },
 		);
 	}
 	// Two sources for one MIME part. Silently preferring either one is the kind of
@@ -163,28 +351,42 @@ async function prepareEmail(
 		if (body.inReplyTo.startsWith("<")) {
 			inReplyTo = body.inReplyTo;
 		} else {
-			const row = await env.DB.prepare("SELECT metadata FROM drops WHERE id = ?")
-				.bind(body.inReplyTo)
+			const row = await env.DB.prepare("SELECT metadata FROM drops WHERE id = ? AND inbox = ?")
+				.bind(body.inReplyTo, inbox)
 				.first<{ metadata: string | null }>();
 			if (row?.metadata) {
 				try {
 					const m = JSON.parse(row.metadata);
-					if (m.message_id) inReplyTo = m.message_id;
+					if (typeof m.message_id === "string") inReplyTo = m.message_id;
 				} catch {
 					/* ignore malformed metadata */
 				}
 			}
 		}
 	}
+	if (inReplyTo) {
+		const messageIdError = validateMessageId(inReplyTo);
+		if (messageIdError) return Response.json({ error: messageIdError }, { status: 400 });
+	}
 
 	// Resolve attachment sources into bytes
-	let resolved: ResolvedAttachment[];
+	const resolved: ResolvedAttachment[] = [];
 	try {
-		resolved = await Promise.all((body.attachments || []).map((a) => resolveAttachment(env, a)));
+		let totalBytes = 0;
+		for (const input of body.attachments || []) {
+			const { attachment, size } = await resolveAttachment(
+				env,
+				inbox,
+				input,
+				MAX_ATTACHMENT_TOTAL_BYTES - totalBytes,
+			);
+			resolved.push(attachment);
+			totalBytes += size;
+		}
 	} catch (err) {
 		return Response.json(
 			{ error: err instanceof Error ? err.message : "attachment resolution failed" },
-			{ status: 400 },
+			{ status: err instanceof AttachmentResolutionError ? err.status : 400 },
 		);
 	}
 
@@ -225,7 +427,8 @@ async function prepareEmail(
 // nesting are the platform's). What it does guarantee is field parity with the
 // send path: it is built from the builder, not from the request body.
 export async function handleCompose(request: Request, env: Env, inbox: string): Promise<Response> {
-	const body = (await request.json()) as EmailBody;
+	const body = await readEmailBody(request);
+	if (body instanceof Response) return body;
 	const prepared = await prepareEmail(env, inbox, body);
 	if (prepared instanceof Response) return prepared;
 
@@ -239,7 +442,8 @@ export async function handleCompose(request: Request, env: Env, inbox: string): 
 
 // POST /api/send/:inbox - send an email on behalf of a box (From: {inbox}@MAIL_DOMAIN)
 export async function handleSend(request: Request, env: Env, inbox: string): Promise<Response> {
-	const body = (await request.json()) as EmailBody;
+	const body = await readEmailBody(request);
+	if (body instanceof Response) return body;
 	const prepared = await prepareEmail(env, inbox, body);
 	if (prepared instanceof Response) return prepared;
 
@@ -252,7 +456,7 @@ export async function handleSend(request: Request, env: Env, inbox: string): Pro
 	if (body.deleteAfterSend) {
 		const keys = (body.attachments || [])
 			.map((a) => a.r2Key)
-			.filter((k): k is string => !!k && k.startsWith("outbound/temp/"));
+			.filter((k): k is string => !!k && isOwnedOutboundKey(inbox, k));
 		await Promise.all(keys.map((k) => env.BUCKET.delete(k)));
 	}
 

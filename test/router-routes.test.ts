@@ -247,6 +247,59 @@ describe("admin-only routes", () => {
 		expect(body.key).toStartWith("ad_");
 	});
 
+	test("POST /api/keys validates permissions before minting a key", async () => {
+		for (const permissions of ["read", "write", "admin"]) {
+			const env = makeEnv();
+			const accepted = await send(env, "POST", "/api/keys", ADMIN, {
+				name: `${permissions}-key`,
+				permissions,
+			});
+			expect(accepted.status).toBe(201);
+			expect(
+				env.DB.raw
+					.query("SELECT permissions FROM api_keys WHERE name = ?")
+					.get(`${permissions}-key`),
+			).toEqual({ permissions });
+		}
+
+		const env = makeEnv();
+		for (const permissions of ["owner", false, 42, ["admin"]]) {
+			const rejected = await send(env, "POST", "/api/keys", ADMIN, {
+				name: "cursed-key",
+				permissions,
+			});
+			expect(rejected.status).toBe(400);
+		}
+		expect(env.DB.raw.query("SELECT COUNT(*) AS n FROM api_keys").get()).toEqual({ n: 0 });
+	});
+
+	test("POST /api/keys normalizes valid scopes and rejects invalid ones", async () => {
+		const env = makeEnv();
+		const accepted = await send(env, "POST", "/api/keys", ADMIN, {
+			name: "gray-key",
+			inbox_scope: "Mr.Gray",
+		});
+		expect(accepted.status).toBe(201);
+		expect(
+			env.DB.raw.query("SELECT inbox_scope FROM api_keys WHERE name = 'gray-key'").get(),
+		).toEqual({
+			inbox_scope: "mrgray",
+		});
+
+		for (const inbox_scope of ["9starts-wrong", "!!!", " ", 42]) {
+			const rejected = await send(env, "POST", "/api/keys", ADMIN, {
+				name: "bad-scope",
+				inbox_scope,
+			});
+			expect(rejected.status).toBe(400);
+		}
+		expect(
+			env.DB.raw.query("SELECT COUNT(*) AS n FROM api_keys WHERE name = 'bad-scope'").get(),
+		).toEqual({
+			n: 0,
+		});
+	});
+
 	test("DELETE /api/keys/:id reaches the sub-path route", async () => {
 		const env = makeEnv();
 		const created = (await (
@@ -325,6 +378,19 @@ describe("GET /api/drops and GET /api/boxes", () => {
 		expect(res.status).toBe(200);
 	});
 
+	test("/api/drops filters an admin API key to its inbox scope", async () => {
+		const env = makeEnv();
+		await seedApiKey(env, "ad_lisa_admin", { permissions: "admin", inboxScope: "lisa" });
+		await seedDrops(env);
+
+		const body = (await (
+			await get(env, "/api/drops", { Authorization: "Bearer ad_lisa_admin" })
+		).json()) as { count: number; drops: { inbox: string }[] };
+
+		expect(body.count).toBe(1);
+		expect(body.drops.map((drop) => drop.inbox)).toEqual(["lisa"]);
+	});
+
 	test("/api/drops rejects an API key with only write permissions", async () => {
 		const env = makeEnv();
 		await seedApiKey(env, "ad_writer", { permissions: "write" });
@@ -367,6 +433,26 @@ describe("GET /api/drops and GET /api/boxes", () => {
 		expect(body.count).toBe(2);
 		expect(body.boxes.find((b) => b.inbox === "lisa")?.active_tokens).toBe(1);
 		expect(body.boxes.find((b) => b.inbox === "bob")?.active_tokens).toBe(0);
+	});
+
+	test("/api/boxes filters drops and token counts to an admin API key's scope", async () => {
+		const env = makeEnv();
+		await seedApiKey(env, "ad_lisa_admin", { permissions: "admin", inboxScope: "lisa" });
+		await seedDrops(env);
+		await seedDropToken(env, "tok-lisa", "lisa");
+		await seedDropToken(env, "tok-bob", "bob");
+
+		const body = (await (
+			await get(env, "/api/boxes", { Authorization: "Bearer ad_lisa_admin" })
+		).json()) as {
+			count: number;
+			boxes: { inbox: string; active_tokens: number }[];
+		};
+
+		expect(body).toEqual({
+			count: 1,
+			boxes: [expect.objectContaining({ inbox: "lisa", active_tokens: 1 })],
+		});
 	});
 
 	test("/api/boxes rejects an anonymous caller", async () => {
@@ -510,12 +596,56 @@ describe("presigned upload routes", () => {
 			"POST",
 			"/api/upload/multipart/lisa",
 			{ Authorization: "Bearer ad_writer" },
-			{ fileName: "big.zip", fileSize: 60 * 1024 * 1024 },
+			{ fileName: "big.zip", fileSize: 700 * 1024 * 1024 },
 		);
 		expect(res.status).toBe(200);
 		const body = (await res.json()) as { uploadId: string; parts: { partNumber: number }[] };
 		expect(body.uploadId).toBe("up-42");
-		expect(body.parts).toHaveLength(2);
+		expect(body.parts).toHaveLength(14);
+	});
+
+	test("POST /api/upload/multipart/:name rejects invalid sizes before calling R2", async () => {
+		const env = makeEnv();
+		await seedApiKey(env, "ad_writer", { permissions: "write" });
+		let r2Calls = 0;
+		globalThis.fetch = (async () => {
+			r2Calls++;
+			return new Response("unexpected");
+		}) as unknown as typeof fetch;
+
+		for (const fileSize of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+			const res = await send(
+				env,
+				"POST",
+				"/api/upload/multipart/lisa",
+				{ Authorization: "Bearer ad_writer" },
+				{ fileName: "big.zip", fileSize },
+			);
+			expect(res.status).toBe(400);
+		}
+
+		expect(r2Calls).toBe(0);
+	});
+
+	test("POST /api/upload/multipart/:name caps the number of signed parts", async () => {
+		const env = makeEnv();
+		await seedApiKey(env, "ad_writer", { permissions: "write" });
+		let r2Calls = 0;
+		globalThis.fetch = (async () => {
+			r2Calls++;
+			return new Response("unexpected");
+		}) as unknown as typeof fetch;
+
+		const res = await send(
+			env,
+			"POST",
+			"/api/upload/multipart/lisa",
+			{ Authorization: "Bearer ad_writer" },
+			{ fileName: "too-big.zip", fileSize: 50 * 1024 * 1024 * 100 + 1 },
+		);
+
+		expect(res.status).toBe(413);
+		expect(r2Calls).toBe(0);
 	});
 
 	test("POST /api/upload/multipart/:name rejects a read-only key", async () => {

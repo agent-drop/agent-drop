@@ -143,9 +143,9 @@ invariant the router is careful about. `/h/` keeps it clean, and short URLs are
 better in a third-party console anyway.
 
 **Slug secrecy.** For a receiver with `auth_mode = none`, the URL *is* the
-credential. `hook-create` therefore appends a random suffix by default
-(`stripe-prod-k7f2q9`) unless `--slug` is given explicitly. With a real
-signature configured, a clean slug is fine.
+credential. `hook-create` therefore appends a 130-bit random suffix by default
+unless `--slug` is given explicitly. With a real signature configured, a clean
+slug is fine.
 
 ---
 
@@ -716,10 +716,9 @@ parsed when it is JSON) so an agent pipes straight into `jq`.
   `Proxy-Authorization`, plus whatever `auth_config` names as a shared secret).
   Signature headers are stored verbatim on purpose -- see §4.
 - Secrets are plaintext in D1, admin-read-only, never returned by any list API.
-- Slug entropy: the default random suffix is 6 chars from a 32-char alphabet
-  (~30 bits). That is fine behind the per-receiver rate limit, which is what
-  actually stops enumeration; raise it with `--slug-entropy` if a receiver is
-  the sole credential for something that matters.
+- Slug entropy: the default random suffix is 26 chars from a 32-char alphabet
+  (130 bits). An exact `--slug` remains available for deliberately public names
+  or receivers that enforce their own signature.
 
 ---
 

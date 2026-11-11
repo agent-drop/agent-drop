@@ -14,7 +14,7 @@
  */
 
 import { normalizeSlug } from "../lib/normalize";
-import { hookUrl, slugSuffix } from "../lib/webhook-defs";
+import { generatedSlug, generatedSlugBase, hookUrl } from "../lib/webhook-defs";
 import type { Env, WebhookReceiver } from "../types";
 
 interface RotateBody {
@@ -22,11 +22,6 @@ interface RotateBody {
 	slug?: string;
 	/** How long the old slug keeps answering. 0 (the default) cuts it dead. */
 	graceSeconds?: number;
-}
-
-/** `stripe-prod-k7f2q9` -> `stripe-prod`, so a rotation keeps the name you chose. */
-function baseOf(slug: string): string {
-	return slug.replace(/-[0-9a-z]{6}$/, "") || slug;
 }
 
 export async function rotateSlug(
@@ -42,7 +37,9 @@ export async function rotateSlug(
 		return Response.json({ error: "invalid JSON body" }, { status: 400 });
 	}
 
-	const next = body.slug ? normalizeSlug(body.slug) : `${baseOf(receiver.slug)}-${slugSuffix()}`;
+	const next = body.slug
+		? normalizeSlug(body.slug)
+		: generatedSlug(generatedSlugBase(receiver.slug));
 	if (!next) return Response.json({ error: "invalid slug (a-z, 0-9, hyphens)" }, { status: 400 });
 	if (next === receiver.slug) {
 		return Response.json({ error: "that is already the slug" }, { status: 400 });

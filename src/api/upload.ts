@@ -18,7 +18,9 @@ function s3Url(env: Env, objectKey: string) {
 	return r2ObjectUrl(env, objectKey);
 }
 
-const CHUNK_SIZE = 50 * 1024 * 1024; // 50MB
+export const MULTIPART_CHUNK_BYTES = 50 * 1024 * 1024; // 50 MiB
+export const MAX_MULTIPART_PARTS = 100;
+export const MAX_MULTIPART_BYTES = MULTIPART_CHUNK_BYTES * MAX_MULTIPART_PARTS;
 
 // POST /api/upload/presign - get presigned PUT URL for direct upload
 export async function handlePresign(
@@ -106,9 +108,19 @@ export async function handleMultipartInit(
 		topic?: string;
 	};
 
-	if (!body.fileName || !body.fileSize) {
+	if (!body.fileName || body.fileSize === undefined) {
 		return Response.json({ error: "fileName and fileSize required" }, { status: 400 });
 	}
+	if (!Number.isSafeInteger(body.fileSize) || body.fileSize <= 0) {
+		return Response.json({ error: "fileSize must be a positive safe integer" }, { status: 400 });
+	}
+	if (body.fileSize > MAX_MULTIPART_BYTES) {
+		return Response.json(
+			{ error: `fileSize exceeds multipart limit (${MAX_MULTIPART_BYTES} bytes)` },
+			{ status: 413 },
+		);
+	}
+	const totalParts = Math.ceil(body.fileSize / MULTIPART_CHUNK_BYTES);
 
 	const slugged = slugifyFilename(body.fileName);
 	const dropId = generateId();
@@ -138,7 +150,6 @@ export async function handleMultipartInit(
 	}
 
 	// Generate presigned URLs for each part
-	const totalParts = Math.ceil(body.fileSize / CHUNK_SIZE);
 	const parts: { partNumber: number; url: string }[] = [];
 
 	for (let partNumber = 1; partNumber <= totalParts; partNumber++) {

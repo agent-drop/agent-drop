@@ -89,7 +89,7 @@ describe("receiver CRUD", () => {
 		expect(created.status).toBe(201);
 		// For a receiver without a signature the URL IS the credential, so a clean
 		// guessable slug would hand it away.
-		expect(body.slug).toMatch(/^stripe-prod-[0-9a-z]{6}$/);
+		expect(body.slug).toMatch(/^stripe-prod-[0-9a-hjkmnp-tv-z]{26}$/);
 		expect(body.url).toBe(`https://${TEST_DOMAIN}/h/lisa/${body.slug}`);
 	});
 

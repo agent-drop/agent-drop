@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { isAdmin } from "../src/lib/auth";
-import { makeEnv, TEST_ADMIN_KEY } from "./helpers/env";
+import { isAdmin, validateApiKey } from "../src/lib/auth";
+import { makeEnv, seedApiKey, TEST_ADMIN_KEY } from "./helpers/env";
 
 function req(authorization?: string): Request {
 	return new Request("https://drop.test/api/keys", {
@@ -53,5 +53,21 @@ describe("isAdmin", () => {
 	test("is asynchronous, i.e. it hashes rather than string-compares", () => {
 		const result = isAdmin(req("Bearer wrong"), makeEnv());
 		expect(result).toBeInstanceOf(Promise);
+	});
+});
+
+describe("validateApiKey", () => {
+	test("fails closed for a legacy row with an unknown permission value", async () => {
+		const env = makeEnv();
+		await seedApiKey(env, "ad_legacy_typo", { permissions: "raed" });
+
+		const result = await validateApiKey(env, req("Bearer ad_legacy_typo"));
+
+		expect(result).toEqual({
+			valid: false,
+			inboxScope: null,
+			permissions: "",
+			keyName: null,
+		});
 	});
 });

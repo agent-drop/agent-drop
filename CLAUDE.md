@@ -193,6 +193,8 @@ curl -X POST $KEY -H "Content-Type: application/json" \
   https://frst.dev/api/drop/{name}
 
 # Upload files
+# Direct multipart accepts up to 32 files, 20 MiB each, in a 25 MiB request.
+# Use the presigned upload endpoints below for larger files.
 curl -X POST $KEY -F "file=@document.pdf" \
   https://frst.dev/api/drop/{name}
 
@@ -202,7 +204,9 @@ curl -X POST $KEY -F "file=@document.pdf" \
 # attachments[], deleteAfterSend.
 # Attachments resolve from one of: dataBase64 (inline), r2Key (uploaded), or url (fetched).
 # Worker hands an EmailMessageBuilder to the Email Sending binding, which assembles the MIME.
-# One send carries the whole to/cc/bcc list. Limits: 50 combined recipients, 25 MiB total.
+# One send carries the whole to/cc/bcc list. Limits: 50 combined recipients,
+# 32 attachments, 5 MiB per inline base64 attachment, and 16 MiB decoded attachment data
+# in total (leaving room under the 25 MiB message cap).
 curl -X POST $KEY -H "Content-Type: application/json" \
   -d '{"to":["bob@example.com"],"cc":["team@example.com"],"subject":"Hi","text":"Hello",
        "html":"<b>Hi</b> <img src=\"cid:logo\">",
@@ -478,8 +482,10 @@ the HTML a browser needs:
 
 **Attachment transport:** local files <1MB ride inline as base64; files >1MB (or any with
 `--upload`) are presigned + PUT to R2 (`outbound-tmp/`) and pulled by the Worker at send time;
-URLs are fetched server-side. Cloudflare caps the assembled message at 25 MiB, and the
-recipient list at 50 combined to/cc/bcc.
+URLs are fetched server-side over HTTP(S). The Worker accepts at most 32 attachments, 5 MiB
+per inline base64 attachment, and 16 MiB of decoded attachment data in total, leaving room
+below Cloudflare's 25 MiB assembled-message cap; the recipient list remains capped at 50
+combined to/cc/bcc.
 
 **YAML template** keys are camelCase, mirroring the flags (`drop`/`from`, `to`, `cc`, `bcc`,
 `replyTo`, `fromName`, `subject`, `body`, `bodyHtml`, `markdown`, `topic`, `inReplyTo`,
@@ -712,7 +718,7 @@ fields it wanted. The `rule` and `captures` frames are identical.
   "hook": {
     "id": "01m025m0f5...",
     "inbox": "lisa",
-    "slug": "stripe-prod-k7f2q9",
+    "slug": "stripe-prod-k7f2q9m4v6x8z1a3b5c7d9e2fg",
     "event_type": "charge.succeeded",
     "routing_key": "cus_42",
     "method": "POST",
@@ -727,7 +733,7 @@ fields it wanted. The `rule` and `captures` frames are identical.
     "created_at": 1775112960019
   },
   "rule": { "id": "43858f85-...", "pattern": "lisa" },
-  "captures": { "inbox": "lisa", "slug": "stripe-prod-k7f2q9", "...": "..." }
+  "captures": { "inbox": "lisa", "slug": "stripe-prod-k7f2q9m4v6x8z1a3b5c7d9e2fg", "...": "..." }
 }
 ```
 
@@ -953,8 +959,10 @@ sits **outside** `/api/*`, whose invariant is "unknown path answers 401, not 404
 public, unauthenticated, body-swallowing endpoint has no business in there.
 
 For a receiver with `auth_mode: none` **the URL is the credential**, so
-`hook-create` appends a random suffix (`stripe-prod-k7f2q9`) unless `--slug`
-says otherwise, and says so out loud.
+`hook-create` appends a 130-bit random suffix
+(`stripe-prod-k7f2q9m4v6x8z1a3b5c7d9e2fg`) unless `--slug` says otherwise, and
+says so out loud. An exact slug on an `authMode: none` receiver is deliberately
+public/guessable; use the generated default unless that is intentional.
 
 ### Request handling (`src/lib/webhook-receive.ts`)
 
