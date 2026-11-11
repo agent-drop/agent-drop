@@ -16,6 +16,7 @@ import {
 } from "./lib/attachment-plan";
 import { emitEvents } from "./lib/queue-emit";
 import { previewRule } from "./lib/rule-preview";
+import { ruleTarget } from "./lib/rule-target";
 import { lookupSecret, type SecretLookup, setSecretHint } from "./lib/secrets";
 import { replayableHeaders } from "../src/lib/webhook-headers";
 import chalk from "chalk";
@@ -1434,6 +1435,10 @@ program
 		[],
 	)
 	.option("--webhook <url>", "POST webhook to this URL on drops")
+	.option(
+		"--relay <email>",
+		"Relay masked mail to this ONE owner address; only it may reply as the mask (see mask-create)",
+	)
 	.option("--scope <scopes>", "Comma-separated: email,web,api,hook,all", "all")
 	.option("--header <kv...>", "Webhook headers as Key:Value pairs")
 	.option("--priority <n>", "Priority (higher fires first)", "0")
@@ -1444,17 +1449,16 @@ program
 	)
 	.action(async (pattern, opts) => {
 		try {
-			const forwards: string[] = (opts.forward || [])
-				.flatMap((f: string) => f.split(","))
-				.map((s: string) => s.trim())
-				.filter(Boolean);
-			if (forwards.length === 0 && !opts.webhook) {
-				console.error(chalk.red("Specify --forward <email> (repeatable) or --webhook <url>"));
+			const resolved = ruleTarget({
+				forward: opts.forward || [],
+				webhook: opts.webhook,
+				relay: opts.relay,
+			});
+			if ("error" in resolved) {
+				console.error(chalk.red(resolved.error));
 				process.exit(1);
 			}
-
-			const type = forwards.length > 0 ? "forward" : "webhook";
-			const target = forwards.length > 0 ? forwards.join(",") : opts.webhook;
+			const { type, target } = resolved;
 
 			let headers: Record<string, string> | undefined;
 			if (opts.header) {

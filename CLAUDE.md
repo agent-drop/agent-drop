@@ -1005,6 +1005,13 @@ drop mask-create --id j-dating --label "dating"     # j-dating@frst.dev
 # 3. Share the mask address: j-7k9m@frst.dev
 ```
 
+The relay target is the mask **owner**: where relayed mail goes, and the only
+mailbox allowed to reply as the mask. So it is exactly one bare address.
+`POST /api/rules` and `PATCH /api/rules/:id` answer `400` for a list, a
+display-name form or anything else on a relay rule (a forward rule's comma list
+is unaffected). `rule-add` takes one of `--forward`, `--webhook` or `--relay`;
+two at once is an error.
+
 ### Mask Management
 
 ```bash

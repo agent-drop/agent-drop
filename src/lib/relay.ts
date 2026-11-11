@@ -203,7 +203,7 @@ export function relayReplyRefusal(opts: {
 // specials. Control characters are checked separately by hasHeaderControl.
 const BARE_ADDRESS = /^[^\s@<>()[\]\\,;:"]+@[^\s@<>()[\]\\,;:"]+$/;
 
-function isBareAddress(value: string | undefined): value is string {
+export function isBareAddress(value: string | undefined): value is string {
 	return !!value && BARE_ADDRESS.test(value) && !hasHeaderControl(value);
 }
 
