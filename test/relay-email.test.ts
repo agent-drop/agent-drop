@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import PostalMime from "postal-mime";
 import { handleEmail } from "../src/email-handler";
 import { buildLegacyRelayAddress, pickSenderAddress } from "../src/lib/relay";
@@ -82,6 +82,17 @@ async function relayFixture(): Promise<{ env: TestEnv; queued: RelayQueueMessage
 }
 
 const ROUTE = /^reply\+[0-9a-hjkmnp-tv-z]{26}@drop\.test$/;
+
+/** The relay rule's target in `relayFixture`: the only mailbox that may reply. */
+const OWNER = "owner@example.org";
+
+/**
+ * The Authentication-Results field Cloudflare prepends, so it is the first one
+ * physically in the message. Fields a sender wrote come after it.
+ */
+function cloudflareAuth(...clauses: string[]): string {
+	return `Authentication-Results: mx.cloudflare.net; ${clauses.join("; ")}`;
+}
 
 /** The header section of a raw message, up to the blank line. */
 function headerBlock(raw: string): string {
@@ -169,6 +180,178 @@ describe("authenticated relay reply routing", () => {
 			inbox: "sales-at-team",
 			topic: "newsletter",
 		});
+	});
+});
+
+// A reply route is an address, and addresses leak: the owner forwards or CCs the
+// relayed mail, a list archives it, a mailbox is compromised. Whoever holds one
+// must not be able to send as the mask, so only the relay rule's target may.
+describe("only the mask owner may reply through a relay route", () => {
+	let env: TestEnv;
+	let queued: RelayQueueMessage[];
+	let route: string;
+	let warn: ReturnType<typeof spyOn>;
+
+	beforeEach(async () => {
+		({ env, queued } = await relayFixture());
+		const inbound = incoming("sender@example.com", "j-7k9m@drop.test");
+		await handleEmail(inbound.message, env, makeCtx());
+		route = queued[0].from;
+		queued.length = 0;
+		warn = spyOn(console, "warn").mockImplementation(() => {});
+	});
+
+	afterEach(() => {
+		warn.mockRestore();
+	});
+
+	async function reply(
+		envelope: string,
+		fromHeader: string | null,
+		extraHeaders: string[] = [],
+		to = route,
+	): Promise<IncomingEmail> {
+		const mail = incoming(envelope, to, "Re: Hello", fromHeader, extraHeaders);
+		await handleEmail(mail.message, env, makeCtx());
+		return mail;
+	}
+
+	function expectRelayed(mail: IncomingEmail): void {
+		expect(mail.rejection()).toBeNull();
+		expect(queued).toHaveLength(1);
+		expect(queued[0]).toMatchObject({
+			direction: "reply",
+			from: "j-7k9m@drop.test",
+			to: "sender@example.com",
+		});
+		expect(warn).not.toHaveBeenCalled();
+	}
+
+	// Refused at SMTP with the same reason as an unknown route, so a leaked
+	// token's holder learns nothing, and never stored as an ordinary drop.
+	function expectRefused(mail: IncomingEmail, reason: RegExp): void {
+		expect(mail.rejection()).toBe("Invalid relay reply address");
+		expect(queued).toEqual([]);
+		expect(env.DB.raw.query("SELECT COUNT(*) AS count FROM drops").get()).toEqual({ count: 0 });
+		expect(warn).toHaveBeenCalledTimes(1);
+		expect(String(warn.mock.calls[0][0])).toMatch(reason);
+	}
+
+	test("a reply whose From header is the rule target is relayed", async () => {
+		const mail = await reply(OWNER, `"Owner" <${OWNER}>`, [
+			cloudflareAuth("dmarc=pass header.from=example.org", `spf=pass smtp.mailfrom=${OWNER}`),
+		]);
+		expectRelayed(mail);
+	});
+
+	test("the owner is matched case-insensitively, and against a display-name rule target", async () => {
+		await env.DB.prepare("UPDATE drop_rules SET target = ?")
+			.bind('"The Owner" <Owner@Example.org>')
+			.run();
+		expectRelayed(await reply("OWNER@example.ORG", "OWNER@EXAMPLE.ORG"));
+	});
+
+	test("a reply from anyone else is refused, never queued and never stored as a drop", async () => {
+		const mail = await reply("attacker@example.net", "attacker@example.net", [
+			cloudflareAuth(
+				"dmarc=pass header.from=example.net",
+				"spf=pass smtp.mailfrom=attacker@example.net",
+			),
+		]);
+		expectRefused(mail, /not the mask owner/);
+	});
+
+	test("naming the owner in Reply-To or Sender does not make someone else the owner", async () => {
+		const mail = await reply("attacker@example.net", "attacker@example.net", [
+			`Reply-To: ${OWNER}`,
+			`Sender: ${OWNER}`,
+		]);
+		expectRefused(mail, /not the mask owner/);
+	});
+
+	test("the owner's own envelope is enough when Cloudflare saw SPF pass for it", async () => {
+		// A provider alias: the header From is not the owner, the account is.
+		const mail = await reply(OWNER, '"Owner" <alias@owner-alias.example>', [
+			cloudflareAuth(
+				"dmarc=pass header.from=owner-alias.example",
+				`spf=pass smtp.mailfrom=${OWNER}`,
+			),
+		]);
+		expectRelayed(mail);
+	});
+
+	test("an owner envelope is refused when DMARC fails for the From header", async () => {
+		const mail = await reply(OWNER, "alias@owner-alias.example", [
+			cloudflareAuth(
+				"dmarc=fail header.from=owner-alias.example policy.dmarc=none",
+				`spf=pass smtp.mailfrom=${OWNER}`,
+			),
+		]);
+		expectRefused(mail, /dmarc=fail/);
+	});
+
+	// The envelope is the attacker's to write, and DMARC judges the From header's
+	// domain, which here the attacker owns. Without Cloudflare's SPF pass for the
+	// envelope itself, nothing ties it to the owner.
+	test.each([
+		["no Authentication-Results", []],
+		[
+			"SPF softfail for the envelope",
+			[
+				cloudflareAuth(
+					"dmarc=pass header.from=attacker.example",
+					`spf=softfail smtp.mailfrom=${OWNER}`,
+				),
+			],
+		],
+		["SPF pass for the HELO name only", [cloudflareAuth("spf=pass smtp.helo=mx.attacker.example")]],
+		[
+			"SPF pass for another envelope",
+			[cloudflareAuth("spf=pass smtp.mailfrom=bounce@attacker.example")],
+		],
+		[
+			"SPF pass only in a later field the sender wrote",
+			[
+				cloudflareAuth(`spf=softfail smtp.mailfrom=${OWNER}`),
+				`Authentication-Results: mx.cloudflare.net; spf=pass smtp.mailfrom=${OWNER}`,
+			],
+		],
+	])("an owner envelope with no SPF pass behind it is refused (%s)", async (_, headers) => {
+		const mail = await reply(OWNER, '"Owner" <someone@attacker.example>', headers);
+		expectRefused(mail, /SPF/);
+	});
+
+	test("a From header naming the owner is refused when Cloudflare's DMARC verdict is fail", async () => {
+		const mail = await reply("bounce@attacker.example", `"Owner" <${OWNER}>`, [
+			cloudflareAuth(
+				"dmarc=fail header.from=example.org policy.dmarc=none",
+				"spf=pass smtp.mailfrom=bounce@attacker.example",
+			),
+			// Only the first field is Cloudflare's; this one is the sender's own.
+			"Authentication-Results: mx.cloudflare.net; dmarc=pass header.from=example.org",
+		]);
+		expectRefused(mail, /dmarc=fail/);
+	});
+
+	test("a DMARC pass is not required: an owner domain with no DMARC record still replies", async () => {
+		const mail = await reply(OWNER, OWNER, [
+			cloudflareAuth("dmarc=none header.from=example.org", `spf=pass smtp.mailfrom=${OWNER}`),
+		]);
+		expectRelayed(mail);
+	});
+
+	test("a mask whose relay rule is gone refuses replies instead of storing them", async () => {
+		await env.DB.prepare("UPDATE drop_rules SET enabled = 0").run();
+		expectRefused(await reply(OWNER, OWNER), /no relay rule/);
+	});
+
+	test("a legacy route inside its cutoff is held to the same owner check", async () => {
+		env.RELAY_LEGACY_REPLY_UNTIL = "2999-01-01T00:00:00Z";
+		const legacy = buildLegacyRelayAddress("sender@example.com", "j-7k9m", "drop.test");
+		expectRefused(
+			await reply("attacker@example.net", "attacker@example.net", [], legacy),
+			/not the mask owner/,
+		);
 	});
 });
 
@@ -283,15 +466,17 @@ describe("relay reply target follows the headers, not the envelope", () => {
 		expect(queued[1]).toMatchObject({ direction: "reply", to: "pat@example.com" });
 	});
 
-	test("a Reply-To header wins over From, as it would in a mail client", async () => {
+	// The owner only ever sees reply+<token>, so a Reply-To that sends their answer
+	// somewhere other than the author has to be said out loud in the one place
+	// they do see: the display name.
+	test("a Reply-To header wins over From, and the label says where replies go", async () => {
 		const { relayed, sender } = await relay('"Pat" <pat@example.com>', [
 			"Reply-To: pat.replies@example.com",
 		]);
 
 		expect(sender).toBe("pat.replies@example.com");
-		// The label still names the author, not where the reply goes.
 		expect(rawHeader(relayed.rawEmail, "From")).toBe(
-			`"Pat (via j-7k9m@drop.test)" <${relayed.from}>`,
+			`"Pat (via j-7k9m@drop.test, replies go to pat.replies@example.com)" <${relayed.from}>`,
 		);
 	});
 
@@ -299,7 +484,41 @@ describe("relay reply target follows the headers, not the envelope", () => {
 		const { relayed } = await relay("pat@example.com", ["Reply-To: help@example.com"]);
 
 		expect(rawHeader(relayed.rawEmail, "From")).toBe(
-			`"pat@example.com (via j-7k9m@drop.test)" <${relayed.from}>`,
+			`"pat@example.com (via j-7k9m@drop.test, replies go to help@example.com)" <${relayed.from}>`,
+		);
+	});
+
+	test("a Reply-To naming the From address, in any case, adds no note", async () => {
+		const { relayed, sender } = await relay('"Pat" <pat@example.com>', [
+			"Reply-To: Pat@Example.COM",
+		]);
+
+		expect(sender).toBe("Pat@Example.COM");
+		expect(rawHeader(relayed.rawEmail, "From")).toBe(
+			`"Pat (via j-7k9m@drop.test)" <${relayed.from}>`,
+		);
+	});
+
+	test("a Reply-To beside an unusable From is noted against the envelope label", async () => {
+		const { relayed, sender } = await relay("<>", ["Reply-To: help@example.com"]);
+
+		expect(sender).toBe("help@example.com");
+		expect(rawHeader(relayed.rawEmail, "From")).toBe(
+			`"${BOUNCE} (via j-7k9m@drop.test, replies go to help@example.com)" <${relayed.from}>`,
+		);
+	});
+
+	// The domain is what decides who receives the reply, so a cut address keeps
+	// its end. Both halves are capped, so the sender cannot stretch the From line.
+	test("a long Reply-To is cut from the front, and the From line stays bounded", async () => {
+		const longReplyTo = `${"a".repeat(150)}@${"b".repeat(60)}.evil.example`;
+		const { relayed, sender } = await relay(`"${"N".repeat(200)}" <pat@example.com>`, [
+			`Reply-To: ${longReplyTo}`,
+		]);
+
+		expect(sender).toBe(longReplyTo);
+		expect(rawHeader(relayed.rawEmail, "From")).toBe(
+			`"${"N".repeat(64)} (via j-7k9m@drop.test, replies go to ...${longReplyTo.slice(-61)})" <${relayed.from}>`,
 		);
 	});
 

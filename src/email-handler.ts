@@ -1,6 +1,6 @@
 import PostalMime from "postal-mime";
 import { generateId } from "./lib/id";
-import { parseSenderAuth } from "./lib/mail-auth";
+import { firstSenderAuth } from "./lib/mail-auth";
 import { normalizeInbox, slugifyFilename } from "./lib/normalize";
 import {
 	isRelayReply,
@@ -12,6 +12,7 @@ import {
 	enqueueRelay,
 	forwardViaBinding,
 	pickSenderAddress,
+	relayReplyRefusal,
 	viaDisplayName,
 } from "./lib/relay";
 import { fireRules } from "./lib/rules";
@@ -69,6 +70,10 @@ export function stripQuotedHtml(html: string): string {
 	return result.trimEnd();
 }
 
+// One reason for every refused reply route, whether the token is unknown or its
+// sender is not the owner, so a leaked route's holder learns nothing from it.
+const RELAY_REPLY_REJECTION = "Invalid relay reply address";
+
 export async function handleEmail(
 	message: ForwardableEmailMessage,
 	env: Env,
@@ -91,7 +96,7 @@ export async function handleEmail(
 			if (parseRelayToken(localPart) || activeLegacyMask) {
 				// A guessed token or an unsigned route for a live mask is never allowed
 				// to fall through and become an ordinary inbox delivery.
-				message.setReject("Invalid relay reply address");
+				message.setReject(RELAY_REPLY_REJECTION);
 				return;
 			}
 		} else {
@@ -99,6 +104,23 @@ export async function handleEmail(
 			const rawBytes = await new Response(message.raw).arrayBuffer();
 			const parser = new PostalMime();
 			const parsed = await parser.parse(rawBytes);
+
+			// Only the mask's owner may send as the mask. A refusal is final: it
+			// never falls through to become an ordinary inbox delivery either.
+			const rule = await findRelayRule(env, relay.maskId);
+			const refusal = rule
+				? relayReplyRefusal({
+						owner: rule.target,
+						headerFrom: parsed.from?.address,
+						envelope: from,
+						auth: firstSenderAuth(parsed.headers),
+					})
+				: "mask has no relay rule";
+			if (refusal) {
+				console.warn(`relay reply refused for mask ${relay.maskId} (envelope ${from}): ${refusal}`);
+				message.setReject(RELAY_REPLY_REJECTION);
+				return;
+			}
 
 			await enqueueRelay(env, {
 				maskId: relay.maskId,
@@ -129,14 +151,12 @@ export async function handleEmail(
 
 			// `from` is the SMTP envelope, usually a bounce address rather than a
 			// person, so the route replies where a mail client would.
-			const replyTo = await createRelayAddress(
-				env,
-				pickSenderAddress([parsed.replyTo, parsed.from], from),
-				maskLookup.id,
-			);
+			const replyTarget = pickSenderAddress([parsed.replyTo, parsed.from], from);
+			const replyTo = await createRelayAddress(env, replyTarget, maskLookup.id);
 
 			// The opaque route hides the sender's address, so the display name is
-			// the only place the mask owner still sees who wrote.
+			// the only place the mask owner still sees who wrote, and where a
+			// reply will go when that is someone else.
 			await enqueueRelay(env, {
 				maskId: maskLookup.id,
 				direction: "inbound",
@@ -144,6 +164,7 @@ export async function handleEmail(
 				fromName: viaDisplayName(
 					{ name: parsed.from?.name, address: pickSenderAddress([parsed.from], from) },
 					`${maskLookup.id}@${env.MAIL_DOMAIN}`,
+					replyTarget,
 				),
 				to: rule.target,
 				replyTo,
@@ -195,9 +216,7 @@ export async function handleEmail(
 		from_header: parsed.headers.find((header) => header.key === "from")?.value ?? null,
 		to_full: to,
 		message_id: message.headers.get("message-id") || null,
-		sender_auth: parseSenderAuth(
-			parsed.headers.find((header) => header.key === "authentication-results")?.value,
-		),
+		sender_auth: firstSenderAuth(parsed.headers),
 	});
 
 	// Index in D1

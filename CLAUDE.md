@@ -972,6 +972,14 @@ A `reply+<token>` that does not resolve (unknown token, disabled or deleted mask
 is rejected at SMTP with `Invalid relay reply address`; it never falls through to
 become an ordinary inbox drop.
 
+Only the mask's owner, its relay rule `target`, may reply (`relayReplyRefusal`):
+the header From must be that address unless Cloudflare's first
+`Authentication-Results` says `dmarc=fail` (a pass is not required), or the
+envelope must be, with Cloudflare's `spf=pass` for that envelope. Anything else,
+or a mask with no relay rule left, is rejected with the same reason. When the
+route's sender is not the From address, the relayed display name says so:
+`Pat (via j-7k9m@frst.dev, replies go to other@example.net)`.
+
 Pre-token `_at_` reply addresses are forgeable and rejected by default. An
 existing deployment may set `RELAY_LEGACY_REPLY_UNTIL` to a short absolute
 ISO-8601 cutoff for a bounded migration. Never enable it on a new deployment.
