@@ -42,7 +42,8 @@ webhook ─┘   your-domain/h/{box}/{slug}  ─▶  lease · ack · replay
   backoff, 24h retry), or run an **Apple-style email relay** — masked bidirectional
   addresses so the other side never sees your real inbox.
 - **Static hosting, because why not.** `drop host lisa report ./dist` publishes a
-  folder to `your-domain/f/lisa/report/`, straight off R2. Optional TTL and auth token.
+  folder to `files.your-domain/f/lisa/report/`, straight off R2 on an origin isolated
+  from the app. Optional TTL and auth token.
 - **Yours, on your domain, on the edge.** Self-hosted on Cloudflare's free-ish tier.
   No SaaS in the loop, no per-seat pricing, no data leaving your account.
 
@@ -123,22 +124,23 @@ deploy time.
 cp .env.example .env
 ```
 
-| Var                     | What                                                      |
-|-------------------------|-----------------------------------------------------------|
-| `DOMAIN`                | host the Worker serves from; route becomes `$DOMAIN/*`    |
-| `MAIL_DOMAIN`           | domain boxes send + receive mail on. Defaults to `DOMAIN` |
-| `ZONE_NAME`             | Cloudflare zone owning the route. Defaults to `DOMAIN`    |
-| `BRAND`                 | display name across the web UI + CLI                      |
-| `CLOUDFLARE_ACCOUNT_ID` | your CF account id                                        |
-| `D1_DATABASE_ID`        | the id printed in step 1                                  |
-| `GOOGLE_CLIENT_ID`      | OAuth client id (public)                                  |
+| Var                     | What                                                       |
+|-------------------------|------------------------------------------------------------|
+| `DOMAIN`                | application/API host; route becomes `$DOMAIN/*`            |
+| `HOST_DOMAIN`           | isolated host for uploaded sites; must differ from `DOMAIN` |
+| `MAIL_DOMAIN`           | domain boxes send + receive mail on. Defaults to `DOMAIN`  |
+| `ZONE_NAME`             | Cloudflare zone owning both routes. Defaults to `DOMAIN`   |
+| `BRAND`                 | display name across the web UI + CLI                       |
+| `CLOUDFLARE_ACCOUNT_ID` | your CF account id                                         |
+| `D1_DATABASE_ID`        | the id printed in step 1                                   |
+| `GOOGLE_CLIENT_ID`      | OAuth client id (public)                                   |
 
-Set all three domain vars to the same apex for the simple case. They come apart
-when the apex is already serving something else: put the Worker on a subdomain
-(`DOMAIN=drop.example.com`) while mail keeps the short address
-(`MAIL_DOMAIN=example.com`), and name the zone that owns the route
-(`ZONE_NAME=example.com`) — `zone_name` must be a real Cloudflare zone, which a
-subdomain is not.
+For an apex deployment, use `DOMAIN=example.com` and a distinct host such as
+`HOST_DOMAIN=files.example.com`; `MAIL_DOMAIN` and `ZONE_NAME` can use their
+defaults. When the application is already on a subdomain, for example
+`DOMAIN=drop.example.com`, set `MAIL_DOMAIN=example.com` and
+`ZONE_NAME=example.com`. `zone_name` must be a real Cloudflare zone, not a
+subdomain. Both HTTP hostnames need proxied DNS records in that zone.
 
 `RELAY_LEGACY_REPLY_UNTIL` is intentionally unset. Existing relay deployments
 may set it to a short, absolute ISO-8601 cutoff while old reply addresses age

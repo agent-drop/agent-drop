@@ -8,23 +8,59 @@ import { runSweeps } from "./lib/reaper";
 import { HOOK_PREFIX, serveWebhook } from "./lib/webhook-receive";
 import type { Env, QueueMessage } from "./types";
 
+function isHostedPath(pathname: string): boolean {
+	return pathname === `/${HOST_PREFIX}` || pathname.startsWith(`/${HOST_PREFIX}/`);
+}
+
+function notFound(): Response {
+	return new Response("Not found", {
+		status: 404,
+		headers: { "Content-Type": "text/plain; charset=utf-8" },
+	});
+}
+
 export default {
 	async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
 		const url = new URL(request.url);
+		const hostedPath = isHostedPath(url.pathname);
+		const appDomain = env.DOMAIN?.toLowerCase();
+		const hostDomain = env.HOST_DOMAIN?.toLowerCase();
+
+		// The deploy wrapper rejects this configuration too, but keep the runtime
+		// boundary fail-closed if somebody bypasses that wrapper or an old binding
+		// survives a manual deployment.
+		if (!hostDomain || hostDomain === appDomain) {
+			return new Response("Hosting origin misconfigured", { status: 503 });
+		}
+
+		// Untrusted hosted HTML gets an origin with no application, API, webhook,
+		// or asset surface. This check must run before every other route.
+		if (url.hostname.toLowerCase() === hostDomain) {
+			if (hostedPath && (request.method === "GET" || request.method === "HEAD")) {
+				return serveHostedSite(request, env, url);
+			}
+			return notFound();
+		}
 
 		if (url.pathname.startsWith("/api/")) {
 			return handleAPI(request, env, url, ctx);
 		}
 
-		// Public static hosting at {domain}/f/{box}/{site}/... served from R2.
-		// Scoped to the /f/ prefix (in run_worker_first) so it never touches the
-		// app's own pages or any other route.
-		if (url.pathname === `/${HOST_PREFIX}` || url.pathname.startsWith(`/${HOST_PREFIX}/`)) {
-			return serveHostedSite(request, env, url);
+		// Existing links keep working, but the application origin never serves the
+		// uploaded bytes. Preserve private-site tokens and all other query params.
+		if (hostedPath) {
+			if (request.method !== "GET" && request.method !== "HEAD") return notFound();
+			return new Response(null, {
+				status: 301,
+				headers: {
+					Location: `https://${env.HOST_DOMAIN}${url.pathname}${url.search}`,
+					"Cache-Control": "no-store",
+					"Referrer-Policy": "no-referrer",
+				},
+			});
 		}
 
-		// Public webhook receivers at {domain}/h/{box}/{slug}[/...]. Scoped to the
-		// /h/ prefix (in run_worker_first) for the same reason /f/ is: it stays out
+		// Public webhook receivers at {domain}/h/{box}/{slug}[/...]. It stays out
 		// of the /api/ namespace, whose invariant is "unknown path answers 401, not
 		// 404" -- and a fully public, unauthenticated, body-swallowing endpoint has
 		// no business inside that.

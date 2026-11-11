@@ -19,12 +19,19 @@ head_sampling_rate = 1
 [assets]
 binding = "ASSETS"
 not_found_handling = "single-page-application"
-run_worker_first = ["/api/*", "/f/*", "/h/*"]
+# Both domains share this Worker. It must see every request first so HOST_DOMAIN
+# cannot serve the SPA through the asset binding; application requests are still
+# delegated to ASSETS by src/index.ts.
+run_worker_first = true
 
 # `zone_name` is the ZONE, `pattern` carries the Worker host. Identical here
 # because the default is a single apex; ZONE_NAME in `.env` separates them.
 [[routes]]
 pattern = "example.com/*"
+zone_name = "example.com"
+
+[[routes]]
+pattern = "files.example.com/*"
 zone_name = "example.com"
 
 [[r2_buckets]]
@@ -96,8 +103,9 @@ crons = ["17 * * * *"]
 
 [vars]
 # DOMAIN is the HTTP host the Worker serves from; MAIL_DOMAIN is what
-# {box}@... resolves to. Identical unless the Worker sits on a subdomain.
+# {box}@... resolves to. HOST_DOMAIN serves untrusted uploaded sites alone.
 DOMAIN = "example.com"
+HOST_DOMAIN = "files.example.com"
 MAIL_DOMAIN = "example.com"
 # Disabled by default. Set an ISO-8601 cutoff only for a bounded migration from
 # the old sender-bearing reply addresses; do not leave it enabled indefinitely.

@@ -4,6 +4,8 @@ export interface Env {
 	ASSETS: Fetcher;
 	/** The HTTP host the Worker serves from. Builds URLs, never addresses. */
 	DOMAIN: string;
+	/** Dedicated host for untrusted static sites. Never serves the application or API. */
+	HOST_DOMAIN: string;
 	/** The domain boxes send and receive mail on. Builds addresses, never URLs. */
 	MAIL_DOMAIN: string;
 	/** Optional ISO-8601 cutoff for accepting forgeable pre-token relay addresses. */

@@ -9,7 +9,7 @@ import { HANDSHAKE_MODES } from "./webhook-handshake";
 import { VERIFIER_MODES } from "./webhook-verify";
 import type { Env } from "../types";
 
-/** Top-level reserved path prefix, beside `/f/` for hosting. In run_worker_first. */
+/** Top-level reserved path prefix for public webhook receivers on the app host. */
 export const HOOK_PREFIX = "h";
 
 /**

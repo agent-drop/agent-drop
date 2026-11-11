@@ -1,9 +1,9 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import { normalizeSite, sanitizeSitePath, serveHostedSite, siteUrl } from "../src/lib/hosting";
-import { makeBucket, makeEnv, TEST_DOMAIN, type TestEnv } from "./helpers/env";
+import { makeBucket, makeEnv, TEST_DOMAIN, TEST_HOST_DOMAIN, type TestEnv } from "./helpers/env";
 
 // Hosted sites are the only PUBLIC read surface in the system: no auth, served
-// straight out of R2 under {domain}/f/{box}/{site}/. The path built here is an
+// straight out of R2 under {host-domain}/f/{box}/{site}/. The path built here is an
 // R2 key, so anything that survives sanitization is a key another box could own.
 
 describe("normalizeSite", () => {
@@ -88,7 +88,7 @@ describe("sanitizeSitePath", () => {
 describe("siteUrl", () => {
 	test("builds the public URL with a trailing slash", () => {
 		expect(siteUrl(makeEnv(), "lisa", "marketing")).toBe(
-			`https://${TEST_DOMAIN}/f/lisa/marketing/`,
+			`https://${TEST_HOST_DOMAIN}/f/lisa/marketing/`,
 		);
 	});
 });
@@ -150,7 +150,15 @@ describe("serveHostedSite", () => {
 	test("redirects the no-slash root to the slashed form so relative links resolve", async () => {
 		const res = await get("/f/lisa/marketing");
 		expect(res.status).toBe(301);
-		expect(res.headers.get("location")).toBe(`https://${TEST_DOMAIN}/f/lisa/marketing/`);
+		expect(res.headers.get("location")).toBe(`https://${TEST_HOST_DOMAIN}/f/lisa/marketing/`);
+	});
+
+	test("preserves a private-site token in the canonical slash redirect", async () => {
+		const res = await get("/f/lisa/locked?auth=s3cr3t");
+		expect(res.status).toBe(301);
+		expect(res.headers.get("location")).toBe(
+			`https://${TEST_HOST_DOMAIN}/f/lisa/locked/?auth=s3cr3t`,
+		);
 	});
 
 	test("serves a nested file and infers its content type", async () => {

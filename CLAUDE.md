@@ -4,17 +4,17 @@ Dead-drop system for AI agents. Email, upload, or API-push content into named in
 
 ## Quick Reference
 
-| What | Where |
-|------|-------|
-| Website | https://frst.dev |
-| API | https://frst.dev/api/ |
-| Inbound email | `{name}@frst.dev` or `{name}+{topic}@frst.dev` |
-| Web upload | `https://frst.dev/{name}` |
-| Static hosting | `https://frst.dev/f/{box}/{site}/` (served from R2) |
-| Webhook receiver | `https://frst.dev/h/{box}/{slug}` -- public, unauthenticated by design |
-| CLI tool | `tools/agent-drop.ts` (in this repo; Bun runtime, own `tools/tsconfig.json`) |
-| CLI alias | `drop` -> `~/.local/bin/drop` -> `tools/agent-drop.ts` |
-| Style guide | https://frst.dev/styleguide.html |
+| What             | Where                                                                          |
+|------------------|--------------------------------------------------------------------------------|
+| Website           | https://frst.dev                                                               |
+| API               | https://frst.dev/api/                                                          |
+| Inbound email     | `{name}@frst.dev` or `{name}+{topic}@frst.dev`                                 |
+| Web upload        | `https://frst.dev/{name}`                                                      |
+| Static hosting    | `https://{HOST_DOMAIN}/f/{box}/{site}/` (served from R2 on an isolated origin) |
+| Webhook receiver  | `https://frst.dev/h/{box}/{slug}` -- public, unauthenticated by design         |
+| CLI tool          | `tools/agent-drop.ts` (in this repo; Bun runtime, own `tools/tsconfig.json`)    |
+| CLI alias         | `drop` -> `~/.local/bin/drop` -> `tools/agent-drop.ts`                         |
+| Style guide       | https://frst.dev/styleguide.html                                               |
 
 ## Architecture
 
@@ -381,7 +381,7 @@ drop download lisa DROP_ID file.pdf     # download a file
 drop url lisa DROP_ID file.pdf          # presigned download URL (shareable)
 drop target mr-gray --ttl 2             # create temp upload link
 drop invite user@x.com --target box    # invite flow (allowlist + link + email)
-drop host lisa marketing ./dist         # publish a folder -> frst.dev/f/lisa/marketing/
+drop host lisa marketing ./dist         # publish a folder -> $HOST_DOMAIN/f/lisa/marketing/
 drop sites lisa                         # list hosted sites for a box
 drop unhost lisa marketing              # delete a hosted site (purges R2)
 drop rules                             # list forward/webhook rules
@@ -488,12 +488,13 @@ CLI flags override template values; `--to` replaces the template's recipient lis
 
 ## Static Site Hosting
 
-Publish files publicly under a box at `https://frst.dev/f/{box}/{site}/`. Path-based
-(under the apex `frst.dev/*` route), **not** a subdomain -- this deliberately avoids a
-zone-wide `*.frst.dev` worker route, which would shadow unrelated subdomains
-(brain/overseerr/radarr/*arr, all served by Caddy). The `/f/` prefix is in
-`run_worker_first` (`["/api/*", "/f/*"]`) so only hosting paths hit the worker; the
-app's static assets keep serving directly.
+Publish files publicly under a box at `https://{HOST_DOMAIN}/f/{box}/{site}/`.
+`HOST_DOMAIN` is a single dedicated hostname, not a zone-wide wildcard, so it
+does not shadow unrelated subdomains. Uploaded HTML never shares the application
+origin. Both routes use the same Worker; `run_worker_first = true` lets
+`src/index.ts` reject every non-hosting path on `HOST_DOMAIN` before the asset
+binding can serve the SPA. Application-origin asset requests are delegated back
+to `env.ASSETS`.
 
 - **R2 layout:** `sites/{box}/{site}/{relpath}` (relpath preserved verbatim, traversal-safe).
 - **Serving** (`lib/hosting.ts` `serveHostedSite`): inline real content-types, `index.html`
@@ -947,8 +948,8 @@ https://frst.dev/h/{box}/{slug}
 https://frst.dev/h/{box}/{slug}/anything/after    <- stored as `subpath`, same receiver
 ```
 
-`/h/*` is in `run_worker_first` beside `/f/*`. It deliberately sits **outside**
-`/api/*`, whose invariant is "unknown path answers 401, not 404" -- a fully
+The Worker runs before assets on both configured origins. `/h/*` deliberately
+sits **outside** `/api/*`, whose invariant is "unknown path answers 401, not 404" -- a fully
 public, unauthenticated, body-swallowing endpoint has no business in there.
 
 For a receiver with `auth_mode: none` **the URL is the credential**, so
@@ -1368,7 +1369,7 @@ src/
     drops.ts            -- FinalizeDrop + resolveObjectKey (router AND reaper use it)
     id.ts               -- ULID-like ID generation
     normalize.ts        -- normalizeInbox + normalizeSlug + slugifyFilename
-    hosting.ts          -- serveHostedSite (frst.dev/f/{box}/{site}), normalizeSite, siteUrl
+    hosting.ts          -- serveHostedSite ({HOST_DOMAIN}/f/{box}/{site}), normalizeSite, siteUrl
     rules.ts            -- Rule firing (matching, payload and delivery live next door)
     rule-match.ts       -- Pattern matching + scope filtering
     rule-payload.ts     -- The two wire formats, mergeHeaders, buildDelivery
