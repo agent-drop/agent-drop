@@ -1,7 +1,8 @@
 import { EmailMessage } from "cloudflare:email";
 import { AwsClient } from "aws4fetch";
+import type { Address } from "postal-mime";
 import type { Env, RelayQueueMessage } from "../types";
-import { toEmailAttachment } from "./email-builder";
+import { hasHeaderControl, toEmailAttachment } from "./email-builder";
 import { generateId } from "./id";
 import { bareAddr, buildRawEmail, formatMailbox, sanitizeDisplayName } from "./mime";
 
@@ -150,6 +151,38 @@ export async function findRelayRule(
 		}
 	}
 	return null;
+}
+
+// One `@` with something either side, and nothing that could reshape a header or
+// smuggle in a second recipient: no whitespace, no `<>`, no list or quoting
+// specials. Control characters are checked separately by hasHeaderControl.
+const BARE_ADDRESS = /^[^\s@<>()[\]\\,;:"]+@[^\s@<>()[\]\\,;:"]+$/;
+
+function isBareAddress(value: string | undefined): value is string {
+	return !!value && BARE_ADDRESS.test(value) && !hasHeaderControl(value);
+}
+
+/**
+ * The first well-formed bare address among `sources`, read in order, else the
+ * SMTP `envelope` sender. Group members count as addresses of their own.
+ *
+ * The envelope of most bulk and transactional mail is a bounce address, not a
+ * person, so the relay reads postal-mime's parsed headers first: Reply-To then
+ * From for where a reply goes, as a mail client would; From alone for who wrote.
+ */
+export function pickSenderAddress(
+	sources: (Address | Address[] | undefined)[],
+	envelope: string,
+): string {
+	for (const source of sources) {
+		const entries = Array.isArray(source) ? source : source ? [source] : [];
+		for (const entry of entries) {
+			for (const mailbox of entry.group ?? [entry]) {
+				if (isBareAddress(mailbox.address)) return mailbox.address;
+			}
+		}
+	}
+	return envelope;
 }
 
 // A sender label longer than this is cut. The name is the sender's to choose,

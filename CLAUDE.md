@@ -962,6 +962,12 @@ rows. The fixed 32-character local part also supports sender addresses that
 would not fit if their text and a signature were embedded under SMTP's
 64-character limit.
 
+The route's sender is the first well-formed address in the inbound mail's
+`Reply-To`, else its header `From`, else the SMTP envelope sender
+(`pickSenderAddress` in `src/lib/relay.ts`). The envelope of most bulk and
+transactional mail (SES, Mailchimp, Google Groups, Cloudflare Email Sending) is a
+bounce address, so a route built on it sent the owner's reply to nobody.
+
 A `reply+<token>` that does not resolve (unknown token, disabled or deleted mask)
 is rejected at SMTP with `Invalid relay reply address`; it never falls through to
 become an ordinary inbox drop.

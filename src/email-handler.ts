@@ -11,6 +11,7 @@ import {
 	createRelayAddress,
 	enqueueRelay,
 	forwardViaBinding,
+	pickSenderAddress,
 	viaDisplayName,
 } from "./lib/relay";
 import { fireRules } from "./lib/rules";
@@ -126,7 +127,13 @@ export async function handleEmail(
 			const parser = new PostalMime();
 			const parsed = await parser.parse(rawBytes);
 
-			const replyTo = await createRelayAddress(env, from, maskLookup.id);
+			// `from` is the SMTP envelope, usually a bounce address rather than a
+			// person, so the route replies where a mail client would.
+			const replyTo = await createRelayAddress(
+				env,
+				pickSenderAddress([parsed.replyTo, parsed.from], from),
+				maskLookup.id,
+			);
 
 			// The opaque route hides the sender's address, so the display name is
 			// the only place the mask owner still sees who wrote.
@@ -135,7 +142,7 @@ export async function handleEmail(
 				direction: "inbound",
 				from: replyTo,
 				fromName: viaDisplayName(
-					{ name: parsed.from?.name, address: from },
+					{ name: parsed.from?.name, address: pickSenderAddress([parsed.from], from) },
 					`${maskLookup.id}@${env.MAIL_DOMAIN}`,
 				),
 				to: rule.target,
