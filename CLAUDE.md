@@ -220,7 +220,8 @@ curl $KEY https://frst.dev/api/inbox/{name}/{drop-id}/file/{filename}
 # Original message, unstripped (email drops only; 404 otherwise). CLI: drop raw
 curl $KEY https://frst.dev/api/inbox/{name}/{drop-id}/raw
 
-# Create a drop (API)
+# Create a drop (API). The body is capped at 1 MiB (413), must be a JSON object, and
+# subject/text/html/topic must be strings (400 otherwise).
 curl -X POST $KEY -H "Content-Type: application/json" \
   -d '{"subject":"Test","text":"Hello","topic":"test"}' \
   https://frst.dev/api/drop/{name}

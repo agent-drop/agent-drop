@@ -8,7 +8,7 @@ import {
 	validateMessageId,
 	validateRecipients,
 } from "../lib/email-builder";
-import { readBodyCapped } from "../lib/body-limit";
+import { parseJsonObject, readBodyCapped, readRequestCapped } from "../lib/body-limit";
 import { generateId } from "../lib/id";
 import { renderMarkdownEmail } from "../lib/markdown";
 import { renderBuilderPreview } from "../lib/mime";
@@ -243,32 +243,13 @@ interface EmailBody {
 }
 
 async function readEmailBody(request: Request): Promise<EmailBody | Response> {
-	const declaredHeader = request.headers.get("content-length");
-	const declared = declaredHeader === null ? Number.NaN : Number(declaredHeader);
-	if (Number.isFinite(declared) && declared > MAX_EMAIL_REQUEST_BYTES) {
-		return Response.json({ error: "email request body is too large" }, { status: 413 });
-	}
-
-	const bodyRead = await readBodyCapped(request.body, MAX_EMAIL_REQUEST_BYTES);
-	if (!bodyRead.ok) {
-		return Response.json(
-			{
-				error:
-					bodyRead.reason === "too-large"
-						? "email request body is too large"
-						: "could not read email request body",
-			},
-			{ status: bodyRead.reason === "too-large" ? 413 : 400 },
-		);
-	}
-
-	try {
-		const parsed = JSON.parse(new TextDecoder().decode(bodyRead.bytes));
-		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error();
-		return parsed as EmailBody;
-	} catch {
+	const bytes = await readRequestCapped(request, MAX_EMAIL_REQUEST_BYTES, "email request body");
+	if (bytes instanceof Response) return bytes;
+	const parsed = parseJsonObject(bytes);
+	if (!parsed) {
 		return Response.json({ error: "email request body must be a JSON object" }, { status: 400 });
 	}
+	return parsed as EmailBody;
 }
 
 interface PreparedEmail {
@@ -484,7 +465,7 @@ export async function handleSend(request: Request, env: Env, inbox: string): Pro
 }
 
 // POST /api/send/presign/:inbox - presigned PUT for an outbound attachment.
-// Lands under outbound-tmp/ (no drop record). The send call later pulls it by r2_key.
+// Lands under outbound/temp/{inbox}/ (no drop record). The send call later pulls it by r2_key.
 export async function handleSendPresign(
 	request: Request,
 	env: Env,

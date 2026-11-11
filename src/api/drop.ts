@@ -1,5 +1,5 @@
 import { generateId } from "../lib/id";
-import { readBodyCapped } from "../lib/body-limit";
+import { parseJsonObject, readRequestCapped } from "../lib/body-limit";
 import { slugifyFilename } from "../lib/normalize";
 import { fireRules } from "../lib/rules";
 import type { Env, Drop } from "../types";
@@ -7,6 +7,8 @@ import type { Env, Drop } from "../types";
 export const MAX_DIRECT_MULTIPART_BYTES = 25 * 1024 * 1024;
 export const MAX_DIRECT_UPLOAD_BYTES = 20 * 1024 * 1024;
 export const MAX_DIRECT_UPLOAD_FILES = 32;
+/** subject + text + html land in one D1 row, which D1 caps at 2 MB. */
+export const MAX_DIRECT_JSON_BYTES = 1024 * 1024;
 
 export interface DropContext {
 	authMethod: "api_key" | "drop_token" | "email";
@@ -52,28 +54,16 @@ export async function handleDrop(
 	});
 
 	if (contentType.includes("multipart/form-data")) {
-		const declaredHeader = request.headers.get("content-length");
-		const declared = declaredHeader === null ? Number.NaN : Number(declaredHeader);
-		if (Number.isFinite(declared) && declared > MAX_DIRECT_MULTIPART_BYTES) {
-			return Response.json({ error: "multipart request body is too large" }, { status: 413 });
-		}
-
-		const bodyRead = await readBodyCapped(request.body, MAX_DIRECT_MULTIPART_BYTES);
-		if (!bodyRead.ok) {
-			return Response.json(
-				{
-					error:
-						bodyRead.reason === "too-large"
-							? "multipart request body is too large"
-							: "could not read multipart request body",
-				},
-				{ status: bodyRead.reason === "too-large" ? 413 : 400 },
-			);
-		}
+		const bytes = await readRequestCapped(
+			request,
+			MAX_DIRECT_MULTIPART_BYTES,
+			"multipart request body",
+		);
+		if (bytes instanceof Response) return bytes;
 
 		let formData: FormData;
 		try {
-			formData = await new Response(bodyRead.bytes, {
+			formData = await new Response(bytes, {
 				headers: { "Content-Type": contentType },
 			}).formData();
 		} catch {
@@ -160,13 +150,20 @@ export async function handleDrop(
 		);
 	}
 
-	// JSON body
-	const body = (await request.json()) as {
-		subject?: string;
-		text?: string;
-		html?: string;
-		topic?: string;
-	};
+	// JSON body -- bounded like the multipart branch, and every field a string.
+	const bytes = await readRequestCapped(request, MAX_DIRECT_JSON_BYTES, "JSON request body");
+	if (bytes instanceof Response) return bytes;
+	const parsed = parseJsonObject(bytes);
+	if (!parsed) {
+		return Response.json({ error: "request body must be a JSON object" }, { status: 400 });
+	}
+	for (const field of ["subject", "text", "html", "topic"] as const) {
+		const value = parsed[field];
+		if (value !== undefined && value !== null && typeof value !== "string") {
+			return Response.json({ error: `${field} must be a string` }, { status: 400 });
+		}
+	}
+	const body = parsed as { subject?: string; text?: string; html?: string; topic?: string };
 
 	await env.DB.prepare(
 		`INSERT INTO drops (id, inbox, topic, channel, subject, body_text, body_html,
