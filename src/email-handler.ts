@@ -1,5 +1,6 @@
 import PostalMime from "postal-mime";
 import { generateId } from "./lib/id";
+import { parseSenderAuth } from "./lib/mail-auth";
 import { normalizeInbox, slugifyFilename } from "./lib/normalize";
 import {
 	isRelayReply,
@@ -170,8 +171,12 @@ export async function handleEmail(
 	const metadata = JSON.stringify({
 		auth_method: "email",
 		from_name: parsed.from?.name || null,
+		from_header: parsed.headers.find((header) => header.key === "from")?.value ?? null,
 		to_full: to,
 		message_id: message.headers.get("message-id") || null,
+		sender_auth: parseSenderAuth(
+			parsed.headers.find((header) => header.key === "authentication-results")?.value,
+		),
 	});
 
 	// Index in D1
