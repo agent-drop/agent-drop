@@ -6,6 +6,8 @@ export interface Env {
 	DOMAIN: string;
 	/** The domain boxes send and receive mail on. Builds addresses, never URLs. */
 	MAIL_DOMAIN: string;
+	/** Optional ISO-8601 cutoff for accepting forgeable pre-token relay addresses. */
+	RELAY_LEGACY_REPLY_UNTIL?: string;
 	BRAND: string;
 	R2_ACCOUNT_ID: string;
 	SES_REGION: string;
@@ -65,6 +67,10 @@ export interface RelayQueueMessage {
 	from: string;
 	to: string;
 	subject: string;
+	/**
+	 * @deprecated Always 0 and ignored. Queue retry() re-enqueues the body
+	 * unchanged; the consumer uses the platform's Message.attempts instead.
+	 */
 	attempt: number;
 	firstAttemptAt: number;
 }

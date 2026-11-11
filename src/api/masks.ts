@@ -114,8 +114,11 @@ export async function handleMasks(request: Request, env: Env, url: URL): Promise
 	// DELETE /api/masks/:id
 	const deleteMatch = path.match(/^\/api\/masks\/([^/]+)$/);
 	if (method === "DELETE" && deleteMatch) {
-		await env.DB.prepare("DELETE FROM email_masks WHERE id = ?").bind(deleteMatch[1]).run();
-		return Response.json({ deleted: deleteMatch[1] });
+		const id = deleteMatch[1];
+		// Delete the mask first so every route becomes inert even if cleanup fails.
+		await env.DB.prepare("DELETE FROM email_masks WHERE id = ?").bind(id).run();
+		await env.DB.prepare("DELETE FROM relay_reply_routes WHERE mask_id = ?").bind(id).run();
+		return Response.json({ deleted: id });
 	}
 
 	// GET /api/masks - list

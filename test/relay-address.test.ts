@@ -1,11 +1,16 @@
 import { beforeEach, describe, expect, test } from "bun:test";
+import { handleMasks } from "../src/api/masks";
 import {
-	buildRelayAddress,
+	buildLegacyRelayAddress,
+	createRelayAddress,
 	decodeEmail,
 	encodeEmail,
 	findRelayRule,
 	isRelayReply,
-	parseRelayAddress,
+	legacyRelayRepliesEnabled,
+	parseLegacyRelayAddress,
+	parseRelayToken,
+	resolveRelayAddress,
 } from "../src/lib/relay";
 import { makeEnv, type TestEnv } from "./helpers/env";
 
@@ -48,9 +53,9 @@ describe("encodeEmail / decodeEmail", () => {
 	});
 });
 
-describe("buildRelayAddress / parseRelayAddress", () => {
+describe("legacy sender-bearing relay addresses", () => {
 	test("builds the documented shape", () => {
-		expect(buildRelayAddress("lisa@mail.example", "j-7k9m", DOMAIN)).toBe(
+		expect(buildLegacyRelayAddress("lisa@mail.example", "j-7k9m", DOMAIN)).toBe(
 			"lisa_at_mail.example+j-7k9m@drop.test",
 		);
 	});
@@ -63,9 +68,9 @@ describe("buildRelayAddress / parseRelayAddress", () => {
 		];
 
 		for (const [sender, maskId] of cases) {
-			const addr = buildRelayAddress(sender, maskId, DOMAIN);
+			const addr = buildLegacyRelayAddress(sender, maskId, DOMAIN);
 			const localPart = addr.slice(0, addr.lastIndexOf("@"));
-			expect(parseRelayAddress(localPart)).toEqual({ sender, maskId });
+			expect(parseLegacyRelayAddress(localPart)).toEqual({ sender, maskId });
 		}
 	});
 
@@ -73,39 +78,134 @@ describe("buildRelayAddress / parseRelayAddress", () => {
 		// parseRelayAddress splits on the LAST +. If it split on the first, the
 		// mask would parse as "tag_at_example.com+j-7k9m" and the reply would go
 		// nowhere -- or worse, to whatever rule happens to match that string.
-		const addr = buildRelayAddress("user+tag@example.com", "j-7k9m", DOMAIN);
+		const addr = buildLegacyRelayAddress("user+tag@example.com", "j-7k9m", DOMAIN);
 		const localPart = addr.slice(0, addr.lastIndexOf("@"));
-		expect(parseRelayAddress(localPart)).toEqual({
+		expect(parseLegacyRelayAddress(localPart)).toEqual({
 			sender: "user+tag@example.com",
 			maskId: "j-7k9m",
 		});
 	});
 
 	test("returns null when there is no + at all", () => {
-		expect(parseRelayAddress("lisa_at_mail.example")).toBeNull();
+		expect(parseLegacyRelayAddress("lisa_at_mail.example")).toBeNull();
 	});
 
 	test("returns null when the part before + is not an encoded address", () => {
 		// This is plain +addressing (lisa+sales@domain), NOT a relay reply.
-		expect(parseRelayAddress("lisa+sales")).toBeNull();
+		expect(parseLegacyRelayAddress("lisa+sales")).toBeNull();
 	});
 });
 
 describe("isRelayReply", () => {
-	test("true only when both markers are present", () => {
+	test("recognizes current opaque routes and old sender-bearing routes", () => {
+		expect(isRelayReply("reply+0123456789abcdefghjkmnpqrs")).toBe(true);
 		expect(isRelayReply("lisa_at_mail.example+j-7k9m")).toBe(true);
 		expect(isRelayReply("lisa+sales")).toBe(false);
 		expect(isRelayReply("lisa_at_mail.example")).toBe(false);
 		expect(isRelayReply("lisa")).toBe(false);
 	});
 
-	test("agrees with parseRelayAddress on addresses built by buildRelayAddress", () => {
+	test("agrees with the legacy parser for old addresses", () => {
 		for (const sender of ["lisa@mail.example", "user+tag@example.com", "a@b.c"]) {
-			const addr = buildRelayAddress(sender, "j-1", DOMAIN);
+			const addr = buildLegacyRelayAddress(sender, "j-1", DOMAIN);
 			const localPart = addr.slice(0, addr.lastIndexOf("@"));
 			expect(isRelayReply(localPart)).toBe(true);
-			expect(parseRelayAddress(localPart)).not.toBeNull();
+			expect(parseLegacyRelayAddress(localPart)).not.toBeNull();
 		}
+	});
+});
+
+describe("opaque relay reply routes", () => {
+	let env: TestEnv;
+
+	beforeEach(async () => {
+		env = makeEnv();
+		await env.DB.prepare(
+			"INSERT INTO email_masks (id, label, active, created_at) VALUES (?, ?, 1, ?)",
+		)
+			.bind("j-7k9m", "shopping", Date.now())
+			.run();
+	});
+
+	test("stores only a token digest and resolves the original route", async () => {
+		const address = await createRelayAddress(env, "lisa@example.com", "j-7k9m");
+		const localPart = address.slice(0, address.lastIndexOf("@"));
+		const token = parseRelayToken(localPart);
+
+		expect(address).toMatch(/^reply\+[0-9a-hjkmnp-tv-z]{26}@drop\.test$/);
+		expect(token).toHaveLength(26);
+		expect(localPart.length).toBe(32);
+		expect(await resolveRelayAddress(env, localPart)).toEqual({
+			sender: "lisa@example.com",
+			maskId: "j-7k9m",
+		});
+
+		const row = env.DB.raw
+			.query("SELECT token_hash, mask_id, sender FROM relay_reply_routes")
+			.get() as { token_hash: string; mask_id: string; sender: string };
+		expect(row).toMatchObject({ mask_id: "j-7k9m", sender: "lisa@example.com" });
+		expect(row.token_hash).toHaveLength(64);
+		expect(row.token_hash).not.toContain(token as string);
+	});
+
+	test("stays within the RFC local-part limit for a maximum-length sender", async () => {
+		const sender = `${"a".repeat(64)}@example.com`;
+		const legacyLocal = buildLegacyRelayAddress(sender, "j-7k9m", DOMAIN).split("@")[0];
+		const currentLocal = (await createRelayAddress(env, sender, "j-7k9m")).split("@")[0];
+
+		expect(legacyLocal.length).toBeGreaterThan(64);
+		expect(currentLocal.length).toBe(32);
+	});
+
+	test("creates independent 130-bit bearer routes", async () => {
+		const first = await createRelayAddress(env, "lisa@example.com", "j-7k9m");
+		const second = await createRelayAddress(env, "lisa@example.com", "j-7k9m");
+		expect(first).not.toBe(second);
+		expect(env.DB.raw.query("SELECT COUNT(*) AS count FROM relay_reply_routes").get()).toEqual({
+			count: 2,
+		});
+	});
+
+	test("does not expire old routes, but disabling the mask makes them inert", async () => {
+		const address = await createRelayAddress(env, "lisa@example.com", "j-7k9m");
+		const localPart = address.split("@")[0];
+		env.DB.raw.query("UPDATE relay_reply_routes SET created_at = 0").run();
+
+		expect(await resolveRelayAddress(env, localPart)).not.toBeNull();
+		env.DB.raw.query("UPDATE email_masks SET active = 0 WHERE id = 'j-7k9m'").run();
+		expect(await resolveRelayAddress(env, localPart)).toBeNull();
+	});
+
+	test("deleting a mask removes its now-useless routes", async () => {
+		await createRelayAddress(env, "lisa@example.com", "j-7k9m");
+		const url = new URL("https://drop.test/api/masks/j-7k9m");
+		const res = await handleMasks(new Request(url, { method: "DELETE" }), env, url);
+
+		expect(res.status).toBe(200);
+		expect(env.DB.raw.query("SELECT COUNT(*) AS count FROM relay_reply_routes").get()).toEqual({
+			count: 0,
+		});
+	});
+
+	test("a guessed token does not resolve", async () => {
+		expect(await resolveRelayAddress(env, "reply+00000000000000000000000000")).toBeNull();
+	});
+
+	test("legacy routes are disabled by default and bounded by an absolute cutoff", async () => {
+		const legacy = "lisa_at_example.com+j-7k9m";
+		expect(legacyRelayRepliesEnabled(env)).toBe(false);
+		expect(await resolveRelayAddress(env, legacy)).toBeNull();
+
+		env.RELAY_LEGACY_REPLY_UNTIL = "2999-01-01T00:00:00Z";
+		expect(legacyRelayRepliesEnabled(env)).toBe(true);
+		expect(await resolveRelayAddress(env, legacy)).toEqual({
+			sender: "lisa@example.com",
+			maskId: "j-7k9m",
+		});
+
+		env.RELAY_LEGACY_REPLY_UNTIL = "2000-01-01T00:00:00Z";
+		expect(legacyRelayRepliesEnabled(env)).toBe(false);
+		expect(await resolveRelayAddress(env, legacy)).toBeNull();
 	});
 });
 

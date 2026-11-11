@@ -580,7 +580,8 @@ wrangler r2 bucket notification create agent-drop-storage \
 
 # 3. Migrations, BEFORE the deploy. Every one of them is a table or column the
 #    new code writes to on its first request: 0008 `object_key` (presigned
-#    uploads), 0009 the two webhook tables, 0010 `payload_mode`.
+#    uploads), 0009 the two webhook tables, 0010 `payload_mode`, and 0011 the
+#    authenticated relay reply routes.
 bun run db:migrate          # = vite build + wrangler d1 migrations apply --remote
 
 # 4. The webhook-body lifecycle rule. Bucket config again, same fragility.
@@ -854,26 +855,36 @@ Apple "Hide My Email" style relay. Sender never sees the real address.
 INBOUND: sender@example.com -> j-7k9m@frst.dev
   1. Worker detects mask j-7k9m
   2. Finds relay rule j-* -> target owner@example.org
-  3. Rewrites From: sender_at_example.com+j-7k9m@frst.dev
+  3. Mints an opaque Reply-To: reply+<130-bit-token>@frst.dev
   4. Queues raw MIME, replayed via the CF Email Sending binding -> owner@example.org
 
-REPLY: the owner replies to sender_at_example.com+j-7k9m@frst.dev
-  1. Worker detects relay reply (_at_ + mask ID)
-  2. Decodes: sender=sender@example.com, mask=j-7k9m
+REPLY: the owner replies to reply+<130-bit-token>@frst.dev
+  1. Worker hashes the token and resolves its stored route
+  2. Route yields sender=sender@example.com, mask=j-7k9m
   3. Sends From: j-7k9m@frst.dev To: sender@example.com
   4. Sender never sees owner@example.org
 ```
 
-### Relay Address Encoding
+### Relay Reply Routes
 
 ```
 Original sender: lisa@example.com
 Mask: j-7k9m
 
-Relay reply-to: lisa_at_example.com+j-7k9m@frst.dev
-                ^^^^^^^^^^^^^^^^^^^  ^^^^^
-                sender (_at_ encoded)  mask ID (after +)
+Relay reply-to: reply+0123456789abcdefghjkmnpqrs@frst.dev
+                ^^^^^ ^^^^^^^^^^^^^^^^^^^^^^^^^^
+                prefix 130-bit lowercase token
 ```
+
+Migration `0011` stores only the token's SHA-256 digest plus its sender and mask.
+Routes are reusable and deliberately have no expiry, so replying to an old
+thread still works; disabling or deleting the mask makes them inert. The fixed
+32-character local part also supports sender addresses that would not fit if
+their text and a signature were embedded under SMTP's 64-character limit.
+
+Pre-token `_at_` reply addresses are forgeable and rejected by default. An
+existing deployment may set `RELAY_LEGACY_REPLY_UNTIL` to a short absolute
+ISO-8601 cutoff for a bounded migration. Never enable it on a new deployment.
 
 ### Setup
 
@@ -904,9 +915,15 @@ drop mask-remove j-shop       # delete permanently
 
 Relay emails are queued via CF Queue (same as webhooks). Exponential backoff 2s -> 20min cap, retry up to 24h. Logged in `delivery_log` with type `relay`.
 
+The relay consumer reads Cloudflare's 1-based `Message.attempts`; `retry()`
+re-enqueues an immutable body, so its deprecated `attempt` field never changes.
+The shared consumer allows 82 retries: the capped ladder crosses 24 hours after
+retry 81, then the age guard records `failed` and acknowledges the message.
+
 ### D1 Tables
 
 - `email_masks` - mask ID, label, active flag
+- `relay_reply_routes` - SHA-256 token digest, mask, original sender; no expiry
 - `drop_rules` - type `relay` with pattern + target (real email)
 - `delivery_log` - every relay attempt tracked
 
@@ -1403,6 +1420,7 @@ migrations/
   0008_drop_object_key.sql -- object_key on drops (the presigned R2 key)
   0009_webhook_receivers.sql -- webhook_receivers + webhook_events, all indexes
   0010_rule_payload_mode.sql -- payload_mode on drop_rules, default `envelope`
+  0011_relay_reply_routes.sql -- non-expiring opaque reply routes (digests only)
 tools/
   agent-drop.ts         -- The CLI (Bun), every verb
   lib/
