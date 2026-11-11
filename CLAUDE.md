@@ -10,7 +10,7 @@ Dead-drop system for AI agents. Email, upload, or API-push content into named in
 | API               | https://frst.dev/api/                                                          |
 | Inbound email     | `{name}@frst.dev` or `{name}+{topic}@frst.dev`                                 |
 | Web upload        | `https://frst.dev/{name}`                                                      |
-| Static hosting    | `https://{HOST_DOMAIN}/f/{box}/{site}/` (served from R2 on an isolated origin) |
+| Static hosting    | `https://{HOST_DOMAIN}/f/{box}/{site}/` (served from R2 on an isolated origin; `https://frst.dev/f/*` 301-redirects there) |
 | Webhook receiver  | `https://frst.dev/h/{box}/{slug}` -- public, unauthenticated by design         |
 | CLI tool          | `tools/agent-drop.ts` (in this repo; Bun runtime, own `tools/tsconfig.json`)    |
 | CLI alias         | `drop` -> `~/.local/bin/drop` -> `tools/agent-drop.ts`                         |
@@ -18,7 +18,7 @@ Dead-drop system for AI agents. Email, upload, or API-push content into named in
 
 ## Architecture
 
-- **Cloudflare Workers** - API + static site serving
+- **Cloudflare Workers** - API + static site serving. One Worker answers two origins: the app (`DOMAIN`: SPA, API, webhooks) and the isolated hosting origin (`HOST_DOMAIN`: hosted sites only)
 - **Cloudflare D1** - SQLite database (inbox index, API keys, drop tokens, allowed users)
 - **Cloudflare R2** - Blob storage (attachments, raw emails, uploads)
 - **Cloudflare Queues** - Async webhook + relay delivery (`agent-drop-webhooks`), and R2 object-create notifications (`agent-drop-r2-events`)
@@ -38,7 +38,7 @@ Dead-drop system for AI agents. Email, upload, or API-push content into named in
 | Method | Use |
 |--------|-----|
 | Admin key (`ADMIN_API_KEY`) | Manage keys, targets, users; list all boxes/drops |
-| API key (`ad_...`) | Read/write specific inboxes |
+| API key (`ad_...`) | Read/write specific inboxes; with `admin` permission, also list boxes/drops (only its own `inbox_scope`) |
 | Drop token (`?auth=TOKEN`) | Temporary write-only access to one inbox |
 | Google OAuth JWT | Web upload UI (sign-in with Google, verified against JWKS) |
 
@@ -47,7 +47,7 @@ digest, not as a string, so the check does not leak its length or prefix through
 timing -- and an unset `ADMIN_API_KEY` can no longer be satisfied by a bare
 `Authorization: Bearer `.\
 **API keys** are created via `POST /api/keys` or `tools/agent-drop.ts key-create`.\
-**Google OAuth** - client sends Google ID token; server verifies against `https://www.googleapis.com/oauth2/v3/certs` JWKS. Email must exist in the `allowed_users` D1 table.
+**Google OAuth** - client sends Google ID token; server verifies against `https://www.googleapis.com/oauth2/v3/certs` JWKS. Email must exist in the `allowed_users` D1 table. A token that is oversized (over 16 KiB), malformed, or signed by an unknown key fails closed as `401`; an unknown `kid` triggers at most one JWKS refetch per 60 seconds.
 
 ### What a key may do
 
@@ -66,6 +66,16 @@ This applies to `/api/drop/*`, the presigned upload routes and their finalize
 endpoints, hosting, **and outbound mail** (`/api/send/*`, `/api/compose/*`) --
 `:inbox` there becomes the From address, so a scoped key that skipped the check
 could send as any identity the domain owns.
+
+`permissions` is validated on creation (`POST /api/keys` answers `400` for
+anything but `read`, `write` or `admin`; omitted means `read`), and so is
+`inbox_scope` (must normalize to a valid inbox name). A stored key whose
+`permissions` value is not one of the three fails authentication outright rather
+than being treated as some default.
+
+**Listings are scoped too.** `GET /api/drops` and `GET /api/boxes` accept the
+admin key (every box) or an API key with `admin` permission, which sees only its
+own `inbox_scope` (`NULL` scope = every box). Read and write keys get `403`.
 
 ### Rate limiting
 
@@ -107,17 +117,37 @@ server-to-server, and a provider's POST is not a browser's.
 ## Environment Variables
 
 ```bash
-# In .env (this project)
-AWS_ACCESS_KEY_ID=...          # IAM user: agent-drop-ses (SES send only)
-AWS_SECRET_ACCESS_KEY=...      # Same IAM user
+# In .env (this project). Copy .env.example; .env is gitignored.
+
+# Deployment identity -- injected into the Worker config by `bun run deploy`,
+# NOT set as wrangler secrets (scripts/deploy-identity.ts)
+DOMAIN=...                     # App origin: SPA, API, webhooks. Route becomes $DOMAIN/*
+HOST_DOMAIN=...                # REQUIRED. Hosted-sites origin, e.g. files.frst.dev. Must differ from DOMAIN
+MAIL_DOMAIN=...                # Optional. Domain boxes send/receive mail on. Defaults to DOMAIN
+ZONE_NAME=...                  # Optional. Cloudflare zone owning both routes. Defaults to DOMAIN
+RELAY_LEGACY_REPLY_UNTIL=...   # Optional. ISO-8601 cutoff for pre-token relay replies. Leave unset
+BRAND=...                      # Display name in the web UI + CLI
+CLOUDFLARE_ACCOUNT_ID=...      # Account the Worker deploys to
+D1_DATABASE_ID=...             # D1 database UUID for the DB binding
+
+# Secrets -- also set as wrangler secrets on the Worker
 ADMIN_API_KEY=...              # Admin access to all API endpoints
-API_KEY=ad_...                 # A generated API key with admin permissions
-GOOGLE_CLIENT_ID=...           # OAuth 2.0 client ID for web sign-in
+GOOGLE_CLIENT_ID=...           # OAuth 2.0 client ID for web sign-in (also injected as GOOGLE_CLIENT_ID_PUBLIC)
 R2_ACCESS_KEY_ID=...           # R2 API token (for presigned upload URLs)
 R2_SECRET_ACCESS_KEY=...       # R2 API token secret
+AWS_ACCESS_KEY_ID=...          # Dead SES fallback only: IAM user agent-drop-ses
+AWS_SECRET_ACCESS_KEY=...      # Same IAM user
+
+# CLI only, never sent to the Worker
+API_KEY=ad_...                 # A generated API key with admin permissions
 ```
 
-All vars except `API_KEY` are set as wrangler secrets on the Worker.
+`DOMAIN`, `HOST_DOMAIN`, `BRAND`, `CLOUDFLARE_ACCOUNT_ID`, `D1_DATABASE_ID` and
+`GOOGLE_CLIENT_ID` are required: `bun run deploy` exits when one is missing, and
+also when `HOST_DOMAIN` equals `DOMAIN`. The Worker enforces the same rule at
+runtime and answers `503` on every request if `HOST_DOMAIN` is unset or equal to
+`DOMAIN`. `.env.example` is the template, and `bun run deploy` refuses a build
+whose injected values disagree with `.env`.
 
 **Also in passage:** `AGENT_DROP_ADMIN_KEY` and `AGENT_DROP_API_KEY` (`key NAME` reads env/NAME, `key-set NAME` stores it). The CLI takes each from the shell env var first, then passage, then this `.env`, so it works from any directory with nothing exported. The Google OAuth client secret JSON is `key projects/agent-drop/google-oauth-client.json`.
 
@@ -128,10 +158,10 @@ All vars except `API_KEY` are set as wrangler secrets on the Worker.
 ```bash
 AUTH="-H 'Authorization: Bearer $ADMIN_API_KEY'"
 
-# List all boxes with stats
+# List all boxes with stats (an admin-permission API key works too, scoped to its inbox)
 curl $AUTH https://frst.dev/api/boxes
 
-# List all drops across all boxes (chronological)
+# List all drops across all boxes (chronological; same scoping for an API key)
 curl $AUTH "https://frst.dev/api/drops?limit=20"
 curl $AUTH "https://frst.dev/api/drops?channel=email"
 
@@ -143,7 +173,7 @@ curl -X POST $AUTH -H "Content-Type: application/json" \
 # List active targets
 curl $AUTH https://frst.dev/api/targets
 
-# Manage API keys
+# Manage API keys. permissions: read (default) | write | admin; inbox_scope is optional
 curl $AUTH https://frst.dev/api/keys
 curl -X POST $AUTH -H "Content-Type: application/json" \
   -d '{"name":"my-agent","permissions":"admin"}' \
@@ -196,7 +226,8 @@ curl -X POST $KEY -H "Content-Type: application/json" \
   https://frst.dev/api/drop/{name}
 
 # Upload files
-# Direct multipart accepts up to 32 files, 20 MiB each, in a 25 MiB request.
+# Direct multipart accepts up to 32 files, 20 MiB each, in a 25 MiB request (413 past any of
+# them; the body is cut off while streaming, not buffered first).
 # Use the presigned upload endpoints below for larger files.
 curl -X POST $KEY -F "file=@document.pdf" \
   https://frst.dev/api/drop/{name}
@@ -207,9 +238,13 @@ curl -X POST $KEY -F "file=@document.pdf" \
 # attachments[], deleteAfterSend.
 # Attachments resolve from one of: dataBase64 (inline), r2Key (uploaded), or url (fetched).
 # Worker hands an EmailMessageBuilder to the Email Sending binding, which assembles the MIME.
-# One send carries the whole to/cc/bcc list. Limits: 50 combined recipients,
-# 32 attachments, 5 MiB per inline base64 attachment, and 16 MiB decoded attachment data
-# in total (leaving room under the 25 MiB message cap).
+# One send carries the whole to/cc/bcc list. Limits: 8 MiB JSON request body, 50 combined
+# recipients, 32 attachments, 5 MiB per inline base64 attachment, and 16 MiB decoded
+# attachment data in total (leaving room under the 25 MiB message cap). All 413.
+# r2Key must be one this box presigned (outbound/temp/{box}/...); url must be http(s).
+# CR/LF and other control characters in subject, recipients, replyTo, fromName, topic,
+# attachment filename/contentType/cid or headers are a 400. inReplyTo is a drop id IN THIS
+# box, or exactly one <local@domain> Message-ID.
 curl -X POST $KEY -H "Content-Type: application/json" \
   -d '{"to":["bob@example.com"],"cc":["team@example.com"],"subject":"Hi","text":"Hello",
        "html":"<b>Hi</b> <img src=\"cid:logo\">",
@@ -224,7 +259,7 @@ curl -X POST $KEY -H "Content-Type: application/json" \
        "markdown":"# Retrospect\n\n| leg | cost |\n|---|--:|\n| one | 3 |\n"}' \
   https://frst.dev/api/send/{name}
 
-# Presigned PUT for an outbound attachment (lands in outbound/temp/, no drop record).
+# Presigned PUT for an outbound attachment (lands in outbound/temp/{box}/, no drop record).
 # Use the returned r2Key in the send call's attachments[]. CLI auto-uses this for files >1MB.
 curl -X POST $KEY -H "Content-Type: application/json" \
   -d '{"fileName":"big.zip","contentType":"application/zip"}' \
@@ -246,7 +281,8 @@ curl -X POST $KEY -H "Content-Type: application/json" \
 #           "fileName":"report.pdf","originalFileName":"report.pdf"}
 
 # Initiate a multipart upload (large files). Part count is derived from fileSize
-# at 50MB per part; the response presigns every part.
+# at 50 MiB per part; the response presigns every part. fileSize must be a positive
+# integer, at most 100 parts (5000 MiB), else 400 / 413.
 curl -X POST $KEY -H "Content-Type: application/json" \
   -d '{"fileName":"big.zip","contentType":"application/zip","fileSize":734003200}' \
   https://frst.dev/api/upload/multipart/{name}
@@ -330,12 +366,13 @@ Every drop records:
 
 | Field | Source |
 |-------|--------|
-| `auth_method` | `api_key`, `drop_token`, `google_oauth`, or `email` |
-| `auth_key_name` | Name of the API key or Google email (if applicable) |
-| `remote_ip` | Uploader's IP (via CF-Connecting-IP) |
-| `user_agent` | Browser/client User-Agent |
-| `country` | Country code (via CF-IPCountry) |
-| `city` | City (via CF geo) |
+| `auth_method` | `api_key` (a Google sign-in lands here too), `drop_token`, or `email` |
+| `auth_key_name` | Name of the API key, or `google:<email>` for a Google sign-in (non-email drops) |
+| `remote_ip` | Uploader's IP (via CF-Connecting-IP) (non-email drops) |
+| `user_agent` | Browser/client User-Agent (non-email drops) |
+| `country` | Country code (via CF-IPCountry) (non-email drops) |
+| `city` | City (via CF geo) (non-email drops) |
+| `to_full` | Full recipient address including any `+topic` (email only) |
 | `from_name` | Sender name (email only) |
 | `from_header` | First RFC 5322 From header; unlike `from_addr`, this is not the envelope sender (email only) |
 | `message_id` | Email Message-ID header (email only) |
@@ -385,6 +422,7 @@ drop get DROP_ID                        # full details + metadata + files
 drop body lisa                          # print full email body text
 drop files lisa                         # list files in latest drop
 drop download lisa DROP_ID file.pdf     # download a file
+drop raw lisa DROP_ID -o msg.eml        # the original .eml (email drops only)
 drop url lisa DROP_ID file.pdf          # presigned download URL (shareable)
 drop target mr-gray --ttl 2             # create temp upload link
 drop invite user@x.com --target box    # invite flow (allowlist + link + email)
@@ -484,11 +522,12 @@ the HTML a browser needs:
   the same key can post arbitrary `html` directly.
 
 **Attachment transport:** local files <1MB ride inline as base64; files >1MB (or any with
-`--upload`) are presigned + PUT to R2 (`outbound-tmp/`) and pulled by the Worker at send time;
-URLs are fetched server-side over HTTP(S). The Worker accepts at most 32 attachments, 5 MiB
-per inline base64 attachment, and 16 MiB of decoded attachment data in total, leaving room
-below Cloudflare's 25 MiB assembled-message cap; the recipient list remains capped at 50
-combined to/cc/bcc.
+`--upload`) are presigned + PUT to R2 (`outbound/temp/{box}/`) and pulled by the Worker at send
+time; the Worker only pulls keys under the sending box's own prefix. URLs are fetched
+server-side over HTTP(S) with a 15 second timeout. The Worker accepts an 8 MiB JSON request
+body, at most 32 attachments, 5 MiB per inline base64 attachment, and 16 MiB of decoded
+attachment data in total, leaving room below Cloudflare's 25 MiB assembled-message cap; the
+recipient list remains capped at 50 combined to/cc/bcc.
 
 **YAML template** keys are camelCase, mirroring the flags (`drop`/`from`, `to`, `cc`, `bcc`,
 `replyTo`, `fromName`, `subject`, `body`, `bodyHtml`, `markdown`, `topic`, `inReplyTo`,
@@ -505,17 +544,31 @@ origin. Both routes use the same Worker; `run_worker_first = true` lets
 binding can serve the SPA. Application-origin asset requests are delegated back
 to `env.ASSETS`.
 
+- **Origin gate** (`src/index.ts`, runs before every other route): on `HOST_DOMAIN`, only
+  `GET`/`HEAD` under `/f/` reach `serveHostedSite`; every other path or method is a bare
+  `404`, so `/api/*`, `/h/*` and the SPA do not exist there. `HOST_DOMAIN` unset or equal
+  to `DOMAIN` is a `503` on every request.
+- **Legacy links:** `GET`/`HEAD` on `{DOMAIN}/f/*` answer `301` to the same path and query
+  on `HOST_DOMAIN` (`Cache-Control: no-store`, `Referrer-Policy: no-referrer`; the query is
+  kept so a private site's `?auth=` survives). Other methods are `404`. The application
+  origin never serves the bytes.
+- **DNS:** the route for `HOST_DOMAIN` is generated by the deploy, the proxied DNS record
+  for it is not. See "Out-of-band steps".
 - **R2 layout:** `sites/{box}/{site}/{relpath}` (relpath preserved verbatim, traversal-safe).
 - **Serving** (`lib/hosting.ts` `serveHostedSite`): inline real content-types, `index.html`
   at directory roots, `301` no-slash -> slash so relative links resolve, `404` for misses,
   `410` if the site's TTL expired, `401` if a private `auth_token` is set and `?auth=` doesn't match.
+  `/f/` and `/f/{box}` with no site `302` to the app root. Every file carries
+  `X-Content-Type-Options: nosniff` and `Cache-Control: public, max-age=3600`; a private
+  site's files and its 401/404/410/301 answers carry `private, no-store` instead.
 - **Registry:** `hosted_sites` D1 table (migration `0007`) -- inbox, site, file_count,
   total_bytes, optional `auth_token` (private), optional `expires_at` (TTL).
 - **API** (`api/host.ts`, API key with write to the box):
   - `POST /api/host/presign/:box` `{site, path, contentType}` -> presigned PUT into `sites/`
   - `POST /api/host/finalize/:box` `{site, ttlHours?, authToken?}` -> registers site, counts derived from R2
   - `GET /api/host/sites/:box` -> list ; `DELETE /api/host/sites/:box/:site` -> purge R2 prefix + row
-- **CLI:**
+- **CLI** (prints the site URL from `HOST_DOMAIN` in the shell env or `.env`, falling back to
+  the host of `AGENT_DROP_URL` when unset, which prints the app domain, not the real hosting URL):
 
 ```bash
 drop host lisa marketing ./dist        # upload a folder as site "marketing"
@@ -539,6 +592,7 @@ Hosted pages should use **relative** asset paths (`./style.css`), since absolute
 | TXT | agent.frst.dev | `v=spf1 include:amazonses.com ~all` | SPF for MAIL FROM |
 | TXT | frst.dev | `v=spf1 include:_spf.mx.cloudflare.net include:_spf.protonmail.ch include:amazonses.com ~all` | Root SPF |
 | TXT | _dmarc.frst.dev | `v=DMARC1; p=quarantine; ...` | DMARC |
+| A / AAAA / CNAME (proxied) | `{HOST_DOMAIN}` | any proxied placeholder record; the Worker route answers, the target is never contacted | Hosted-sites origin. The deploy creates the route, not this record |
 
 ## Dev loop & Deployment
 
@@ -556,8 +610,9 @@ bun run verify         # the green gate: check + build + deploy --dry-run
 ```
 
 **Deployment identity.** The committed `wrangler.toml` carries only
-placeholders (`example.com`, `your-cloudflare-account-id`, `your-d1-database-id`,
-`your-google-client-id`) so the public repo leaks nothing. `vite.config.ts`
+placeholders (`example.com`, `files.example.com`, `your-cloudflare-account-id`,
+`your-d1-database-id`, `your-google-client-id`) so the public repo leaks nothing.
+It declares two `[[routes]]` (`DOMAIN/*` and `HOST_DOMAIN/*`, both on `ZONE_NAME`). `vite.config.ts`
 injects the real values from `.env` through the plugin's `config` hook
 (`scripts/deploy-identity.ts`), which writes them into the generated
 `web/dist/agent_drop/wrangler.json`. `scripts/deploy.ts` locates that config via
@@ -575,7 +630,7 @@ upload -- but do not `cp -r` the build output anywhere public.
 
 ### Out-of-band steps the deploy does NOT do
 
-Four things live outside `wrangler.toml` and must exist before, or the code is
+Five things live outside `wrangler.toml` and must exist before, or the code is
 inert (and the first one makes the deploy itself fail):
 
 ```bash
@@ -596,6 +651,12 @@ bun run db:migrate          # = vite build + wrangler d1 migrations apply --remo
 
 # 4. The webhook-body lifecycle rule. Bucket config again, same fragility.
 wrangler r2 bucket lifecycle add agent-drop-storage hooks-130d "hooks/" --expire-days 130
+
+# 5. The HOST_DOMAIN DNS record. The deploy registers the Worker route for it, but
+#    a route only fires for traffic that reaches Cloudflare: add a PROXIED
+#    (orange-cloud) A/AAAA/CNAME record for HOST_DOMAIN in the zone (any placeholder
+#    target, e.g. AAAA 100::), same as DOMAIN has. Without it hosted sites do not
+#    resolve and the {DOMAIN}/f/* redirect lands on NXDOMAIN.
 ```
 
 **Use `bun run db:migrate`, not a bare `wrangler d1 migrations apply`** -- the
@@ -608,7 +669,9 @@ webhook receivers reuse the existing `agent-drop-webhooks` queue, so they need n
 `queues create` of their own. Until step 2 lands, `/api/upload/confirm` completes
 drops exactly as it always did and the reaper is the backstop, so a partial
 rollout degrades rather than breaks. Step 4 is the same shape: without it,
-webhook bodies in R2 simply never expire, while D1 keeps pruning on time.
+webhook bodies in R2 simply never expire, while D1 keeps pruning on time. Step 5
+is silent in the other direction: the deploy succeeds and nothing warns, and the
+first sign is a hosted URL that does not resolve.
 
 Account: **Duplo**. The account id lives in `.env` (`CLOUDFLARE_ACCOUNT_ID`),
 never in a tracked file -- `wrangler.toml` carries a placeholder for exactly
@@ -865,7 +928,7 @@ Apple "Hide My Email" style relay. Sender never sees the real address.
 INBOUND: sender@example.com -> j-7k9m@frst.dev
   1. Worker detects mask j-7k9m
   2. Finds relay rule j-* -> target owner@example.org
-  3. Mints an opaque Reply-To: reply+<130-bit-token>@frst.dev
+  3. Mints an opaque reply+<130-bit-token>@frst.dev route, used as both From and Reply-To
   4. Queues raw MIME, replayed via the CF Email Sending binding -> owner@example.org
 
 REPLY: the owner replies to reply+<130-bit-token>@frst.dev
@@ -887,10 +950,16 @@ Relay reply-to: reply+0123456789abcdefghjkmnpqrs@frst.dev
 ```
 
 Migration `0011` stores only the token's SHA-256 digest plus its sender and mask.
-Routes are reusable and deliberately have no expiry, so replying to an old
-thread still works; disabling or deleting the mask makes them inert. The fixed
-32-character local part also supports sender addresses that would not fit if
-their text and a signature were embedded under SMTP's 64-character limit.
+A new route is minted for every inbound relayed message. Routes are reusable and
+deliberately have no expiry, so replying to an old thread still works; disabling
+a mask makes them inert and deleting it (`DELETE /api/masks/:id`) removes its
+rows. The fixed 32-character local part also supports sender addresses that
+would not fit if their text and a signature were embedded under SMTP's
+64-character limit.
+
+A `reply+<token>` that does not resolve (unknown token, disabled or deleted mask)
+is rejected at SMTP with `Invalid relay reply address`; it never falls through to
+become an ordinary inbox drop.
 
 Pre-token `_at_` reply addresses are forgeable and rejected by default. An
 existing deployment may set `RELAY_LEGACY_REPLY_UNTIL` to a short absolute
@@ -918,7 +987,7 @@ drop mask-create --prefix j   # auto-generate
 drop mask-create --id j-shop  # explicit ID
 drop mask-disable j-shop      # stop forwarding (emails bounce)
 drop mask-enable j-shop       # resume
-drop mask-remove j-shop       # delete permanently
+drop mask-remove j-shop       # delete permanently (and its reply routes)
 ```
 
 ### Delivery
@@ -957,7 +1026,8 @@ https://frst.dev/h/{box}/{slug}
 https://frst.dev/h/{box}/{slug}/anything/after    <- stored as `subpath`, same receiver
 ```
 
-The Worker runs before assets on both configured origins. `/h/*` deliberately
+The Worker runs before assets on both configured origins, but `/h/*` exists only
+on the app origin: `HOST_DOMAIN` answers it with `404`. `/h/*` deliberately
 sits **outside** `/api/*`, whose invariant is "unknown path answers 401, not 404" -- a fully
 public, unauthenticated, body-swallowing endpoint has no business in there.
 
@@ -976,7 +1046,8 @@ resolve receiver -> method -> burst limit -> size cap -> read raw BYTES and hash
 them -> handshake -> daily cap -> verify -> extract -> store -> respond
 ```
 
-- The body is read **once, as bytes** (`arrayBuffer()`) and hashed before
+- The body is read **once, as bytes** (`readBodyCapped`, which never holds more
+  than `max_body_bytes` and cancels the stream past it) and hashed before
   anything decodes it. `body_text` is filled only when the bytes were valid
   UTF-8; otherwise the body lives in R2 unmodified. Nothing downstream
   re-serializes.
@@ -1000,7 +1071,7 @@ them -> handshake -> daily cap -> verify -> extract -> store -> respond
 | Registered but **expired** | `410` | Gone permanently, stop sending |
 | Old slug inside its `--grace` window | `200` | Rotation must not drop traffic mid-cutover |
 | Method not in `allowed_methods` | `405` + `Allow:` | |
-| Body over `max_body_bytes` | `413` | `Content-Length` checked first |
+| Body over `max_body_bytes` (default 1 MiB) | `413` | `Content-Length` checked first; a chunked body declares none, so the read itself stops at the cap |
 | Signature wrong | `401` | Stored `rejected`, burns an `AUTH_RATE_LIMIT` token |
 | Burst limit or daily cap | `429` + `Retry-After` | |
 | Our own failure (D1/R2 down) | `503` | The ONLY case that should make a provider retry |
@@ -1347,23 +1418,23 @@ curl "http://localhost:5173/cdn-cgi/handler/scheduled?cron=17+*+*+*+*"
 
 ```
 src/
-  index.ts              -- Worker entry (fetch + email + queue consumers + scheduled)
+  index.ts              -- Worker entry: HOST_DOMAIN gate, /api/, /f/* 301, /h/, assets; email + queue consumers + scheduled
   email-handler.ts      -- Inbound email -> D1 + R2 (with quote stripping + relay detection)
   types.ts              -- TypeScript interfaces
   api/
     router.ts           -- Two ordered route tables + the dispatch loop
     match.ts            -- exact / prefix / segments / segmentsThenRest matchers
-    gates.ts            -- The auth gates the tables compose from (see below)
+    gates.ts            -- The auth gates the tables compose from, incl. scoped asAdminOrAdminKey (see below)
     cors.ts             -- isBrowserRoute + the scoped CORS headers
-    admin-lists.ts      -- GET /api/drops + GET /api/boxes
-    inbox.ts            -- GET /api/inbox/:name (+ presigned download URLs)
-    drop.ts             -- POST /api/drop/:name
-    send.ts             -- POST /api/send/:name (Email Sending binding)
+    admin-lists.ts      -- GET /api/drops + GET /api/boxes (filtered by an admin key's inbox_scope)
+    inbox.ts            -- GET /api/inbox/:name (+ presigned download URLs, /:id/raw)
+    drop.ts             -- POST /api/drop/:name (multipart capped at 32 files / 20 MiB each / 25 MiB)
+    send.ts             -- POST /api/send/:name (Email Sending binding; request, attachment and header limits)
     host.ts             -- Static hosting: presign/finalize/list/delete (sites/ prefix)
-    keys.ts             -- API key CRUD
+    keys.ts             -- API key CRUD (validates permissions + inbox_scope)
     targets.ts          -- Temporary drop token CRUD
     users.ts            -- Allowed users CRUD (Google OAuth allowlist)
-    upload.ts           -- Presigned R2 upload (presign, multipart, complete, confirm)
+    upload.ts           -- Presigned R2 upload (presign, multipart capped at 100 x 50 MiB parts, complete, confirm)
     rules.ts            -- Rules CRUD + delivery log
     masks.ts            -- Email mask CRUD
     hooks.ts            -- Webhook receiver CRUD (asAdmin, prefix-routed)
@@ -1374,7 +1445,9 @@ src/
     hook-rotate.ts      -- New slug on the same row, previous_slug + grace window
     hook-replay.ts      -- POST .../:id/replay -- server-side, through the retry queue
   lib/
-    auth.ts             -- API key + drop token validation, digest-compare isAdmin
+    auth.ts             -- API key + drop token validation, digest-compare isAdmin, API_KEY_PERMISSIONS
+    body-limit.ts       -- readBodyCapped: stream a body, never retain more than a cap
+    mail-auth.ts        -- Parses Cloudflare's Authentication-Results into drop metadata `sender_auth`
     compare.ts          -- constantTimeEqual, one copy, shared by auth and the verifier
     ratelimit.ts        -- The auth + upload rate-limit bindings, fail-open
     drops.ts            -- FinalizeDrop + resolveObjectKey (router AND reaper use it)
@@ -1389,7 +1462,7 @@ src/
     webhook-store.ts    -- Header/query collection + redaction, dedupe, the insert
     webhook-body.ts     -- sha256, strict UTF-8 decode, secretHeaders/secretParams
     webhook-extract.ts  -- Presets, dotted-path reader, dedupe key derivation
-    webhook-defs.ts     -- HOOK_PREFIX, the DERIVED supported-mode lists, hookUrl
+    webhook-defs.ts     -- HOOK_PREFIX, the DERIVED supported-mode lists, hookUrl, generatedSlug (130-bit suffix)
     webhook-verify.ts   -- Dispatch, replay windows, the 4 shared-secret modes
     webhook-crypto.ts   -- hmac/digest, hex/base64, buildSignedBytes (bytes, not strings)
     webhook-schemes.ts  -- The 7 signed schemes' header/parsing/template trivia
@@ -1402,8 +1475,8 @@ src/
     markdown.ts         -- Markdown -> email-safe HTML (marked's lexer, our renderer)
     email-builder.ts    -- EmailMessageBuilder construction + platform-limit validation
     mime.ts             -- Hand-rolled MIME: relay replay + /api/compose preview only
-    relay.ts            -- Email relay + forwardViaBinding + sendRawViaBinding (CF Email Sending)
-    google-auth.ts      -- Google JWT verification against JWKS
+    relay.ts            -- Email relay (opaque reply routes, legacy cutoff) + forwardViaBinding + sendRawViaBinding (CF Email Sending)
+    google-auth.ts      -- Google JWT verification against JWKS (size cap, fail-closed, rate-limited key refresh)
     xml.ts              -- Small strict XML reader (no DOMParser in workerd)
     s3-xml.ts           -- Reads/writes R2's multipart documents via xml.ts
     r2-events.ts        -- R2 object-create notification consumer (pending -> completed)
@@ -1439,6 +1512,8 @@ tools/
     hook-sign.ts        -- The producing half of the signature schemes, for hook-test
     queue-emit.ts       -- The --delete-on-success loop, extracted so its ORDER is testable
     rule-preview.ts     -- rule-test's prediction, including the engine's refusals
+    cli-utils.ts        -- Output formatting, common flags, outputFlag (the program-wide -o shadows a subcommand's)
+    secrets.ts          -- CLI key lookup: shell env var, else passage (`key NAME`)
 test/
   helpers/              -- D1-over-bun:sqlite, Env builders, EMAIL + R2 doubles
   router-routes.test.ts -- The API's dispatch contract, route by route
@@ -1451,7 +1526,10 @@ scripts/
 .github/workflows/
   ci.yml                -- install, wrangler types --check, typecheck, lint, test,
                            build, deploy dry-run (no secrets; uses .env.example)
-wrangler.toml           -- CF Worker config (R2, D1, Queues, ratelimits, crons)
+docs/
+  SECURITY-AUDIT.md     -- Security assessment + remediation scope (hosting origin, relay routes, scoped listings, bounded inputs)
+  *-PLAN.md             -- Build plans with their STATE files (WEBHOOKS, MODERNIZE)
+wrangler.toml           -- CF Worker config (R2, D1, Queues, ratelimits, crons, two routes)
 vite.config.ts          -- Vite 8 + @cloudflare/vite-plugin + identity injection
 biome.jsonc             -- Lint + format (tabs, double quotes, 100 cols)
 ```
@@ -1463,9 +1541,11 @@ rather than a style choice:
 
 1. **Tier 1** is reachable without an API key. Each route carries its own gate:
    none (`/api/health`, `/api/config`), admin, admin-or-admin-key
-   (`/api/drops`, `/api/boxes`), inbox-write (`/api/drop/*`, the presign
-   routes), or finalize (`/api/upload/complete|confirm`, which recover the
-   inbox from the drop ROW and re-run the write auth the presign required).
+   (`/api/drops`, `/api/boxes`: the admin credential sees every box, an
+   `admin`-permission API key only its own `inbox_scope`), inbox-write
+   (`/api/drop/*`, the presign routes), or finalize
+   (`/api/upload/complete|confirm`, which recover the inbox from the drop ROW
+   and re-run the write auth the presign required).
 2. Then **every** remaining request must present a valid API key. A caller with
    no credential gets `401` on an unknown path, never `404`, so an anonymous
    prober cannot map the API.
@@ -1476,14 +1556,17 @@ The admin routes match by `startsWith`, so `/api/keys/{id}` and even
 wart, preserved deliberately and pinned by a test.
 
 Gates live once, in `src/api/gates.ts`, and a route names the one it wants
-(`asAdmin`, `asWriter`, `asFinalizer`, `keyedWriter`, `keyedReader`). Before
+(`asAdmin`, `asAdminOrAdminKey`, `asWriter`, `asFinalizer`, `keyedWriter`,
+`keyedReader`). Before
 that they were pasted inline at four call sites and had drifted apart -- the
 outbound-mail copy had stopped checking `inbox_scope`.
 
-**`/h/*` is not in either table.** The public webhook receivers are branched in
-`src/index.ts` beside `/f/*`, before `handleAPI` ever runs, precisely so the
-`/api/` invariant above stays true. Their *management* API (`/api/hooks/*`) is
-in the tables like everything else.
+**Neither `/h/*` nor `/f/*` is in either table.** `src/index.ts` branches in this
+order: the `HOST_DOMAIN` gate (hosted sites or `404`, nothing else), `/api/*` into
+`handleAPI`, the `/f/*` legacy redirect, `/h/*` into the public webhook
+receivers, and everything else to `env.ASSETS`. The receivers never reach
+`handleAPI`, so the `/api/` invariant above stays true. Their *management* API
+(`/api/hooks/*`) is in the tables like everything else.
 
 Two ordering details in the hook routes are deliberate and pinned by tests:
 `/queue/:inbox/stats` sits **before** `/queue/:inbox/:id`, which would otherwise

@@ -42,8 +42,9 @@ webhook ─┘   your-domain/h/{box}/{slug}  ─▶  lease · ack · replay
   backoff, 24h retry), or run an **Apple-style email relay** — masked bidirectional
   addresses so the other side never sees your real inbox.
 - **Static hosting, because why not.** `drop host lisa report ./dist` publishes a
-  folder to `files.your-domain/f/lisa/report/`, straight off R2 on an origin isolated
-  from the app. Optional TTL and auth token.
+  folder to `https://{HOST_DOMAIN}/f/lisa/report/` (say `files.your-domain`), straight
+  off R2 on an origin isolated from the app, so uploaded scripts cannot touch the app's
+  storage or API. Old `your-domain/f/...` links redirect there. Optional TTL and auth token.
 - **Yours, on your domain, on the edge.** Self-hosted on Cloudflare's free-ish tier.
   No SaaS in the loop, no per-seat pricing, no data leaving your account.
 
@@ -109,6 +110,7 @@ Everything lives in one Cloudflare account. From zero to live in five steps.
 bunx wrangler d1 create agent-drop-db          # → copy the database_id it prints
 bunx wrangler r2 bucket create agent-drop-storage
 bunx wrangler queues create agent-drop-webhooks
+bunx wrangler queues create agent-drop-r2-events   # must exist before the first deploy
 ```
 
 Generate an **R2 API token** (Cloudflare dashboard → R2 → *Manage API tokens*, or
@@ -134,6 +136,7 @@ cp .env.example .env
 | `CLOUDFLARE_ACCOUNT_ID` | your CF account id                                         |
 | `D1_DATABASE_ID`        | the id printed in step 1                                   |
 | `GOOGLE_CLIENT_ID`      | OAuth client id (public)                                   |
+| `RELAY_LEGACY_REPLY_UNTIL` | optional; see below. Leave unset on a new deployment    |
 
 For an apex deployment, use `DOMAIN=example.com` and a distinct host such as
 `HOST_DOMAIN=files.example.com`; `MAIL_DOMAIN` and `ZONE_NAME` can use their
@@ -181,8 +184,10 @@ bun run deploy            # vite build → render wrangler.toml from .env → wr
 That's it — `your-domain` is live, boxes accept email/upload/API, and agents can pull.
 
 > **Harden R2 (recommended):** set lifecycle rules (auto-expire old blobs) and CORS
-> (so the SPA can PUT presigned uploads). Exact `wrangler r2 bucket lifecycle` / `cors`
-> commands are in [`CLAUDE.md`](./CLAUDE.md) under *R2 Bucket Configuration*.
+> (so the SPA can PUT presigned uploads), and add the object-create notification that
+> completes uploads without the client calling back. Exact `wrangler r2 bucket
+> lifecycle` / `cors` / `notification` commands are in [`CLAUDE.md`](./CLAUDE.md) under
+> *R2 Bucket Configuration*.
 
 ## CLI
 
@@ -235,8 +240,9 @@ src/
   index.ts            Worker entry (fetch + email + queue consumers + cron)
   email-handler.ts    Inbound email → D1 + R2 (quote stripping, relay detection)
   api/                Route handlers (inbox, drop, send, host, keys, rules, masks, hooks, …)
-  lib/                auth, hosting, rules, relay, google-auth, normalize, id,
-                      webhook-* (receive, verify, handshake, store, throttle), reapers
+  lib/                auth, hosting, rules, relay, google-auth, mail-auth, body-limit,
+                      normalize, id, webhook-* (receive, verify, handshake, store,
+                      throttle), reapers
 web/                  Vite + React SPA (Landing, InboxView, DropZone, GoogleSignIn)
 migrations/           D1 schema (0001 … 0011)
 scripts/deploy.ts     Deploy wrapper (renders wrangler.toml from .env)
