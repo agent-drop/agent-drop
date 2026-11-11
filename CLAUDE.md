@@ -312,7 +312,8 @@ curl -X POST $KEY -H "Content-Type: application/json" \
 **Both finalize endpoints authenticate.** They look the drop row up by `dropId`,
 recover its inbox, and re-run the same write auth the presign required -- so
 `404 {"error":"drop not found"}` for an unknown id comes from the router, before
-any handler runs. They used to run with **no auth at all**, on the theory that
+any handler runs. Because that lookup precedes the credential check, the body is
+capped at 16 KiB (413) before it is parsed. They used to run with **no auth at all**, on the theory that
 "the dropId was already authenticated at presign", which nothing re-checked:
 anyone who learned a drop id could flip it to `completed` and publish it to
 every agent reading that inbox.
@@ -880,7 +881,7 @@ receiver makes one event and stops.
 
 ### Forwards
 
-Email forwards execute inline by **re-sending via the Cloudflare Email Sending binding** (`forwardViaBinding` in `lib/relay.ts`), NOT `message.forward()`. `message.forward()` only delivers to CF-verified destination addresses; re-sending via the unrestricted `EMAIL` binding reaches any address (frst.dev is onboarded for Email Sending). The forwarded mail is `From: "<sender> (via {box}@frst.dev)" <{box}@frst.dev>` (so frst.dev DKIM/SPF apply) with the original sender in `Reply-To`, carrying the full unstripped body + original attachments. Logged in `delivery_log` with status `success` or `failed`.
+Email forwards execute inline by **re-sending via the Cloudflare Email Sending binding** (`forwardViaBinding` in `lib/relay.ts`), NOT `message.forward()`. `message.forward()` only delivers to CF-verified destination addresses; re-sending via the unrestricted `EMAIL` binding reaches any address (frst.dev is onboarded for Email Sending). The forwarded mail is `From: "<sender> (via {box}@frst.dev)" <{box}@frst.dev>` (so frst.dev DKIM/SPF apply) with the original sender in `Reply-To` -- the header Reply-To, else the header From, else the SMTP envelope, since an ESP's envelope is a bounce address -- and the inbound Subject flattened to one line (postal-mime decodes encoded words back into raw CR/LF), carrying the full unstripped body + original attachments. Logged in `delivery_log` with status `success` or `failed`.
 
 A single forward rule's `target` may be a **comma-separated list** of addresses; each is delivered and logged independently. CLI: `rule-add --forward` is repeatable / comma-aware.
 
@@ -964,6 +965,12 @@ a mask makes them inert and deleting it (`DELETE /api/masks/:id`) removes its
 rows. The fixed 32-character local part also supports sender addresses that
 would not fit if their text and a signature were embedded under SMTP's
 64-character limit.
+
+The route's sender is the first well-formed address in the inbound mail's
+`Reply-To`, else its header `From`, else the SMTP envelope sender
+(`pickSenderAddress` in `src/lib/relay.ts`). The envelope of most bulk and
+transactional mail (SES, Mailchimp, Google Groups, Cloudflare Email Sending) is a
+bounce address, so a route built on it sent the owner's reply to nobody.
 
 A `reply+<token>` that does not resolve (unknown token, disabled or deleted mask)
 is rejected at SMTP with `Invalid relay reply address`; it never falls through to
