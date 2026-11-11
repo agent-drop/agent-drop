@@ -76,9 +76,19 @@ function encodeHeaderWord(s: string): string {
  * so a name carrying one would move it.
  */
 export function sanitizeDisplayName(name: string): string {
-	return Array.from(name, (ch) => (isHeaderControl(ch.charCodeAt(0)) ? " " : ch))
+	return singleLineHeader(name.replace(/["\\<>]/g, ""));
+}
+
+/**
+ * Untrusted text for a header value (a forwarded Subject, a display name):
+ * every control character, CR and LF included, becomes a space and runs of
+ * whitespace collapse, so the value stays on its own header line. postal-mime
+ * decodes RFC 2047 words back into raw line breaks, so "already parsed" is not
+ * "already safe".
+ */
+export function singleLineHeader(value: string): string {
+	return Array.from(value, (ch) => (isHeaderControl(ch.charCodeAt(0)) ? " " : ch))
 		.join("")
-		.replace(/["\\<>]/g, "")
 		.replace(/\s+/g, " ")
 		.trim();
 }

@@ -8,6 +8,7 @@
  */
 
 import { isAdmin, validateApiKey } from "../lib/auth";
+import { parseJsonObject, readRequestCapped } from "../lib/body-limit";
 import { validateGoogleToken } from "../lib/google-auth";
 import { normalizeInbox } from "../lib/normalize";
 import { recordAuthFailure, recordDropTokenUpload } from "../lib/ratelimit";
@@ -194,6 +195,9 @@ export function asWriter(
  * every agent reading that inbox. The drop ROW is the authority on which inbox
  * is being written to.
  */
+/** `{dropId, uploadId}` and nothing else; an R2 upload id is a few hundred bytes. */
+export const MAX_FINALIZE_BODY_BYTES = 16 * 1024;
+
 export function asFinalizer(
 	handle: (
 		scope: RequestScope,
@@ -202,13 +206,16 @@ export function asFinalizer(
 	) => Promise<Response>,
 ): OpenRoute {
 	return async (scope) => {
-		let body: { dropId?: string; uploadId?: string };
-		try {
-			body = (await scope.request.json()) as { dropId?: string; uploadId?: string };
-		} catch {
-			return reject(scope, 400, { error: "invalid JSON body" });
+		// Bounded BEFORE the lookup: this runs ahead of any credential check, so an
+		// unbounded read would let anyone make the Worker buffer a huge body.
+		const bytes = await readRequestCapped(scope.request, MAX_FINALIZE_BODY_BYTES, "request body");
+		if (bytes instanceof Response) return bytes;
+		const parsed = parseJsonObject(bytes);
+		if (!parsed) return reject(scope, 400, { error: "invalid JSON body" });
+		const body = parsed as { dropId?: string; uploadId?: string };
+		if (typeof body.dropId !== "string" || !body.dropId) {
+			return reject(scope, 400, { error: "dropId required" });
 		}
-		if (!body?.dropId) return reject(scope, 400, { error: "dropId required" });
 
 		const drop = await scope.env.DB.prepare(
 			"SELECT id, inbox, r2_prefix, object_key, subject, status FROM drops WHERE id = ?",

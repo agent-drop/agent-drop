@@ -24,7 +24,7 @@ export function isHeaderControl(code: number): boolean {
 	return code <= 0x1f || code === 0x7f;
 }
 
-function hasHeaderControl(value: string): boolean {
+export function hasHeaderControl(value: string): boolean {
 	for (let i = 0; i < value.length; i++) {
 		if (isHeaderControl(value.charCodeAt(i))) return true;
 	}

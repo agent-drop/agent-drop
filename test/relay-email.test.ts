@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import PostalMime from "postal-mime";
 import { handleEmail } from "../src/email-handler";
-import { buildLegacyRelayAddress } from "../src/lib/relay";
+import { buildLegacyRelayAddress, pickSenderAddress } from "../src/lib/relay";
 import type { Env, RelayQueueMessage } from "../src/types";
 import { makeBucket, makeCtx, makeEnv, type TestEnv } from "./helpers/env";
 
@@ -13,10 +13,18 @@ interface IncomingEmail {
 /**
  * `from` is the envelope sender; `fromHeader` is the From header the sender's
  * client wrote, which is where a display name lives. They differ in real mail.
+ * A `null` fromHeader omits the header; `extraHeaders` are written verbatim.
  */
-function incoming(from: string, to: string, subject = "Hello", fromHeader = from): IncomingEmail {
+function incoming(
+	from: string,
+	to: string,
+	subject = "Hello",
+	fromHeader: string | null = from,
+	extraHeaders: string[] = [],
+): IncomingEmail {
 	const raw = [
-		`From: ${fromHeader}`,
+		...(fromHeader === null ? [] : [`From: ${fromHeader}`]),
+		...extraHeaders,
 		`To: ${to}`,
 		`Subject: ${subject}`,
 		"Message-ID: <incoming@example.test>",
@@ -239,5 +247,142 @@ describe("inbound relay names the original sender", () => {
 
 		expect(reply.rejection()).toBeNull();
 		expect(queued[1]).toMatchObject({ direction: "reply", to: "lisa@example.com" });
+	});
+});
+
+// The SMTP envelope sender of most bulk and transactional mail (SES, Mailchimp,
+// Google Groups, Cloudflare Email Sending) is a bounce address, not a person. A
+// reply through the mask must reach whoever a mail client would reply to.
+describe("relay reply target follows the headers, not the envelope", () => {
+	const BOUNCE = "bounce-123@cf-bounce.example";
+	let env: TestEnv;
+	let queued: RelayQueueMessage[];
+
+	beforeEach(async () => {
+		({ env, queued } = await relayFixture());
+	});
+
+	async function relay(fromHeader: string | null, extraHeaders: string[] = []) {
+		const inbound = incoming(BOUNCE, "j-7k9m@drop.test", "Hello", fromHeader, extraHeaders);
+		await handleEmail(inbound.message, env, makeCtx());
+		expect(inbound.rejection()).toBeNull();
+		expect(queued).toHaveLength(1);
+		const route = env.DB.raw.query("SELECT sender FROM relay_reply_routes").all() as {
+			sender: string;
+		}[];
+		expect(route).toHaveLength(1);
+		return { relayed: queued[0], sender: route[0].sender };
+	}
+
+	test("with no Reply-To, the route replies to the From header address", async () => {
+		const { relayed, sender } = await relay('"Pat" <pat@example.com>');
+
+		expect(sender).toBe("pat@example.com");
+		const reply = incoming("owner@example.org", relayed.from, "Re: Hello");
+		await handleEmail(reply.message, env, makeCtx());
+		expect(queued[1]).toMatchObject({ direction: "reply", to: "pat@example.com" });
+	});
+
+	test("a Reply-To header wins over From, as it would in a mail client", async () => {
+		const { relayed, sender } = await relay('"Pat" <pat@example.com>', [
+			"Reply-To: pat.replies@example.com",
+		]);
+
+		expect(sender).toBe("pat.replies@example.com");
+		// The label still names the author, not where the reply goes.
+		expect(rawHeader(relayed.rawEmail, "From")).toBe(
+			`"Pat (via j-7k9m@drop.test)" <${relayed.from}>`,
+		);
+	});
+
+	test("an unnamed sender is labelled with the From header address, never the envelope", async () => {
+		const { relayed } = await relay("pat@example.com", ["Reply-To: help@example.com"]);
+
+		expect(rawHeader(relayed.rawEmail, "From")).toBe(
+			`"pat@example.com (via j-7k9m@drop.test)" <${relayed.from}>`,
+		);
+	});
+
+	test("the first valid Reply-To address is used when several are listed", async () => {
+		const { sender } = await relay("pat@example.com", [
+			"Reply-To: garbage, first@example.net, second@example.org",
+		]);
+		expect(sender).toBe("first@example.net");
+	});
+
+	test("a Reply-To group is read member by member", async () => {
+		const { sender } = await relay("pat@example.com", [
+			"Reply-To: team: lead@example.net, other@example.net;",
+		]);
+		expect(sender).toBe("lead@example.net");
+	});
+
+	test.each([
+		["no @", "Reply-To: not-an-address", "pat@example.com"],
+		["whitespace", "Reply-To: <pat @example.com>", "pat@example.com"],
+		["two @", "Reply-To: <a@b@example.com>", "pat@example.com"],
+		["empty", "Reply-To:", "pat@example.com"],
+		["empty angle", "Reply-To: <>", "pat@example.com"],
+	])("a malformed Reply-To (%s) falls back to the From header", async (_, header, expected) => {
+		const { sender } = await relay('"Pat" <pat@example.com>', [header]);
+		expect(sender).toBe(expected);
+	});
+
+	test.each([
+		["missing", null],
+		["empty", ""],
+		["empty angle", "<>"],
+		["no @", "not-an-address"],
+		["two @", "<a@b@example.com>"],
+		[
+			"encoded word as address",
+			`<=?UTF-8?B?${Buffer.from("a\r\nb@evil.example").toString("base64")}?=>`,
+		],
+	])("a malformed From (%s) with no Reply-To falls back to the envelope", async (_, header) => {
+		const { sender } = await relay(header);
+		expect(sender).toBe(BOUNCE);
+	});
+
+	test("with no usable header address and no name, the label falls back to the envelope", async () => {
+		const { relayed } = await relay("<>");
+		expect(rawHeader(relayed.rawEmail, "From")).toBe(
+			`"${BOUNCE} (via j-7k9m@drop.test)" <${relayed.from}>`,
+		);
+	});
+});
+
+// postal-mime already drops most control characters from a parsed address, so
+// the strict check is pinned here directly rather than through a raw message.
+describe("pickSenderAddress", () => {
+	const ENVELOPE = "bounce@cf-bounce.example";
+	const mailbox = (address: string) => ({ address, name: "" });
+
+	test.each([
+		["CRLF", "pat@example.com\r\nBcc: victim@example.net"],
+		["NUL", "pat\u0000@example.com"],
+		["DEL", "pat@example.com\u007f"],
+		["tab", "pat\t@example.com"],
+		["angle brackets", "<pat@example.com>"],
+		["display-name form", "Pat <pat@example.com>"],
+		["comma list", "a@example.com,b@example.com"],
+		["no local part", "@example.com"],
+		["no domain", "pat@"],
+		["empty", ""],
+	])("rejects %s and moves to the next source", (_, bad) => {
+		expect(pickSenderAddress([mailbox(bad), mailbox("next@example.com")], ENVELOPE)).toBe(
+			"next@example.com",
+		);
+		expect(pickSenderAddress([[mailbox(bad)]], ENVELOPE)).toBe(ENVELOPE);
+	});
+
+	test("reads sources in order and returns the envelope when none has a valid address", () => {
+		expect(
+			pickSenderAddress([[mailbox("reply@example.com")], mailbox("from@example.com")], ENVELOPE),
+		).toBe("reply@example.com");
+		expect(pickSenderAddress([undefined, mailbox("from@example.com")], ENVELOPE)).toBe(
+			"from@example.com",
+		);
+		expect(pickSenderAddress([undefined, undefined], ENVELOPE)).toBe(ENVELOPE);
+		expect(pickSenderAddress([[], { name: "Team", group: [] }], ENVELOPE)).toBe(ENVELOPE);
 	});
 });

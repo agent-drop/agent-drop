@@ -18,9 +18,30 @@ function s3Url(env: Env, objectKey: string) {
 	return r2ObjectUrl(env, objectKey);
 }
 
-export const MULTIPART_CHUNK_BYTES = 50 * 1024 * 1024; // 50 MiB
+const MiB = 1024 * 1024;
+
+// Multipart init presigns every part up front, so the part COUNT is what bounds
+// the signing work, and it stays fixed. The part SIZE grows with the file
+// instead: 50 MiB until 100 of those no longer fit, then whatever whole number of
+// MiB makes 100 parts cover it. R2 caps a part at 5 GiB, which caps the file at
+// 100 x 5 GiB = 500 GiB (R2's own object ceiling, ~5 TiB, is never the limit).
+export const MIN_MULTIPART_PART_BYTES = 50 * MiB;
+export const MAX_MULTIPART_PART_BYTES = 5 * 1024 * MiB;
 export const MAX_MULTIPART_PARTS = 100;
-export const MAX_MULTIPART_BYTES = MULTIPART_CHUNK_BYTES * MAX_MULTIPART_PARTS;
+export const MAX_MULTIPART_BYTES = MAX_MULTIPART_PART_BYTES * MAX_MULTIPART_PARTS;
+
+/**
+ * The part size and count for a multipart upload of `fileSize` bytes, which must
+ * be a positive safe integer no larger than MAX_MULTIPART_BYTES.
+ *
+ * R2 requires every part except the last to be the SAME size, so the client
+ * must slice by exactly this `partSize` -- it is returned to it for that reason.
+ */
+export function planMultipart(fileSize: number): { partSize: number; partCount: number } {
+	const spread = Math.ceil(Math.ceil(fileSize / MAX_MULTIPART_PARTS) / MiB) * MiB;
+	const partSize = Math.max(MIN_MULTIPART_PART_BYTES, spread);
+	return { partSize, partCount: Math.ceil(fileSize / partSize) };
+}
 
 // POST /api/upload/presign - get presigned PUT URL for direct upload
 export async function handlePresign(
@@ -120,7 +141,7 @@ export async function handleMultipartInit(
 			{ status: 413 },
 		);
 	}
-	const totalParts = Math.ceil(body.fileSize / MULTIPART_CHUNK_BYTES);
+	const { partSize, partCount: totalParts } = planMultipart(body.fileSize);
 
 	const slugged = slugifyFilename(body.fileName);
 	const dropId = generateId();
@@ -192,7 +213,7 @@ export async function handleMultipartInit(
 		)
 		.run();
 
-	return Response.json({ dropId, uploadId, objectKey, parts });
+	return Response.json({ dropId, uploadId, objectKey, partSize, parts });
 }
 
 // POST /api/upload/complete - finalize multipart upload.
