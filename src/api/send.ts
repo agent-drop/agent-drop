@@ -205,7 +205,9 @@ async function resolveAttachment(
 		}
 		return {
 			attachment: {
-				filename: a.filename || basename(a.url),
+				// The parsed URL, not the raw string: `new URL()` drops CR/LF that
+				// the raw string still carries.
+				filename: a.filename || basename(url.pathname),
 				contentType:
 					a.contentType ||
 					r.headers.get("content-type")?.split(";")[0] ||
@@ -361,6 +363,10 @@ async function prepareEmail(
 				input,
 				MAX_ATTACHMENT_TOTAL_BYTES - totalBytes,
 			);
+			// Whatever the name came from -- the caller, R2 metadata, a URL -- it
+			// becomes a MIME header parameter. One check covers every source.
+			const nameError = validateHeaderValue("attachment filename", attachment.filename);
+			if (nameError) throw new AttachmentResolutionError(nameError);
 			resolved.push(attachment);
 			totalBytes += size;
 		}

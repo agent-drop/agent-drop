@@ -4,7 +4,13 @@ import type { Address } from "postal-mime";
 import type { Env, RelayQueueMessage } from "../types";
 import { hasHeaderControl, toEmailAttachment } from "./email-builder";
 import { generateId } from "./id";
-import { bareAddr, buildRawEmail, formatMailbox, sanitizeDisplayName } from "./mime";
+import {
+	bareAddr,
+	buildRawEmail,
+	formatMailbox,
+	sanitizeDisplayName,
+	singleLineHeader,
+} from "./mime";
 
 const RELAY_TOKEN_ALPHABET = "0123456789abcdefghjkmnpqrstvwxyz";
 const RELAY_TOKEN_CHARS = 26;
@@ -221,8 +227,10 @@ export async function forwardViaBinding(
 	opts: {
 		box: string;
 		to: string;
-		from: string; // original sender address
+		from: string; // original sender address, labels the From
 		fromName?: string | null;
+		/** Where a reply should go; defaults to `from`. */
+		replyTo?: string;
 		subject?: string | null;
 		textBody?: string;
 		htmlBody?: string;
@@ -254,9 +262,10 @@ export async function forwardViaBinding(
 			email: boxAddr,
 		},
 		to: opts.to,
-		subject: opts.subject || "(no subject)",
+		subject: singleLineHeader(opts.subject || "") || "(no subject)",
 	};
-	if (opts.from) builder.replyTo = opts.from;
+	const replyTo = opts.replyTo || opts.from;
+	if (replyTo) builder.replyTo = replyTo;
 	if (opts.textBody) builder.text = opts.textBody;
 	if (opts.htmlBody) builder.html = opts.htmlBody;
 	if (!builder.text && !builder.html) builder.text = "";

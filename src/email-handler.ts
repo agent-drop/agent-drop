@@ -251,7 +251,10 @@ export async function handleEmail(
 		await forwardViaBinding(env, {
 			box: inbox,
 			to,
-			from,
+			// The envelope is a bounce address for any ESP. Label the author from
+			// the From header, and reply where a mail client would.
+			from: pickSenderAddress([parsed.from], from),
+			replyTo: pickSenderAddress([parsed.replyTo, parsed.from], from),
 			fromName: parsed.from?.name || null,
 			subject: parsed.subject || null,
 			textBody: parsed.text || undefined,
