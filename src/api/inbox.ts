@@ -149,6 +149,27 @@ export async function handleInbox(
 		});
 	}
 
+	// GET /api/inbox/:name/:id/raw - the original message, email drops only.
+	// Its own route rather than file/raw.eml: the email handler stores it beside
+	// attachments/, not in it, and an attachment named raw.eml must not shadow it.
+	const rawMatch = subPath.match(/^\/([^/]+)\/raw$/);
+	if (rawMatch) {
+		const drop = await db
+			.prepare("SELECT raw_r2_key FROM drops WHERE id = ? AND inbox = ?")
+			.bind(rawMatch[1], inbox)
+			.first<{ raw_r2_key: string | null }>();
+		const obj = drop?.raw_r2_key ? await env.BUCKET.get(drop.raw_r2_key) : null;
+		if (!obj) {
+			return Response.json({ error: "no raw message for this drop" }, { status: 404 });
+		}
+		return new Response(obj.body, {
+			headers: {
+				"Content-Type": "message/rfc822",
+				"Content-Disposition": `attachment; filename="${rawMatch[1]}.eml"`,
+			},
+		});
+	}
+
 	// GET /api/inbox/:name/:id (single drop)
 	const idMatch = subPath.match(/^\/([^/]+)$/);
 	if (idMatch) {

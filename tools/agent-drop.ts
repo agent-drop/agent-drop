@@ -1339,7 +1339,7 @@ program
 				process.exit(1);
 			}
 
-			const res = await apiRaw(`/api/inbox/${inbox}/${dropId}/file/raw.eml`);
+			const res = await apiRaw(`/api/inbox/${inbox}/${dropId}/raw`);
 			const outPath = opts.output || `./${dropId}.eml`;
 			const buffer = await res.arrayBuffer();
 			await Bun.write(outPath, buffer);

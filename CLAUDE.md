@@ -187,6 +187,9 @@ curl $KEY https://frst.dev/api/inbox/{name}/{drop-id}/attachments
 # Download attachment
 curl $KEY https://frst.dev/api/inbox/{name}/{drop-id}/file/{filename}
 
+# Original message, unstripped (email drops only; 404 otherwise). CLI: drop raw
+curl $KEY https://frst.dev/api/inbox/{name}/{drop-id}/raw
+
 # Create a drop (API)
 curl -X POST $KEY -H "Content-Type: application/json" \
   -d '{"subject":"Test","text":"Hello","topic":"test"}' \
