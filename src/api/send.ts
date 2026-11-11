@@ -13,6 +13,13 @@ import { generateId } from "../lib/id";
 import { renderMarkdownEmail } from "../lib/markdown";
 import { renderBuilderPreview } from "../lib/mime";
 import { slugifyFilename } from "../lib/normalize";
+import {
+	MAX_ATTACHMENT_BYTES,
+	MAX_ATTACHMENT_TOTAL_BYTES,
+	MAX_ATTACHMENTS,
+	MAX_EMAIL_REQUEST_BYTES,
+	MAX_INLINE_ATTACHMENT_BYTES,
+} from "../lib/send-limits";
 import { r2ObjectUrl } from "../types";
 import type { Env } from "../types";
 
@@ -26,14 +33,13 @@ interface AttachmentInput {
 	cid?: string;
 }
 
-/** Keep decoded attachments comfortably below the binding's 25 MiB message cap. */
-export const MAX_ATTACHMENT_BYTES = 16 * 1024 * 1024;
-export const MAX_ATTACHMENT_TOTAL_BYTES = 16 * 1024 * 1024;
-export const MAX_ATTACHMENTS = 32;
-/** Inline JSON is intentionally smaller; the CLI already moves files above 1 MB through R2. */
-export const MAX_INLINE_ATTACHMENT_BYTES = 5 * 1024 * 1024;
-/** Enough for one max-size inline attachment after base64 expansion, plus JSON metadata. */
-export const MAX_EMAIL_REQUEST_BYTES = 8 * 1024 * 1024;
+export {
+	MAX_ATTACHMENT_BYTES,
+	MAX_ATTACHMENT_TOTAL_BYTES,
+	MAX_ATTACHMENTS,
+	MAX_EMAIL_REQUEST_BYTES,
+	MAX_INLINE_ATTACHMENT_BYTES,
+};
 const REMOTE_ATTACHMENT_TIMEOUT_MS = 15_000;
 
 class AttachmentResolutionError extends Error {

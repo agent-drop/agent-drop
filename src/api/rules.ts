@@ -1,3 +1,4 @@
+import { isBareAddress } from "../lib/relay";
 import type { Env } from "../types";
 
 /**
@@ -14,6 +15,19 @@ function payloadModeError(value: unknown): string | null {
 	return `payloadMode must be one of: ${PAYLOAD_MODES.join(", ")}`;
 }
 
+/**
+ * A relay rule's target is the mask owner: where relayed mail goes, and the one
+ * mailbox allowed to reply as the mask. That makes it exactly one bare address.
+ * A forward target stays free-form, since a comma list there is a feature.
+ * Returns the target to store, or the error to answer with.
+ */
+function relayTarget(target: string): { target: string } | { error: string } {
+	const trimmed = target.trim();
+	return isBareAddress(trimmed)
+		? { target: trimmed }
+		: { error: "relay target must be exactly one bare address, e.g. owner@example.org" };
+}
+
 export async function handleRules(request: Request, env: Env, url: URL): Promise<Response> {
 	const method = request.method;
 	const path = url.pathname;
@@ -22,7 +36,7 @@ export async function handleRules(request: Request, env: Env, url: URL): Promise
 	if (method === "POST" && path === "/api/rules") {
 		const body = (await request.json()) as {
 			pattern: string;
-			type: "forward" | "webhook";
+			type: "forward" | "webhook" | "relay";
 			scopes?: string;
 			target: string;
 			headers?: Record<string, string>;
@@ -41,6 +55,11 @@ export async function handleRules(request: Request, env: Env, url: URL): Promise
 		}
 		const badMode = payloadModeError(body.payloadMode);
 		if (badMode) return Response.json({ error: badMode }, { status: 400 });
+		if (body.type === "relay") {
+			const checked = relayTarget(body.target);
+			if ("error" in checked) return Response.json({ error: checked.error }, { status: 400 });
+			body.target = checked.target;
+		}
 
 		const id = crypto.randomUUID();
 		await env.DB.prepare(
@@ -95,6 +114,14 @@ export async function handleRules(request: Request, env: Env, url: URL): Promise
 			params.push(body.enabled ? 1 : 0);
 		}
 		if (body.target) {
+			const rule = await env.DB.prepare("SELECT type FROM drop_rules WHERE id = ?")
+				.bind(id)
+				.first<{ type: string }>();
+			if (rule?.type === "relay") {
+				const checked = relayTarget(body.target);
+				if ("error" in checked) return Response.json({ error: checked.error }, { status: 400 });
+				body.target = checked.target;
+			}
 			updates.push("target = ?");
 			params.push(body.target);
 		}

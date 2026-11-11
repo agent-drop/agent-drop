@@ -4,6 +4,7 @@ import type { Address } from "postal-mime";
 import type { Env, RelayQueueMessage } from "../types";
 import { hasHeaderControl, toEmailAttachment } from "./email-builder";
 import { generateId } from "./id";
+import type { SenderAuthResults } from "./mail-auth";
 import {
 	bareAddr,
 	buildRawEmail,
@@ -159,12 +160,50 @@ export async function findRelayRule(
 	return null;
 }
 
+/** Two bare addresses name the same mailbox, compared case-insensitively. */
+function sameAddress(a: string | null | undefined, b: string | null | undefined): boolean {
+	return !!a && !!b && a.trim().toLowerCase() === b.trim().toLowerCase();
+}
+
+/**
+ * Why a reply through a mask may NOT go out as the mask, or null when it may.
+ * `owner` is the mask's relay rule target, the only mailbox allowed to reply: a
+ * reply route is an address, and addresses leak, so holding one proves nothing.
+ *
+ * A From header naming the owner is accepted unless Cloudflare's DMARC verdict
+ * is an explicit `fail` (a forged From). A DMARC pass is not required, because
+ * the owner's domain may publish no record. An envelope naming the owner covers
+ * a provider alias whose From differs; but the envelope is the sender's to write
+ * and DMARC judges the From domain, not the envelope's, so the envelope counts
+ * only with Cloudflare's SPF pass for that very envelope.
+ *
+ * `auth` must be Cloudflare's own field (`firstSenderAuth`), never a later one.
+ */
+export function relayReplyRefusal(opts: {
+	owner: string;
+	headerFrom: string | undefined;
+	envelope: string;
+	auth: SenderAuthResults | null;
+}): string | null {
+	const owner = bareAddr(opts.owner);
+	const byHeader = sameAddress(opts.headerFrom, owner);
+	if (!byHeader && !sameAddress(opts.envelope, owner)) return "sender is not the mask owner";
+	if (opts.auth?.dmarc.some((entry) => entry.result === "fail")) {
+		return "dmarc=fail for the From header";
+	}
+	if (byHeader) return null;
+	const spfPass = opts.auth?.spf.some(
+		(entry) => entry.result === "pass" && sameAddress(entry.props["smtp.mailfrom"], opts.envelope),
+	);
+	return spfPass ? null : "owner envelope without an SPF pass for it";
+}
+
 // One `@` with something either side, and nothing that could reshape a header or
 // smuggle in a second recipient: no whitespace, no `<>`, no list or quoting
 // specials. Control characters are checked separately by hasHeaderControl.
 const BARE_ADDRESS = /^[^\s@<>()[\]\\,;:"]+@[^\s@<>()[\]\\,;:"]+$/;
 
-function isBareAddress(value: string | undefined): value is string {
+export function isBareAddress(value: string | undefined): value is string {
 	return !!value && BARE_ADDRESS.test(value) && !hasHeaderControl(value);
 }
 
@@ -202,16 +241,33 @@ const SENDER_LABEL_MAX = 64;
  * where the sender is the From header's name, or the address when there is none.
  * Both paths call this, so they cannot label a sender two different ways.
  *
- * The sender half is attacker-controlled and arrives already RFC 2047-decoded,
- * so it is sanitized and capped here. `via` is our own address, never input.
+ * `repliesTo` is where a reply will actually go. When it is not the sender's
+ * address the label says so, `<sender> (via <ours>, replies go to <address>)`:
+ * the owner of a mask only ever sees the opaque route, so a Reply-To pointing
+ * at a third party would otherwise redirect their answer unseen.
+ *
+ * The sender half and `repliesTo` are attacker-controlled and arrive already
+ * RFC 2047-decoded, so both are sanitized and capped here. `via` is our own
+ * address, never input.
  */
 export function viaDisplayName(
 	sender: { name?: string | null; address?: string | null },
 	via: string,
+	repliesTo?: string | null,
 ): string {
 	const who = sanitizeDisplayName(sender.name || "") || sanitizeDisplayName(sender.address || "");
 	const label = Array.from(who).slice(0, SENDER_LABEL_MAX).join("").trim();
-	return label ? `${label} (via ${via})` : `(via ${via})`;
+	let tail = `via ${via}`;
+	if (repliesTo && !sameAddress(repliesTo, sender.address)) {
+		// Cut from the front: the domain is what decides who receives the reply.
+		const target = Array.from(sanitizeDisplayName(repliesTo));
+		const shown =
+			target.length > SENDER_LABEL_MAX
+				? `...${target.slice(3 - SENDER_LABEL_MAX).join("")}`
+				: target.join("");
+		if (shown) tail += `, replies go to ${shown}`;
+	}
+	return label ? `${label} (${tail})` : `(${tail})`;
 }
 
 // Forward a received email to `to` via the Cloudflare Email Sending binding.

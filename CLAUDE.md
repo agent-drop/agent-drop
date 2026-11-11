@@ -542,9 +542,13 @@ the HTML a browser needs:
 - Raw HTML in the source passes through, as markdown says it must. That grants nothing new:
   the same key can post arbitrary `html` directly.
 
-**Attachment transport:** local files <1MB ride inline as base64; files >1MB (or any with
-`--upload`) are presigned + PUT to R2 (`outbound/temp/{box}/`) and pulled by the Worker at send
-time; the Worker only pulls keys under the sending box's own prefix. URLs are fetched
+**Attachment transport:** local files up to 1 MB ride inline as base64, smallest first, only
+while the whole JSON request (body included) stays under a 7 MiB budget, since base64 inflates
+by 4/3 and the Worker refuses 8 MiB; every other local file (all of them with `--upload`) is
+presigned + PUT to R2 (`outbound/temp/{box}/`) and pulled by the Worker at send time, and a send
+whose local files or body already break the limits below is refused before any upload
+(`tools/lib/attachment-plan.ts`; URL sizes are unknown until the Worker fetches them). The Worker
+only pulls keys under the sending box's own prefix. URLs are fetched
 server-side over HTTP(S) with a 15 second timeout. The Worker accepts an 8 MiB JSON request
 body, at most 32 attachments, 5 MiB per inline base64 attachment, and 16 MiB of decoded
 attachment data in total, leaving room below Cloudflare's 25 MiB assembled-message cap; the
@@ -991,6 +995,14 @@ A `reply+<token>` that does not resolve (unknown token, disabled or deleted mask
 is rejected at SMTP with `Invalid relay reply address`; it never falls through to
 become an ordinary inbox drop.
 
+Only the mask's owner, its relay rule `target`, may reply (`relayReplyRefusal`):
+the header From must be that address unless Cloudflare's first
+`Authentication-Results` says `dmarc=fail` (a pass is not required), or the
+envelope must be, with Cloudflare's `spf=pass` for that envelope. Anything else,
+or a mask with no relay rule left, is rejected with the same reason. When the
+route's sender is not the From address, the relayed display name says so:
+`Pat (via j-7k9m@frst.dev, replies go to other@example.net)`.
+
 Pre-token `_at_` reply addresses are forgeable and rejected by default. An
 existing deployment may set `RELAY_LEGACY_REPLY_UNTIL` to a short absolute
 ISO-8601 cutoff for a bounded migration. Never enable it on a new deployment.
@@ -1007,6 +1019,13 @@ drop mask-create --id j-dating --label "dating"     # j-dating@frst.dev
 
 # 3. Share the mask address: j-7k9m@frst.dev
 ```
+
+The relay target is the mask **owner**: where relayed mail goes, and the only
+mailbox allowed to reply as the mask. So it is exactly one bare address.
+`POST /api/rules` and `PATCH /api/rules/:id` answer `400` for a list, a
+display-name form or anything else on a relay rule (a forward rule's comma list
+is unaffected). `rule-add` takes one of `--forward`, `--webhook` or `--relay`;
+two at once is an error.
 
 ### Mask Management
 

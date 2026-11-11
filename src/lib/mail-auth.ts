@@ -142,6 +142,18 @@ function parseResult(clause: string): AuthResult | null {
 }
 
 /**
+ * Cloudflare's verdict on a parsed message: the FIRST physical
+ * Authentication-Results field, the one Email Routing prepends. Any later field
+ * was written by the sender and proves nothing. `headers` is postal-mime's
+ * `parsed.headers`, which keeps the order the fields arrived in.
+ */
+export function firstSenderAuth(
+	headers: readonly { key: string; value: string }[],
+): SenderAuthResults | null {
+	return parseSenderAuth(headers.find((header) => header.key === "authentication-results")?.value);
+}
+
+/**
  * Parse one physical Authentication-Results field from Cloudflare.
  *
  * The caller must supply the first physical field, which Cloudflare prepends
