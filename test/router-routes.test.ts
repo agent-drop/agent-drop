@@ -642,6 +642,43 @@ describe("presigned upload routes", () => {
 		);
 	});
 
+	// Regression: every part URL was signed for a flat 3600 s. The SPA starts the
+	// last parts last, so a big file on a slow link outlived its own URLs.
+	test("POST /api/upload/multipart/:name signs part URLs for as long as the file needs", async () => {
+		const env = makeEnv();
+		await seedApiKey(env, "ad_writer", { permissions: "write" });
+		globalThis.fetch = (async () =>
+			new Response(
+				"<InitiateMultipartUploadResult><UploadId>up-ttl</UploadId></InitiateMultipartUploadResult>",
+			)) as unknown as typeof fetch;
+
+		const init = async (fileSize: number) => {
+			const before = Date.now();
+			const res = await send(
+				env,
+				"POST",
+				"/api/upload/multipart/lisa",
+				{ Authorization: "Bearer ad_writer" },
+				{ fileName: "big.bin", fileSize },
+			);
+			expect(res.status).toBe(200);
+			const body = (await res.json()) as { expiresAt: number; parts: { url: string }[] };
+			const ttls = new Set(body.parts.map((p) => new URL(p.url).searchParams.get("X-Amz-Expires")));
+			return { before, after: Date.now(), expiresAt: body.expiresAt, ttls };
+		};
+
+		// 6 GiB at the 1 MiB/s floor is 6144 s, on every URL, and the response says when.
+		const big = await init(6 * 1024 * 1024 * 1024);
+		expect([...big.ttls]).toEqual(["6144"]);
+		expect(big.expiresAt).toBeGreaterThanOrEqual(big.before + 6144_000);
+		expect(big.expiresAt).toBeLessThanOrEqual(big.after + 6144_000);
+
+		// Below 3.5 GiB nothing changes: still the hour it always had.
+		const small = await init(700 * 1024 * 1024);
+		expect([...small.ttls]).toEqual(["3600"]);
+		expect(small.expiresAt).toBeLessThanOrEqual(small.after + 3600_000);
+	});
+
 	test("POST /api/upload/multipart/:name rejects invalid sizes before calling R2", async () => {
 		const env = makeEnv();
 		await seedApiKey(env, "ad_writer", { permissions: "write" });

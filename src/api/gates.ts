@@ -218,7 +218,7 @@ export function asFinalizer(
 		}
 
 		const drop = await scope.env.DB.prepare(
-			"SELECT id, inbox, r2_prefix, object_key, subject, status FROM drops WHERE id = ?",
+			"SELECT id, inbox, r2_prefix, object_key, subject, status, metadata FROM drops WHERE id = ?",
 		)
 			.bind(body.dropId)
 			.first<FinalizeDrop>();

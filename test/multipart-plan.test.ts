@@ -3,8 +3,12 @@ import {
 	MAX_MULTIPART_BYTES,
 	MAX_MULTIPART_PART_BYTES,
 	MAX_MULTIPART_PARTS,
+	MAX_PART_URL_TTL_SECONDS,
 	MIN_MULTIPART_PART_BYTES,
+	MIN_PART_URL_TTL_SECONDS,
+	partUrlTtlSeconds,
 	planMultipart,
+	UPLOAD_THROUGHPUT_FLOOR,
 } from "../src/api/upload";
 
 const MiB = 1024 * 1024;
@@ -61,5 +65,38 @@ describe("planMultipart", () => {
 			partSize: 5 * GiB,
 			partCount: 100,
 		});
+	});
+});
+
+// Every part URL is signed at init and the last one is used last, so a flat
+// one-hour expiry failed any upload slower than (file size / 1 h) -- a 50 GiB
+// file needed a sustained 14 MiB/s. The lifetime now covers the whole file at a
+// deliberately slow link, inside the window SigV4 allows a presigned URL.
+describe("partUrlTtlSeconds", () => {
+	test("covers the whole file at the throughput floor", () => {
+		expect(UPLOAD_THROUGHPUT_FLOOR).toBe(MiB);
+		expect(partUrlTtlSeconds(10 * GiB)).toBe(10 * 1024);
+		expect(partUrlTtlSeconds(100 * GiB + 1)).toBe(100 * 1024 + 1);
+	});
+
+	test("never drops below the hour every URL used to get", () => {
+		expect(MIN_PART_URL_TTL_SECONDS).toBe(3600);
+		expect(partUrlTtlSeconds(1)).toBe(3600);
+		expect(partUrlTtlSeconds(95 * MiB)).toBe(3600);
+		expect(partUrlTtlSeconds(3600 * MiB)).toBe(3600);
+		expect(partUrlTtlSeconds(3600 * MiB + 1)).toBe(3601);
+	});
+
+	test("never exceeds the 7-day SigV4 presign ceiling", () => {
+		expect(MAX_PART_URL_TTL_SECONDS).toBe(604800);
+		expect(partUrlTtlSeconds(MAX_PART_URL_TTL_SECONDS * MiB)).toBe(604800);
+		expect(partUrlTtlSeconds(1024 * GiB)).toBe(604800);
+	});
+
+	test("the largest accepted file still fits the window at the floor", () => {
+		// 500 GiB at 1 MiB/s is 5.9 days, so today's ceiling is never clamped.
+		// If MAX_MULTIPART_BYTES grows past 590 GiB this starts failing on purpose:
+		// the floor would then be a promise the URLs cannot keep.
+		expect(partUrlTtlSeconds(MAX_MULTIPART_BYTES)).toBeLessThan(MAX_PART_URL_TTL_SECONDS);
 	});
 });

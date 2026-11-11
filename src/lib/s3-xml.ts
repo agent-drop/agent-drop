@@ -17,6 +17,8 @@ export interface UploadPart {
 	partNumber: number;
 	/** The ETag exactly as S3 meant it, entity references resolved. */
 	etag: string;
+	/** Bytes in the part, from `<Size>`. Absent when R2 did not say -- never guessed. */
+	size?: number;
 }
 
 function root(xml: string, expected: string) {
@@ -44,7 +46,8 @@ export function readUploadId(xml: string): string | null {
  *
  * A `<Part>` missing either field, or carrying a part number that is not a
  * positive integer, is dropped rather than guessed at -- completing an upload
- * with a wrong ETag corrupts the object silently.
+ * with a wrong ETag corrupts the object silently. A missing or unusable
+ * `<Size>` only leaves `size` unset: the part is real, its size is unknown.
  */
 export function readListedParts(xml: string): UploadPart[] {
 	const node = root(xml, "ListPartsResult");
@@ -55,7 +58,11 @@ export function readListedParts(xml: string): UploadPart[] {
 		const partNumber = Number(childText(part, "PartNumber")?.trim());
 		const etag = childText(part, "ETag")?.trim();
 		if (!Number.isInteger(partNumber) || partNumber < 1 || !etag) continue;
-		parts.push({ partNumber, etag });
+		const sizeText = childText(part, "Size")?.trim();
+		const size = sizeText ? Number(sizeText) : Number.NaN;
+		parts.push(
+			Number.isSafeInteger(size) && size >= 0 ? { partNumber, etag, size } : { partNumber, etag },
+		);
 	}
 	return parts.sort((a, b) => a.partNumber - b.partNumber);
 }

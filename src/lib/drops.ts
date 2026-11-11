@@ -12,6 +12,8 @@ export interface FinalizeDrop {
 	object_key: string | null;
 	subject: string | null;
 	status: string;
+	/** The row's JSON metadata; multipart init records its plan in it. */
+	metadata: string | null;
 }
 
 /**
@@ -29,7 +31,9 @@ export interface FinalizeDrop {
  * cron reaper needs it too, and `lib/` importing from `api/` was the wrong
  * direction.
  */
-export function resolveObjectKey(drop: FinalizeDrop): string | null {
+export function resolveObjectKey(
+	drop: Pick<FinalizeDrop, "object_key" | "r2_prefix" | "subject">,
+): string | null {
 	if (drop.object_key) return drop.object_key;
 	// Rows written before migration 0008 -- an upload already in flight across the
 	// deploy -- carry no key. Rebuild it the way presign built it, still without

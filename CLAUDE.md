@@ -270,7 +270,9 @@ curl -X POST $KEY -H "Content-Type: application/json" \
 
 ### Presigned R2 upload endpoints (require API key or drop token)
 
-The inbox is in the **path**, not the body, and every field is camelCase.
+The inbox is in the **path**, not the body, and every field is camelCase. Both
+init routes cap the JSON body at 16 KiB (413) and answer 400 for malformed JSON
+or a non-string `fileName`/`contentType`/`topic`.
 
 ```bash
 # Presigned PUT for a direct-to-R2 upload (small files, single-part).
@@ -287,14 +289,21 @@ curl -X POST $KEY -H "Content-Type: application/json" \
 # returned as `partSize`. Slice by EXACTLY that value -- R2 requires every part
 # but the last to be the same size. fileSize must be a positive
 # integer, at most 100 x 5 GiB (R2's max part size) = 500 GiB, else 400 / 413.
+# Every part URL lives for fileSize at 1 MiB/s, clamped to 1 h .. 7 days (SigV4's
+# presign ceiling); `expiresAt` (ms since epoch) is when they all stop working.
+# Init records the plan on the row as metadata.multipart_plan.
 curl -X POST $KEY -H "Content-Type: application/json" \
   -d '{"fileName":"big.zip","contentType":"application/zip","fileSize":734003200}' \
   https://frst.dev/api/upload/multipart/{name}
 # Returns: {"dropId":"...","uploadId":"...","objectKey":"...","partSize":52428800,
-#           "parts":[{"partNumber":1,"url":"https://...r2..."},...]}
+#           "parts":[{"partNumber":1,"url":"https://...r2..."},...],"expiresAt":...}
 
 # Complete a multipart upload. dropId and uploadId ONLY -- the worker lists the
-# parts from R2 itself and derives the object key from the drop row.
+# parts from R2 itself and derives the object key from the drop row. Unless R2
+# holds exactly parts 1..N summing to the planned fileSize it answers 409 with
+# missingParts/receivedBytes and completes nothing; nothing is aborted, so upload
+# the missing parts and call it again. Rows from before plans were recorded skip
+# the check.
 curl -X POST $KEY -H "Content-Type: application/json" \
   -d '{"dropId":"...","uploadId":"..."}' \
   https://frst.dev/api/upload/complete

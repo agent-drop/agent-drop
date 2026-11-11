@@ -139,9 +139,23 @@ describe("readListedParts", () => {
 			`),
 		);
 		expect(parts).toEqual([
-			{ partNumber: 1, etag: '"aaa"' },
-			{ partNumber: 2, etag: '"bbb"' },
+			{ partNumber: 1, etag: '"aaa"', size: 5 },
+			{ partNumber: 2, etag: '"bbb"', size: 5 },
 		]);
+	});
+
+	test("a missing or unusable <Size> leaves the size unknown, never zero", () => {
+		// Complete sums these against the planned file size. A size guessed as 0
+		// would make a short upload look shorter, not unknown.
+		const parts = readListedParts(
+			listing(`
+				<Part><PartNumber>1</PartNumber><ETag>&quot;a&quot;</ETag></Part>
+				<Part><PartNumber>2</PartNumber><ETag>&quot;b&quot;</ETag><Size>-1</Size></Part>
+				<Part><PartNumber>3</PartNumber><ETag>&quot;c&quot;</ETag><Size>x</Size></Part>
+				<Part><PartNumber>4</PartNumber><ETag>&quot;d&quot;</ETag><Size> 0 </Size></Part>
+			`),
+		);
+		expect(parts.map((p) => p.size)).toEqual([undefined, undefined, undefined, 0]);
 	});
 
 	test("handles ETag before PartNumber", () => {
