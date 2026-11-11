@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { handleEmail } from "../src/email-handler";
 import {
+	type AuthResult,
 	CLOUDFLARE_AUTH_SERVICE,
 	parseSenderAuth,
 	type SenderAuthResults,
@@ -14,14 +15,69 @@ const CLOUDFLARE_HEADER =
 
 const PASS: SenderAuthResults = {
 	authserv: CLOUDFLARE_AUTH_SERVICE,
-	spf: ["pass"],
-	dkim: ["pass"],
-	dmarc: ["none"],
+	spf: [{ result: "pass", props: { "smtp.mailfrom": "sender@example.com" } }],
+	dkim: [{ result: "pass", props: { "header.d": "example.com", "header.s": "mail" } }],
+	dmarc: [{ result: "none", props: { "header.from": "example.com", "policy.dmarc": "none" } }],
 };
+
+const MAILFROM =
+	"prod-mta-06.86fed9dcd6ce47d88eb4faa636d7c610.1a1c74443af000a63e@swg.mail.modelalert.ai";
+
+// Verbatim from a production message, folds included. Two SPF results: the
+// first is the HELO check, the second the MAIL FROM check.
+const PRODUCTION_HEADER = [
+	"mx.cloudflare.net;",
+	"\tdkim=pass header.d=mail.modelalert.ai header.s=selector1 header.b=XjV4oj8Y;",
+	"\tdmarc=pass header.from=mail.modelalert.ai policy.dmarc=quarantine;",
+	"\tspf=none (mx.cloudflare.net: no SPF records found for postmaster@prod-mta-06-05.swg-srv.net) smtp.helo=prod-mta-06-05.swg-srv.net;",
+	`\tspf=pass (mx.cloudflare.net: domain of ${MAILFROM} designates 185.255.28.41 as permitted sender) smtp.mailfrom=${MAILFROM};`,
+	"\tarc=none smtp.remote-ip=185.255.28.41",
+].join("\r\n");
+
+const PRODUCTION: SenderAuthResults = {
+	authserv: CLOUDFLARE_AUTH_SERVICE,
+	spf: [
+		{ result: "none", props: { "smtp.helo": "prod-mta-06-05.swg-srv.net" } },
+		{ result: "pass", props: { "smtp.mailfrom": MAILFROM } },
+	],
+	dkim: [
+		{
+			result: "pass",
+			props: { "header.d": "mail.modelalert.ai", "header.s": "selector1", "header.b": "XjV4oj8Y" },
+		},
+	],
+	dmarc: [
+		{
+			result: "pass",
+			props: { "header.from": "mail.modelalert.ai", "policy.dmarc": "quarantine" },
+		},
+	],
+};
+
+const bare = (result: string): AuthResult => ({ result, props: {} });
 
 describe("parseSenderAuth", () => {
 	test("records a captured Cloudflare-shaped field", () => {
 		expect(parseSenderAuth(CLOUDFLARE_HEADER)).toEqual(PASS);
+	});
+
+	test("parses a production field with the identity of every result attached", () => {
+		expect(parseSenderAuth(PRODUCTION_HEADER)).toEqual(PRODUCTION);
+	});
+
+	test("tells the MAIL FROM SPF result apart from the HELO one", () => {
+		const auth = parseSenderAuth(PRODUCTION_HEADER);
+		const spfFor = (prop: string) =>
+			auth?.spf.filter((entry) => prop in entry.props).map((entry) => entry.result);
+
+		expect(spfFor("smtp.mailfrom")).toEqual(["pass"]);
+		expect(spfFor("smtp.helo")).toEqual(["none"]);
+		expect(auth?.dkim.map((entry) => [entry.result, entry.props["header.d"]])).toEqual([
+			["pass", "mail.modelalert.ai"],
+		]);
+		expect(auth?.dmarc.map((entry) => [entry.result, entry.props["header.from"]])).toEqual([
+			["pass", "mail.modelalert.ai"],
+		]);
 	});
 
 	test("accepts result and Authentication-Results versions", () => {
@@ -29,9 +85,9 @@ describe("parseSenderAuth", () => {
 			parseSenderAuth("mx.cloudflare.net 1; spf / 1 = softfail; dkim=temperror; dmarc = permerror"),
 		).toEqual({
 			authserv: CLOUDFLARE_AUTH_SERVICE,
-			spf: ["softfail"],
-			dkim: ["temperror"],
-			dmarc: ["permerror"],
+			spf: [bare("softfail")],
+			dkim: [bare("temperror")],
+			dmarc: [bare("permerror")],
 		});
 	});
 
@@ -43,7 +99,10 @@ describe("parseSenderAuth", () => {
 		).toEqual({
 			authserv: CLOUDFLARE_AUTH_SERVICE,
 			spf: [],
-			dkim: ["pass", "fail"],
+			dkim: [
+				{ result: "pass", props: { "header.d": "a.example" } },
+				{ result: "fail", props: { "header.d": "b.example" } },
+			],
 			dmarc: [],
 		});
 	});
@@ -53,9 +112,65 @@ describe("parseSenderAuth", () => {
 			'mx.cloudflare.net; spf=fail (sender=x; dmarc=pass); dkim=fail reason="x; dmarc=pass"; dmarc=fail';
 		expect(parseSenderAuth(header)).toEqual({
 			authserv: CLOUDFLARE_AUTH_SERVICE,
-			spf: ["fail"],
-			dkim: ["fail"],
-			dmarc: ["fail"],
+			spf: [bare("fail")],
+			dkim: [{ result: "fail", reason: "x; dmarc=pass", props: {} }],
+			dmarc: [bare("fail")],
+		});
+	});
+
+	test("does not let a comment or quoted value manufacture a property", () => {
+		const header =
+			"mx.cloudflare.net; spf=fail (smtp.mailfrom=forged@example.com) smtp.helo=relay.example; " +
+			'dkim=fail reason="header.d=forged.example" header.d=real.example; ' +
+			'dmarc=fail header.from="real.example policy.dmarc=none"';
+		expect(parseSenderAuth(header)).toEqual({
+			authserv: CLOUDFLARE_AUTH_SERVICE,
+			spf: [{ result: "fail", props: { "smtp.helo": "relay.example" } }],
+			dkim: [
+				{
+					result: "fail",
+					reason: "header.d=forged.example",
+					props: { "header.d": "real.example" },
+				},
+			],
+			dmarc: [{ result: "fail", props: { "header.from": "real.example policy.dmarc=none" } }],
+		});
+	});
+
+	test("unquotes a quoted value and keeps a quoted local-part verbatim", () => {
+		const header =
+			'mx.cloudflare.net; dmarc=pass header.from="example.com"; ' +
+			'spf=pass smtp.mailfrom="first last"@example.com; ' +
+			'dkim=pass header.d="a\\"b.example"';
+		expect(parseSenderAuth(header)).toEqual({
+			authserv: CLOUDFLARE_AUTH_SERVICE,
+			spf: [{ result: "pass", props: { "smtp.mailfrom": '"first last"@example.com' } }],
+			dkim: [{ result: "pass", props: { "header.d": 'a"b.example' } }],
+			dmarc: [{ result: "pass", props: { "header.from": "example.com" } }],
+		});
+	});
+
+	test("reads a comment as a separator between tokens, never as glue", () => {
+		expect(
+			parseSenderAuth(
+				"mx.cloudflare.net; spf=pass(x)smtp.mailfrom=a@example.com(y)smtp.helo=h.example",
+			),
+		).toEqual({
+			authserv: CLOUDFLARE_AUTH_SERVICE,
+			spf: [
+				{ result: "pass", props: { "smtp.mailfrom": "a@example.com", "smtp.helo": "h.example" } },
+			],
+			dkim: [],
+			dmarc: [],
+		});
+	});
+
+	test("accepts whitespace around the property dot and equals sign", () => {
+		expect(parseSenderAuth("mx.cloudflare.net; spf=pass SMTP . MailFrom = a@example.com")).toEqual({
+			authserv: CLOUDFLARE_AUTH_SERVICE,
+			spf: [{ result: "pass", props: { "smtp.mailfrom": "a@example.com" } }],
+			dkim: [],
+			dmarc: [],
 		});
 	});
 
@@ -71,6 +186,14 @@ describe("parseSenderAuth", () => {
 		["unclosed quote", 'mx.cloudflare.net; spf=pass reason="not closed'],
 		["unexpected close", "mx.cloudflare.net; spf=pass )"],
 		["malformed known result", "mx.cloudflare.net; spf==pass"],
+		["comment inside a result", "mx.cloudflare.net; dkim=pa(x)ss"],
+		["comment inside the authserv-id", "mx.cloud(x)flare.net; dmarc=pass"],
+		["bare word after a result", "mx.cloudflare.net; spf=pass mailfrom"],
+		["property without a value", "mx.cloudflare.net; spf=pass smtp.mailfrom="],
+		["property without a ptype", "mx.cloudflare.net; spf=pass .mailfrom=a@example.com"],
+		["repeated property", "mx.cloudflare.net; dkim=pass header.d=a.example header.d=b.example"],
+		["repeated reason", "mx.cloudflare.net; dkim=fail reason=a reason=b"],
+		["quoted value glued to the next token", 'mx.cloudflare.net; dmarc=pass header.from="a"x=y'],
 		["oversized", `mx.cloudflare.net; dmarc=pass ${"x".repeat(16_384)}`],
 	])("fails %s closed without throwing", (_case, header) => {
 		expect(parseSenderAuth(header)).toBeNull();
@@ -101,7 +224,9 @@ function inboundMessage(options: InboundOptions = {}): ForwardableEmailMessage {
 	].join("\r\n");
 	const headers = new Headers({ "message-id": "<auth-test@example.com>" });
 	for (const value of options.authResults ?? []) {
-		headers.append("authentication-results", value);
+		// Fetch Headers reject CR/LF, so this copy is unfolded. The raw MIME
+		// above keeps the folds, and that is what the handler parses.
+		headers.append("authentication-results", value.replace(/\r\n(?=[ \t])/g, ""));
 	}
 
 	return {
@@ -150,10 +275,15 @@ describe("inbound drop metadata", () => {
 		});
 		expect(drop.metadata.sender_auth).toEqual({
 			authserv: CLOUDFLARE_AUTH_SERVICE,
-			spf: ["fail"],
-			dkim: ["fail"],
-			dmarc: ["fail"],
+			spf: [bare("fail")],
+			dkim: [bare("fail")],
+			dmarc: [bare("fail")],
 		});
+	});
+
+	test("stores the production field with every identity through the MIME parser", async () => {
+		const drop = await storedDrop({ authResults: [PRODUCTION_HEADER] });
+		expect(drop.metadata.sender_auth).toEqual(PRODUCTION);
 	});
 
 	test("does not skip an untrusted first field for a trusted-looking later field", async () => {

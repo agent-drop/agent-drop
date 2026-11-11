@@ -339,7 +339,7 @@ Every drop records:
 | `from_name` | Sender name (email only) |
 | `from_header` | First RFC 5322 From header; unlike `from_addr`, this is not the envelope sender (email only) |
 | `message_id` | Email Message-ID header (email only) |
-| `sender_auth` | Trusted Cloudflare SPF, DKIM, and DMARC verdicts, or `null` (email only) |
+| `sender_auth` | Trusted Cloudflare SPF, DKIM, and DMARC verdicts, each with the identity it checked, or `null` (email only) |
 
 Stored as JSON in the `metadata` column.
 
@@ -352,6 +352,7 @@ Inbound emails are processed by `email-handler.ts`:
 - Attachments extracted and stored in R2 under `{drop-id}/attachments/`
 - `from_name`, `from_header`, and `message_id` captured in drop metadata
 - `sender_auth` records the first `Authentication-Results` field only when its authentication service is exactly `mx.cloudflare.net`; missing, malformed, or untrusted results become `null`
+- `spf`, `dkim` and `dmarc` are each a list of `{ result, reason?, props }` in field order. `props` holds the RFC 8601 `ptype.property=value` pairs, keyed `smtp.mailfrom`, `smtp.helo`, `header.d`, `header.from`, `policy.dmarc` and so on. Select by property, never by position: Cloudflare reports HELO and MAIL FROM SPF as two separate results, and `spf[0]` can be the HELO one
 
 ## Inbox Name Normalization
 
@@ -686,9 +687,12 @@ Webhooks POST JSON to the target URL. A **drop** publishes `drop.created`:
       "message_id": "<abc123@mail.example.com>",
       "sender_auth": {
         "authserv": "mx.cloudflare.net",
-        "spf": ["pass"],
-        "dkim": ["pass"],
-        "dmarc": ["pass"]
+        "spf": [
+          { "result": "none", "props": { "smtp.helo": "mta1.example.com" } },
+          { "result": "pass", "props": { "smtp.mailfrom": "bounce@example.com" } }
+        ],
+        "dkim": [{ "result": "pass", "props": { "header.d": "example.com", "header.s": "s1" } }],
+        "dmarc": [{ "result": "pass", "props": { "header.from": "example.com", "policy.dmarc": "reject" } }]
       }
     },
     "created_at": 1775112960019
