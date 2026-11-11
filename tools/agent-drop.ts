@@ -9,6 +9,11 @@
 import { Command } from "commander";
 import { formatOutput, addCommonOptions, createLogger, outputFlag } from "./lib/cli-utils";
 import { signRequest } from "./lib/hook-sign";
+import {
+	attachmentLimitError,
+	jsonByteLength,
+	planAttachmentTransport,
+} from "./lib/attachment-plan";
 import { emitEvents } from "./lib/queue-emit";
 import { previewRule } from "./lib/rule-preview";
 import { lookupSecret, type SecretLookup, setSecretHint } from "./lib/secrets";
@@ -535,8 +540,6 @@ async function cmdKeyCreate(name: string, options: any) {
 // send-email
 // ============================================================================
 
-const UPLOAD_THRESHOLD = 1_000_000; // 1MB: above this, local files go via R2
-
 const CONTENT_TYPES: Record<string, string> = {
 	".pdf": "application/pdf",
 	".png": "image/png",
@@ -663,8 +666,11 @@ async function cmdSendEmail(opts: any) {
 		? opts.attach
 		: toArray(tpl.attach ?? tpl.attachments);
 
-	// Resolve each attachment: URL -> reference, small local -> base64, big/forced -> R2
+	// Resolve each spec WITHOUT moving any bytes: a URL becomes a reference, a local
+	// file an entry carrying only its metadata. How each file travels is decided
+	// below, over the whole request, before anything is uploaded.
 	const attachments: any[] = [];
+	const locals: { entry: any; filePath: string; size: number }[] = [];
 	for (const raw of specs) {
 		const { cid, source } = parseAttachSpec(String(raw));
 		const inline = !!cid;
@@ -676,31 +682,12 @@ async function cmdSendEmail(opts: any) {
 
 		const filePath = path.resolve(source);
 		if (!fs.existsSync(filePath)) throw new Error(`attachment not found: ${source}`);
-		const size = fs.statSync(filePath).size;
+		const stat = fs.statSync(filePath);
+		if (!stat.isFile()) throw new Error(`attachment is not a file: ${source}`);
 		const filename = path.basename(filePath);
-		const contentType = guessContentType(filename);
-
-		if (opts.upload || size > UPLOAD_THRESHOLD) {
-			const pre = await api(`/api/send/presign/${encodeURIComponent(drop)}`, {
-				method: "POST",
-				body: { fileName: filename, contentType },
-			});
-			const put = await fetch(pre.uploadUrl, {
-				method: "PUT",
-				headers: { "Content-Type": contentType },
-				body: fs.readFileSync(filePath),
-			});
-			if (!put.ok) throw new Error(`R2 upload failed (${put.status}) for ${filename}`);
-			attachments.push({ r2Key: pre.r2Key, filename, contentType, cid, inline });
-		} else {
-			attachments.push({
-				dataBase64: fs.readFileSync(filePath).toString("base64"),
-				filename,
-				contentType,
-				cid,
-				inline,
-			});
-		}
+		const entry: any = { filename, contentType: guessContentType(filename), cid, inline };
+		attachments.push(entry);
+		locals.push({ entry, filePath, size: stat.size });
 	}
 
 	const payload: any = { to, cc, bcc, subject };
@@ -713,6 +700,38 @@ async function cmdSendEmail(opts: any) {
 	if (markdown != null) payload.markdown = markdown;
 	if (attachments.length) payload.attachments = attachments;
 	if (opts.deleteAfterSend) payload.deleteAfterSend = true;
+
+	// The worker caps the JSON request at 8 MiB and base64 inflates by 4/3, so
+	// small files ride inline only while the whole request fits. `payload` is
+	// measured now, entries still bare, so the body spends the same budget.
+	const plan = planAttachmentTransport(
+		locals.map((l) => l.size),
+		{ baseBytes: jsonByteLength(payload), forceUpload: !!opts.upload },
+	);
+	const limitError = attachmentLimitError({
+		count: attachments.length,
+		localBytes: locals.reduce((sum, l) => sum + l.size, 0),
+		requestBytes: plan.requestBytes,
+	});
+	if (limitError) throw new Error(limitError);
+
+	for (const [i, { entry, filePath }] of locals.entries()) {
+		if (plan.transports[i] === "inline") {
+			entry.dataBase64 = fs.readFileSync(filePath).toString("base64");
+			continue;
+		}
+		const pre = await api(`/api/send/presign/${encodeURIComponent(drop)}`, {
+			method: "POST",
+			body: { fileName: entry.filename, contentType: entry.contentType },
+		});
+		const put = await fetch(pre.uploadUrl, {
+			method: "PUT",
+			headers: { "Content-Type": entry.contentType },
+			body: fs.readFileSync(filePath),
+		});
+		if (!put.ok) throw new Error(`R2 upload failed (${put.status}) for ${entry.filename}`);
+		entry.r2Key = pre.r2Key;
+	}
 
 	// --dry-run / --compose: hit /api/compose, which assembles the EXACT same MIME
 	// as /api/send but returns the raw RFC822 .eml and never calls SES. Nothing is sent.
@@ -1210,13 +1229,7 @@ program
 				if (files.files?.length > 0) {
 					console.log(chalk.bold(`\n  Files:`));
 					for (const f of files.files) {
-						const size =
-							f.size < 1024
-								? `${f.size}B`
-								: f.size < 1024 * 1024
-									? `${(f.size / 1024).toFixed(0)}KB`
-									: `${(f.size / (1024 * 1024)).toFixed(1)}MB`;
-						console.log(`    ${chalk.cyan(f.filename)}  ${chalk.dim(size)}`);
+						console.log(`    ${chalk.cyan(f.filename)}  ${chalk.dim(fmtBytes(f.size))}`);
 					}
 				}
 			} catch {}
@@ -1286,14 +1299,8 @@ program
 
 			console.log(chalk.bold(`\n  Files in ${chalk.cyan(dropId)}:\n`));
 			for (const f of files) {
-				const size =
-					f.size < 1024
-						? `${f.size}B`
-						: f.size < 1024 * 1024
-							? `${(f.size / 1024).toFixed(0)}KB`
-							: `${(f.size / (1024 * 1024)).toFixed(1)}MB`;
 				console.log(
-					`  ${chalk.cyan(f.filename.padEnd(40))} ${chalk.dim(size.padStart(8))}  ${chalk.dim(f.uploaded)}`,
+					`  ${chalk.cyan(f.filename.padEnd(40))} ${chalk.dim(fmtBytes(f.size).padStart(8))}  ${chalk.dim(f.uploaded)}`,
 				);
 			}
 			console.log("");
@@ -1316,13 +1323,7 @@ program
 			const outPath = outputFlag(opts, program) || `./${filename}`;
 			const buffer = await res.arrayBuffer();
 			await Bun.write(outPath, buffer);
-			const size =
-				buffer.byteLength < 1024
-					? `${buffer.byteLength}B`
-					: buffer.byteLength < 1024 * 1024
-						? `${(buffer.byteLength / 1024).toFixed(0)}KB`
-						: `${(buffer.byteLength / (1024 * 1024)).toFixed(1)}MB`;
-			console.log(chalk.green(`\n  Downloaded: ${outPath} (${size})\n`));
+			console.log(chalk.green(`\n  Downloaded: ${outPath} (${fmtBytes(buffer.byteLength)})\n`));
 		} catch (err: any) {
 			console.error(chalk.red(err.message));
 			process.exit(3);
@@ -1348,13 +1349,7 @@ program
 			const outPath = outputFlag(opts, program) || `./${dropId}.eml`;
 			const buffer = await res.arrayBuffer();
 			await Bun.write(outPath, buffer);
-			const size =
-				buffer.byteLength < 1024
-					? `${buffer.byteLength}B`
-					: buffer.byteLength < 1024 * 1024
-						? `${(buffer.byteLength / 1024).toFixed(0)}KB`
-						: `${(buffer.byteLength / (1024 * 1024)).toFixed(1)}MB`;
-			console.log(chalk.green(`\n  Downloaded: ${outPath} (${size})\n`));
+			console.log(chalk.green(`\n  Downloaded: ${outPath} (${fmtBytes(buffer.byteLength)})\n`));
 		} catch (err: any) {
 			console.error(chalk.red(err.message));
 			process.exit(3);
@@ -1379,9 +1374,7 @@ program
 			}
 
 			console.log(chalk.bold(`\n  Presigned Download URL\n`));
-			console.log(
-				`  File:      ${chalk.cyan(data.filename)} (${data.size < 1024 * 1024 ? `${(data.size / 1024).toFixed(0)}KB` : `${(data.size / (1024 * 1024)).toFixed(1)}MB`})`,
-			);
+			console.log(`  File:      ${chalk.cyan(data.filename)} (${fmtBytes(data.size)})`);
 			console.log(`  Expires:   ${data.expires_in}`);
 			console.log(`  URL:       ${chalk.green(data.url)}`);
 			console.log("");
@@ -1860,7 +1853,10 @@ program
 	.option("--topic <topic>", `Send from {box}+{topic}@${getMailDomain()}`)
 	.option("--in-reply-to <dropId|msgId>", "Thread as a reply to a received drop")
 	.option("--template <file.yml>", "Load fields from a YAML template (flags override)")
-	.option("--upload", "Force all local attachments through R2 (default: auto above 1MB)")
+	.option(
+		"--upload",
+		"Force all local attachments through R2 (default: files up to 1MB ride inline while the request stays under 7MiB)",
+	)
 	.option(
 		"--delete-after-send",
 		"Delete R2-uploaded attachments immediately after sending (default: kept, 30d TTL)",

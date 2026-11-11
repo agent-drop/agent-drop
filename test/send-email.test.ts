@@ -809,3 +809,37 @@ describe("handleCompose -- the dry-run preview", () => {
 		expect(email.sends).toHaveLength(0);
 	});
 });
+
+// A URL attachment with no explicit filename was named from the RAW url string.
+// `new URL()` silently drops CR/LF, so the fetch worked while the filename kept
+// them: a write key could add header lines to its own outbound message.
+describe("attachment filename derived from a url", () => {
+	const HOSTILE = "https://example.com/r.pdf\r\nX-Injected: 1";
+
+	async function withRemote<T>(run: () => Promise<T>): Promise<T> {
+		const realFetch = globalThis.fetch;
+		globalThis.fetch = (async () =>
+			new Response("pdf", {
+				headers: { "Content-Type": "application/pdf", "Content-Length": "3" },
+			})) as unknown as typeof fetch;
+		try {
+			return await run();
+		} finally {
+			globalThis.fetch = realFetch;
+		}
+	}
+
+	test("the binding never gets a filename with a line break", async () => {
+		const { email, response } = await withRemote(() =>
+			send({ ...PLAIN, attachments: [{ url: HOSTILE }] }),
+		);
+		expect(response.status).toBe(200);
+		const filename = onlyBuilder(email).attachments?.[0].filename ?? "";
+		expect(filename).not.toMatch(/[\r\n]/);
+	});
+
+	test("the compose preview grows no extra header line", async () => {
+		const eml = await withRemote(() => compose({ ...PLAIN, attachments: [{ url: HOSTILE }] }));
+		expect(eml).not.toMatch(/^X-Injected:/m);
+	});
+});

@@ -599,9 +599,47 @@ describe("presigned upload routes", () => {
 			{ fileName: "big.zip", fileSize: 700 * 1024 * 1024 },
 		);
 		expect(res.status).toBe(200);
-		const body = (await res.json()) as { uploadId: string; parts: { partNumber: number }[] };
+		const body = (await res.json()) as {
+			uploadId: string;
+			partSize: number;
+			parts: { partNumber: number }[];
+		};
 		expect(body.uploadId).toBe("up-42");
+		expect(body.partSize).toBe(50 * 1024 * 1024);
 		expect(body.parts).toHaveLength(14);
+	});
+
+	// Regression: the part size used to be a fixed 50 MiB, so the 100-part bound
+	// capped every upload at 4.88 GiB and the SPA answered a 6 GB file with 413.
+	// The part size now grows with the file, and the client slices by `partSize`.
+	test("POST /api/upload/multipart/:name scales the part size past 100 x 50 MiB", async () => {
+		const env = makeEnv();
+		await seedApiKey(env, "ad_writer", { permissions: "write" });
+		globalThis.fetch = (async () =>
+			new Response(
+				"<InitiateMultipartUploadResult><UploadId>up-6g</UploadId></InitiateMultipartUploadResult>",
+			)) as unknown as typeof fetch;
+
+		const fileSize = 6 * 1024 * 1024 * 1024;
+		const res = await send(
+			env,
+			"POST",
+			"/api/upload/multipart/lisa",
+			{ Authorization: "Bearer ad_writer" },
+			{ fileName: "huge.mkv", fileSize },
+		);
+
+		expect(res.status).toBe(200);
+		const body = (await res.json()) as {
+			partSize: number;
+			parts: { partNumber: number; url: string }[];
+		};
+		expect(body.parts.length).toBeLessThanOrEqual(100);
+		expect(body.partSize * body.parts.length).toBeGreaterThanOrEqual(fileSize);
+		expect(body.partSize * (body.parts.length - 1)).toBeLessThan(fileSize);
+		expect(body.parts.map((p) => p.partNumber)).toEqual(
+			Array.from({ length: body.parts.length }, (_, i) => i + 1),
+		);
 	});
 
 	test("POST /api/upload/multipart/:name rejects invalid sizes before calling R2", async () => {
@@ -627,7 +665,9 @@ describe("presigned upload routes", () => {
 		expect(r2Calls).toBe(0);
 	});
 
-	test("POST /api/upload/multipart/:name caps the number of signed parts", async () => {
+	// 100 parts of R2's 5 GiB maximum part size: past that, no part size both
+	// fits R2 and keeps the signing work at 100 URLs.
+	test("POST /api/upload/multipart/:name refuses a file past 100 x 5 GiB", async () => {
 		const env = makeEnv();
 		await seedApiKey(env, "ad_writer", { permissions: "write" });
 		let r2Calls = 0;
@@ -641,7 +681,7 @@ describe("presigned upload routes", () => {
 			"POST",
 			"/api/upload/multipart/lisa",
 			{ Authorization: "Bearer ad_writer" },
-			{ fileName: "too-big.zip", fileSize: 50 * 1024 * 1024 * 100 + 1 },
+			{ fileName: "too-big.zip", fileSize: 100 * 5 * 1024 * 1024 * 1024 + 1 },
 		);
 
 		expect(res.status).toBe(413);

@@ -16,7 +16,8 @@ interface DroppedFile {
 }
 
 const DIRECT_LIMIT = 95 * 1024 * 1024;
-const CHUNK_SIZE = 50 * 1024 * 1024;
+// Only for a server too old to send `partSize`, which was a fixed 50 MiB then.
+const FALLBACK_PART_SIZE = 50 * 1024 * 1024;
 const MAX_CONCURRENT = 4;
 
 function formatSize(bytes: number): string {
@@ -91,16 +92,22 @@ export function DropZone({ inbox, apiKey, dropToken, googleToken, onDropped }: D
 			dropId: string;
 			uploadId: string;
 			objectKey: string;
+			partSize?: number;
 			parts: { partNumber: number; url: string }[];
 		};
+
+		// The server picks the part size (it grows with the file to keep the part
+		// count bounded), and R2 needs every part but the last to be exactly that
+		// size -- so slice by its number, never by a constant of our own.
+		const partSize = data.partSize ?? FALLBACK_PART_SIZE;
 
 		// Upload chunks in parallel
 		const totalParts = data.parts.length;
 		let completedParts = 0;
 
 		async function uploadPart(part: { partNumber: number; url: string }) {
-			const start = (part.partNumber - 1) * CHUNK_SIZE;
-			const end = Math.min(start + CHUNK_SIZE, file.size);
+			const start = (part.partNumber - 1) * partSize;
+			const end = Math.min(start + partSize, file.size);
 			const chunk = file.slice(start, end);
 
 			const res = await fetch(part.url, { method: "PUT", body: chunk });
