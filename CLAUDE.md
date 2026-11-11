@@ -523,9 +523,13 @@ the HTML a browser needs:
 - Raw HTML in the source passes through, as markdown says it must. That grants nothing new:
   the same key can post arbitrary `html` directly.
 
-**Attachment transport:** local files <1MB ride inline as base64; files >1MB (or any with
-`--upload`) are presigned + PUT to R2 (`outbound/temp/{box}/`) and pulled by the Worker at send
-time; the Worker only pulls keys under the sending box's own prefix. URLs are fetched
+**Attachment transport:** local files up to 1 MB ride inline as base64, smallest first, only
+while the whole JSON request (body included) stays under a 7 MiB budget, since base64 inflates
+by 4/3 and the Worker refuses 8 MiB; every other local file (all of them with `--upload`) is
+presigned + PUT to R2 (`outbound/temp/{box}/`) and pulled by the Worker at send time, and a send
+whose local files or body already break the limits below is refused before any upload
+(`tools/lib/attachment-plan.ts`; URL sizes are unknown until the Worker fetches them). The Worker
+only pulls keys under the sending box's own prefix. URLs are fetched
 server-side over HTTP(S) with a 15 second timeout. The Worker accepts an 8 MiB JSON request
 body, at most 32 attachments, 5 MiB per inline base64 attachment, and 16 MiB of decoded
 attachment data in total, leaving room below Cloudflare's 25 MiB assembled-message cap; the
