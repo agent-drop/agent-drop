@@ -7,7 +7,7 @@
  */
 
 import { Command } from "commander";
-import { formatOutput, addCommonOptions, createLogger } from "./lib/cli-utils";
+import { formatOutput, addCommonOptions, createLogger, outputFlag } from "./lib/cli-utils";
 import { signRequest } from "./lib/hook-sign";
 import { emitEvents } from "./lib/queue-emit";
 import { previewRule } from "./lib/rule-preview";
@@ -1313,7 +1313,7 @@ program
 			const res = await apiRaw(
 				`/api/inbox/${inbox}/${dropId}/file/${encodeURIComponent(filename)}`,
 			);
-			const outPath = opts.output || `./${filename}`;
+			const outPath = outputFlag(opts, program) || `./${filename}`;
 			const buffer = await res.arrayBuffer();
 			await Bun.write(outPath, buffer);
 			const size =
@@ -1344,8 +1344,8 @@ program
 				process.exit(1);
 			}
 
-			const res = await apiRaw(`/api/inbox/${inbox}/${dropId}/file/raw.eml`);
-			const outPath = opts.output || `./${dropId}.eml`;
+			const res = await apiRaw(`/api/inbox/${inbox}/${dropId}/raw`);
+			const outPath = outputFlag(opts, program) || `./${dropId}.eml`;
 			const buffer = await res.arrayBuffer();
 			await Bun.write(outPath, buffer);
 			const size =
@@ -2630,8 +2630,7 @@ addQueueFilters(
 program
 	.command("queue-body <box> [eventId]")
 	.description("Write an event's raw bytes to stdout or a file (BOX/ID also works)")
-	// `-o, --output` is the program-wide flag; declaring a second `-o` here would
-	// be shadowed by it and silently ignored.
+	// `-o` is shadowed by the program-wide flag; outputFlag() reads both.
 	.option("-o, --output <file>", "Write to this file instead of stdout")
 	.action(async (box, eventId, opts) => {
 		try {
@@ -2642,7 +2641,7 @@ program
 			// Bytes go through untouched: this is the endpoint a consumer verifies
 			// the provider's signature against.
 			const bytes = new Uint8Array(await res.arrayBuffer());
-			const out = opts.output || program.opts().output;
+			const out = outputFlag(opts, program);
 			if (out) {
 				fs.writeFileSync(out, bytes);
 				console.error(chalk.green(`  Wrote ${fmtBytes(bytes.byteLength)} to ${out}`));

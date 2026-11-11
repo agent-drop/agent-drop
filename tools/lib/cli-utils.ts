@@ -215,6 +215,17 @@ export function addCommonOptions(program: Command): Command {
 }
 
 /**
+ * The `-o, --output` value for a subcommand. `addCommonOptions` puts a global
+ * `-o` on the program, and Commander binds `-o` there even when the subcommand
+ * declares its own -- so the subcommand's `opts.output` is always empty. Read
+ * both, subcommand first.
+ */
+export function outputFlag(cmdOpts: { output?: unknown }, program: Command): string | undefined {
+	const value = cmdOpts.output ?? program.opts().output;
+	return typeof value === "string" && value ? value : undefined;
+}
+
+/**
  * Create a progress logger that respects --quiet mode
  */
 export function createLogger(quiet?: boolean) {
