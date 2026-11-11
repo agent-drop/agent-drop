@@ -682,10 +682,12 @@ async function cmdSendEmail(opts: any) {
 
 		const filePath = path.resolve(source);
 		if (!fs.existsSync(filePath)) throw new Error(`attachment not found: ${source}`);
+		const stat = fs.statSync(filePath);
+		if (!stat.isFile()) throw new Error(`attachment is not a file: ${source}`);
 		const filename = path.basename(filePath);
 		const entry: any = { filename, contentType: guessContentType(filename), cid, inline };
 		attachments.push(entry);
-		locals.push({ entry, filePath, size: fs.statSync(filePath).size });
+		locals.push({ entry, filePath, size: stat.size });
 	}
 
 	const payload: any = { to, cc, bcc, subject };
@@ -1227,13 +1229,7 @@ program
 				if (files.files?.length > 0) {
 					console.log(chalk.bold(`\n  Files:`));
 					for (const f of files.files) {
-						const size =
-							f.size < 1024
-								? `${f.size}B`
-								: f.size < 1024 * 1024
-									? `${(f.size / 1024).toFixed(0)}KB`
-									: `${(f.size / (1024 * 1024)).toFixed(1)}MB`;
-						console.log(`    ${chalk.cyan(f.filename)}  ${chalk.dim(size)}`);
+						console.log(`    ${chalk.cyan(f.filename)}  ${chalk.dim(fmtBytes(f.size))}`);
 					}
 				}
 			} catch {}
@@ -1303,14 +1299,8 @@ program
 
 			console.log(chalk.bold(`\n  Files in ${chalk.cyan(dropId)}:\n`));
 			for (const f of files) {
-				const size =
-					f.size < 1024
-						? `${f.size}B`
-						: f.size < 1024 * 1024
-							? `${(f.size / 1024).toFixed(0)}KB`
-							: `${(f.size / (1024 * 1024)).toFixed(1)}MB`;
 				console.log(
-					`  ${chalk.cyan(f.filename.padEnd(40))} ${chalk.dim(size.padStart(8))}  ${chalk.dim(f.uploaded)}`,
+					`  ${chalk.cyan(f.filename.padEnd(40))} ${chalk.dim(fmtBytes(f.size).padStart(8))}  ${chalk.dim(f.uploaded)}`,
 				);
 			}
 			console.log("");
@@ -1333,13 +1323,7 @@ program
 			const outPath = outputFlag(opts, program) || `./${filename}`;
 			const buffer = await res.arrayBuffer();
 			await Bun.write(outPath, buffer);
-			const size =
-				buffer.byteLength < 1024
-					? `${buffer.byteLength}B`
-					: buffer.byteLength < 1024 * 1024
-						? `${(buffer.byteLength / 1024).toFixed(0)}KB`
-						: `${(buffer.byteLength / (1024 * 1024)).toFixed(1)}MB`;
-			console.log(chalk.green(`\n  Downloaded: ${outPath} (${size})\n`));
+			console.log(chalk.green(`\n  Downloaded: ${outPath} (${fmtBytes(buffer.byteLength)})\n`));
 		} catch (err: any) {
 			console.error(chalk.red(err.message));
 			process.exit(3);
@@ -1365,13 +1349,7 @@ program
 			const outPath = outputFlag(opts, program) || `./${dropId}.eml`;
 			const buffer = await res.arrayBuffer();
 			await Bun.write(outPath, buffer);
-			const size =
-				buffer.byteLength < 1024
-					? `${buffer.byteLength}B`
-					: buffer.byteLength < 1024 * 1024
-						? `${(buffer.byteLength / 1024).toFixed(0)}KB`
-						: `${(buffer.byteLength / (1024 * 1024)).toFixed(1)}MB`;
-			console.log(chalk.green(`\n  Downloaded: ${outPath} (${size})\n`));
+			console.log(chalk.green(`\n  Downloaded: ${outPath} (${fmtBytes(buffer.byteLength)})\n`));
 		} catch (err: any) {
 			console.error(chalk.red(err.message));
 			process.exit(3);
@@ -1396,9 +1374,7 @@ program
 			}
 
 			console.log(chalk.bold(`\n  Presigned Download URL\n`));
-			console.log(
-				`  File:      ${chalk.cyan(data.filename)} (${data.size < 1024 * 1024 ? `${(data.size / 1024).toFixed(0)}KB` : `${(data.size / (1024 * 1024)).toFixed(1)}MB`})`,
-			);
+			console.log(`  File:      ${chalk.cyan(data.filename)} (${fmtBytes(data.size)})`);
 			console.log(`  Expires:   ${data.expires_in}`);
 			console.log(`  URL:       ${chalk.green(data.url)}`);
 			console.log("");

@@ -9,13 +9,20 @@
  * and it lives here, pure, so it can be tested against the real handlers.
  */
 
-// Mirrors of the worker's limits in src/api/send.ts. Copied, not imported: that
-// module pulls in the Workers runtime types, which the CLI's tsconfig does not
-// load. test/attachment-plan.test.ts pins every one to the server's value.
-export const MAX_EMAIL_REQUEST_BYTES = 8 * 1024 * 1024;
-export const MAX_INLINE_ATTACHMENT_BYTES = 5 * 1024 * 1024;
-export const MAX_ATTACHMENT_TOTAL_BYTES = 16 * 1024 * 1024;
-export const MAX_ATTACHMENTS = 32;
+// The worker's own limits, imported from the one module both sides share.
+import {
+	MAX_ATTACHMENT_TOTAL_BYTES,
+	MAX_ATTACHMENTS,
+	MAX_EMAIL_REQUEST_BYTES,
+	MAX_INLINE_ATTACHMENT_BYTES,
+} from "../../src/lib/send-limits";
+
+export {
+	MAX_ATTACHMENT_TOTAL_BYTES,
+	MAX_ATTACHMENTS,
+	MAX_EMAIL_REQUEST_BYTES,
+	MAX_INLINE_ATTACHMENT_BYTES,
+};
 
 /** Above this a local file always goes through R2, whatever the budget says. */
 export const INLINE_FILE_MAX_BYTES = 1_000_000;

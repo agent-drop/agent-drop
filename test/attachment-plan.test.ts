@@ -1,5 +1,4 @@
 import { describe, expect, test } from "bun:test";
-import * as server from "../src/api/send";
 import { handleCompose, handleSend } from "../src/api/send";
 import type { Env } from "../src/types";
 import {
@@ -227,14 +226,7 @@ describe("attachmentLimitError: refused before any upload", () => {
 	});
 });
 
-describe("the CLI's copy of the server's limits", () => {
-	test("matches src/api/send.ts exactly", () => {
-		expect(MAX_EMAIL_REQUEST_BYTES).toBe(server.MAX_EMAIL_REQUEST_BYTES);
-		expect(MAX_INLINE_ATTACHMENT_BYTES).toBe(server.MAX_INLINE_ATTACHMENT_BYTES);
-		expect(MAX_ATTACHMENT_TOTAL_BYTES).toBe(server.MAX_ATTACHMENT_TOTAL_BYTES);
-		expect(MAX_ATTACHMENTS).toBe(server.MAX_ATTACHMENTS);
-	});
-
+describe("the CLI's budget against the server's limits", () => {
 	test("the budget sits under the cap, and one inline file under the per-file limit", () => {
 		expect(REQUEST_BUDGET_BYTES).toBeLessThan(MAX_EMAIL_REQUEST_BYTES);
 		expect(INLINE_FILE_MAX_BYTES).toBeLessThan(MAX_INLINE_ATTACHMENT_BYTES);
