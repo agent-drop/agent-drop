@@ -237,6 +237,8 @@ export async function seedPendingDrop(
 		objectKey?: string | null;
 		status?: string;
 		createdAt?: number;
+		/** The row's raw metadata column, `{}` by default. */
+		metadata?: string;
 	},
 ): Promise<void> {
 	const fileName = opts.fileName ?? "report.pdf";
@@ -244,7 +246,7 @@ export async function seedPendingDrop(
 	await env.DB.prepare(
 		`INSERT INTO drops (id, inbox, channel, subject, has_attachments, attachment_count,
 			r2_prefix, object_key, metadata, status, created_at)
-		VALUES (?, ?, 'web', ?, 1, 1, ?, ?, '{}', ?, ?)`,
+		VALUES (?, ?, 'web', ?, 1, 1, ?, ?, ?, ?, ?)`,
 	)
 		.bind(
 			opts.id,
@@ -252,6 +254,7 @@ export async function seedPendingDrop(
 			fileName,
 			r2Prefix,
 			opts.objectKey === undefined ? `${r2Prefix}/uploads/${fileName}` : opts.objectKey,
+			opts.metadata ?? "{}",
 			opts.status ?? "pending",
 			opts.createdAt ?? Date.now(),
 		)

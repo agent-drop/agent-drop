@@ -244,3 +244,20 @@ describe("POST /api/upload/complete checks the parts against the plan", () => {
 		expect(dropStatus(env, "drop-old")).toBe("completed");
 	});
 });
+
+// asFinalizer checked dropId's type but not uploadId's, so a number or an object
+// was stringified into the R2 URL ("42", "[object Object]") and sent to R2.
+describe("POST /api/upload/complete refuses a non-string uploadId", () => {
+	for (const uploadId of [42, { id: "up-1" }, ["up-1"], true, ""]) {
+		test(`${JSON.stringify(uploadId)} -> 400, R2 never asked to complete`, async () => {
+			const env = await writerEnv();
+			const dropId = await initUpload(env);
+			const res = await call(
+				env,
+				jsonRequest(`${BASE}/api/upload/complete`, { dropId, uploadId }, WRITER),
+			);
+			expect(res.status).toBe(400);
+			expect(completes).toBe(0);
+		});
+	}
+});

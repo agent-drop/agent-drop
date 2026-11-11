@@ -48,6 +48,14 @@ interface StaleRow {
 /**
  * Find `pending` drops older than `STALE_AFTER_MS` and resolve each one.
  * `now` is injectable so the selection policy is testable without sleeping.
+ *
+ * A multipart upload has no object in R2 until it completes, and its part URLs
+ * live up to 7 days (`metadata.multipart_plan.expires_at`). So such a row goes
+ * stale `STALE_AFTER_MS` after its URLs die, not after it was created -- the
+ * same day of grace a single presign gets past its one-hour URL. The test is in
+ * SQL, so in-flight rows never fill the batch ahead of the stale rows behind
+ * them; `json_valid` keeps one unreadable metadata column from failing the
+ * whole sweep (that row is judged by `created_at` alone).
  */
 export async function reapPendingDrops(env: Env, now: number = Date.now()): Promise<ReapSummary> {
 	const cutoff = now - STALE_AFTER_MS;
@@ -55,9 +63,13 @@ export async function reapPendingDrops(env: Env, now: number = Date.now()): Prom
 	const { results } = await env.DB.prepare(
 		`SELECT id, inbox, r2_prefix, object_key, subject, status
 		FROM drops
-		WHERE status = 'pending' AND created_at < ?
+		WHERE status = 'pending' AND created_at < ?1
+			AND COALESCE(
+				CASE WHEN json_valid(metadata)
+					THEN json_extract(metadata, '$.multipart_plan.expires_at') END,
+				0) < ?1
 		ORDER BY created_at ASC
-		LIMIT ?`,
+		LIMIT ?2`,
 	)
 		.bind(cutoff, REAP_BATCH)
 		.all<StaleRow>();

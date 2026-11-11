@@ -202,7 +202,8 @@ export function asFinalizer(
 	handle: (
 		scope: RequestScope,
 		drop: FinalizeDrop,
-		body: { uploadId?: string },
+		/** Raw client JSON past dropId: the handler type-checks what it reads. */
+		body: { uploadId?: unknown },
 	) => Promise<Response>,
 ): OpenRoute {
 	return async (scope) => {
@@ -212,7 +213,7 @@ export function asFinalizer(
 		if (bytes instanceof Response) return bytes;
 		const parsed = parseJsonObject(bytes);
 		if (!parsed) return reject(scope, 400, { error: "invalid JSON body" });
-		const body = parsed as { dropId?: string; uploadId?: string };
+		const body = parsed as { dropId?: unknown; uploadId?: unknown };
 		if (typeof body.dropId !== "string" || !body.dropId) {
 			return reject(scope, 400, { error: "dropId required" });
 		}

@@ -374,6 +374,12 @@ per run, and asks R2 what actually happened:
 - object absent -> the row is **deleted** (the presign was never spent)
 - no resolvable object key -> left alone and logged, never deleted on a guess
 
+A multipart upload has no object in R2 until it completes, and its part URLs
+can live up to 7 days, so for those rows the 24h counts from
+`metadata.multipart_plan.expires_at` instead of `created_at`: the same day of
+grace a single presign gets past its one-hour URL. The test runs in SQL, so
+in-flight uploads never fill the batch ahead of stale rows.
+
 ## Drop Metadata
 
 Every drop records:

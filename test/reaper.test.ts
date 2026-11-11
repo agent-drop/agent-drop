@@ -146,6 +146,78 @@ describe("the reaper's selection policy", () => {
 	});
 });
 
+// A multipart upload has no object in R2 until complete, however long it runs,
+// and its part URLs can live up to 7 days. Judging it by created_at alone
+// deleted the row of every upload still in flight after 24 hours, and complete
+// then answered 404 for an upload that was going fine.
+describe("the reaper and multipart uploads in flight", () => {
+	const plan = (expiresAt: number) =>
+		JSON.stringify({ multipart: true, multipart_plan: { expires_at: expiresAt } });
+
+	test("leaves a day-old multipart drop alone while its part URLs still work", async () => {
+		const env = makeEnv({ BUCKET: makeBucket() });
+		await seedPendingDrop(env, {
+			id: "big",
+			inbox: "lisa",
+			createdAt: OLD - 2 * STALE_AFTER_MS,
+			metadata: plan(NOW + 60 * 60 * 1000),
+		});
+
+		expect((await reapPendingDrops(env, NOW)).scanned).toBe(0);
+		expect(dropIds(env)).toEqual(["big"]);
+	});
+
+	test("gives it the same day of grace after its URLs die that a presign gets", async () => {
+		const env = makeEnv({ BUCKET: makeBucket() });
+		await seedPendingDrop(env, {
+			id: "recent-death",
+			inbox: "lisa",
+			createdAt: OLD - 5 * STALE_AFTER_MS,
+			metadata: plan(NOW - 60_000),
+		});
+		await seedPendingDrop(env, {
+			id: "long-dead",
+			inbox: "lisa",
+			createdAt: OLD - 5 * STALE_AFTER_MS,
+			metadata: plan(OLD),
+		});
+
+		const summary = await reapPendingDrops(env, NOW);
+
+		expect(summary).toEqual({ scanned: 1, completed: 0, deleted: 1, skipped: 0 });
+		expect(dropIds(env)).toEqual(["recent-death"]);
+	});
+
+	test("an in-flight row does not take a batch slot from the stale rows behind it", async () => {
+		const env = makeEnv({ BUCKET: makeBucket() });
+		for (let i = 0; i < REAP_BATCH; i++) {
+			await seedPendingDrop(env, {
+				id: `flight-${String(i).padStart(4, "0")}`,
+				inbox: "lisa",
+				createdAt: OLD - 3 * STALE_AFTER_MS,
+				metadata: plan(NOW + 60 * 60 * 1000),
+			});
+		}
+		await seedPendingDrop(env, { id: "stale", inbox: "lisa", createdAt: OLD });
+
+		const summary = await reapPendingDrops(env, NOW);
+
+		expect(summary.deleted).toBe(1);
+		expect(dropIds(env)).not.toContain("stale");
+	});
+
+	test("unreadable metadata falls back to created_at instead of breaking the sweep", async () => {
+		const env = makeEnv({ BUCKET: makeBucket() });
+		await seedPendingDrop(env, { id: "garbled", inbox: "lisa", createdAt: OLD, metadata: "{not" });
+		await seedPendingDrop(env, { id: "plain", inbox: "lisa", createdAt: OLD });
+
+		const summary = await reapPendingDrops(env, NOW);
+
+		expect(summary.deleted).toBe(2);
+		expect(dropIds(env)).toEqual([]);
+	});
+});
+
 describe("the scheduled handler", () => {
 	test("runScheduled reaps and reports", async () => {
 		const env = makeEnv({

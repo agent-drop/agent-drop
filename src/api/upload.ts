@@ -341,10 +341,16 @@ function planMismatch(
 export async function handleMultipartComplete(
 	env: Env,
 	drop: FinalizeDrop,
-	body: { uploadId?: string },
+	body: { uploadId?: unknown },
 ): Promise<Response> {
-	if (!body.uploadId) {
+	// The body is client JSON: a number or an object would otherwise be
+	// stringified into the R2 URL below.
+	const { uploadId } = body;
+	if (uploadId === undefined || uploadId === null || uploadId === "") {
 		return Response.json({ error: "uploadId required" }, { status: 400 });
+	}
+	if (typeof uploadId !== "string") {
+		return Response.json({ error: "uploadId must be a string" }, { status: 400 });
 	}
 
 	const objectKey = resolveObjectKey(drop);
@@ -356,7 +362,7 @@ export async function handleMultipartComplete(
 
 	// List parts to get ETags (browser can't read them due to CORS)
 	const listUrl = new URL(s3Url(env, objectKey));
-	listUrl.searchParams.set("uploadId", body.uploadId);
+	listUrl.searchParams.set("uploadId", uploadId);
 
 	const listRes = await aws.fetch(listUrl, { method: "GET" });
 	if (!listRes.ok) {
@@ -391,7 +397,7 @@ export async function handleMultipartComplete(
 	const completeXml = renderCompleteBody(parts);
 
 	const completeUrl = new URL(s3Url(env, objectKey));
-	completeUrl.searchParams.set("uploadId", body.uploadId);
+	completeUrl.searchParams.set("uploadId", uploadId);
 
 	const completeRes = await aws.fetch(completeUrl, {
 		method: "POST",
