@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, test } from "bun:test";
+import PostalMime from "postal-mime";
 import { handleEmail } from "../src/email-handler";
 import { buildLegacyRelayAddress } from "../src/lib/relay";
 import type { Env, RelayQueueMessage } from "../src/types";
@@ -9,9 +10,13 @@ interface IncomingEmail {
 	rejection(): string | null;
 }
 
-function incoming(from: string, to: string, subject = "Hello"): IncomingEmail {
+/**
+ * `from` is the envelope sender; `fromHeader` is the From header the sender's
+ * client wrote, which is where a display name lives. They differ in real mail.
+ */
+function incoming(from: string, to: string, subject = "Hello", fromHeader = from): IncomingEmail {
 	const raw = [
-		`From: ${from}`,
+		`From: ${fromHeader}`,
 		`To: ${to}`,
 		`Subject: ${subject}`,
 		"Message-ID: <incoming@example.test>",
@@ -43,31 +48,49 @@ function incoming(from: string, to: string, subject = "Hello"): IncomingEmail {
 	};
 }
 
+/** An env with one active mask `j-7k9m` relaying to owner@example.org. */
+async function relayFixture(): Promise<{ env: TestEnv; queued: RelayQueueMessage[] }> {
+	const queued: RelayQueueMessage[] = [];
+	const env = makeEnv({
+		BUCKET: makeBucket(),
+		WEBHOOK_QUEUE: {
+			send: async (body: RelayQueueMessage) => {
+				queued.push(body);
+			},
+		} as unknown as Env["WEBHOOK_QUEUE"],
+	});
+	await env.DB.prepare(
+		"INSERT INTO email_masks (id, label, active, created_at) VALUES (?, ?, 1, ?)",
+	)
+		.bind("j-7k9m", "shopping", Date.now())
+		.run();
+	await env.DB.prepare(
+		`INSERT INTO drop_rules (id, pattern, type, scopes, target, enabled, priority, created_at)
+		 VALUES ('rule-1', 'j-*', 'relay', 'email', 'owner@example.org', 1, 0, ?)`,
+	)
+		.bind(Date.now())
+		.run();
+	return { env, queued };
+}
+
+const ROUTE = /^reply\+[0-9a-hjkmnp-tv-z]{26}@drop\.test$/;
+
+/** The header section of a raw message, up to the blank line. */
+function headerBlock(raw: string): string {
+	return raw.slice(0, raw.indexOf("\r\n\r\n"));
+}
+
+/** One header's value, folded continuation lines included, exactly as written. */
+function rawHeader(raw: string, name: string): string | undefined {
+	return headerBlock(raw).match(new RegExp(`^${name}: (.*(?:\\r\\n[ \\t].*)*)`, "mi"))?.[1];
+}
+
 describe("authenticated relay reply routing", () => {
 	let env: TestEnv;
 	let queued: RelayQueueMessage[];
 
 	beforeEach(async () => {
-		queued = [];
-		env = makeEnv({
-			BUCKET: makeBucket(),
-			WEBHOOK_QUEUE: {
-				send: async (body: RelayQueueMessage) => {
-					queued.push(body);
-				},
-			} as unknown as Env["WEBHOOK_QUEUE"],
-		});
-		await env.DB.prepare(
-			"INSERT INTO email_masks (id, label, active, created_at) VALUES (?, ?, 1, ?)",
-		)
-			.bind("j-7k9m", "shopping", Date.now())
-			.run();
-		await env.DB.prepare(
-			`INSERT INTO drop_rules (id, pattern, type, scopes, target, enabled, priority, created_at)
-			 VALUES ('rule-1', 'j-*', 'relay', 'email', 'owner@example.org', 1, 0, ?)`,
-		)
-			.bind(Date.now())
-			.run();
+		({ env, queued } = await relayFixture());
 	});
 
 	test("mints an opaque Reply-To and routes a later reply through its stored destination", async () => {
@@ -138,5 +161,83 @@ describe("authenticated relay reply routing", () => {
 			inbox: "sales-at-team",
 			topic: "newsletter",
 		});
+	});
+});
+
+// The opaque reply route hides the sender's address from the From line, so the
+// display name is the only place the mask owner can still see who wrote. It
+// follows the forward convention: "<sender> (via <mask address>)".
+describe("inbound relay names the original sender", () => {
+	let env: TestEnv;
+	let queued: RelayQueueMessage[];
+
+	beforeEach(async () => {
+		({ env, queued } = await relayFixture());
+	});
+
+	async function relayFrom(envelopeFrom: string, fromHeader: string): Promise<RelayQueueMessage> {
+		const inbound = incoming(envelopeFrom, "j-7k9m@drop.test", "Hello", fromHeader);
+		await handleEmail(inbound.message, env, makeCtx());
+		expect(inbound.rejection()).toBeNull();
+		expect(queued).toHaveLength(1);
+		return queued[0];
+	}
+
+	test("a named sender shows by name, via the mask, on the opaque route", async () => {
+		const relayed = await relayFrom("lisa@example.com", '"Lisa Smith" <lisa@example.com>');
+
+		expect(relayed.from).toMatch(ROUTE);
+		expect(rawHeader(relayed.rawEmail, "From")).toBe(
+			`"Lisa Smith (via j-7k9m@drop.test)" <${relayed.from}>`,
+		);
+		expect(rawHeader(relayed.rawEmail, "Reply-To")).toBe(relayed.from);
+	});
+
+	test("a sender with no display name shows by address", async () => {
+		const relayed = await relayFrom("bob@example.com", "bob@example.com");
+
+		expect(relayed.from).toMatch(ROUTE);
+		expect(rawHeader(relayed.rawEmail, "From")).toBe(
+			`"bob@example.com (via j-7k9m@drop.test)" <${relayed.from}>`,
+		);
+		expect(rawHeader(relayed.rawEmail, "Reply-To")).toBe(relayed.from);
+	});
+
+	// postal-mime decodes an RFC 2047 name verbatim, so a CRLF inside the encoded
+	// word arrives in `parsed.from.name` as a real line break. Written into the
+	// header unfiltered, it would start a Bcc: line of the attacker's choosing.
+	test("a hostile display name cannot add a header, escape its quotes or move the address", async () => {
+		const hostile = 'Evil "Boss" <ceo@corp.example>\r\nBcc: victim@example.net\\ Ärende Ö';
+		const encoded = `=?UTF-8?B?${Buffer.from(hostile).toString("base64")}?=`;
+		const relayed = await relayFrom("evil@example.net", `${encoded} <evil@example.net>`);
+		const block = headerBlock(relayed.rawEmail);
+
+		expect(block).not.toMatch(/^bcc:/im);
+		// Every line is a header or a fold continuation, and no CR or LF stands alone.
+		for (const line of block.split("\r\n")) expect(line).toMatch(/^([A-Za-z-]+: |[ \t])/);
+		expect(block.replace(/\r\n/g, "")).not.toMatch(/[\r\n]/);
+		// Non-ASCII is RFC 2047-encoded, never raw bytes, and never inside quotes.
+		expect(block).toMatch(/^[\x20-\x7e\r\n\t]*$/);
+		const from = rawHeader(relayed.rawEmail, "From") ?? "";
+		expect(from).toStartWith("=?UTF-8?B?");
+		expect(from).toEndWith(` <${relayed.from}>`);
+
+		const parsed = await new PostalMime().parse(relayed.rawEmail);
+		expect(parsed.from).toEqual({
+			address: relayed.from,
+			name: "Evil Boss ceo@corp.example Bcc: victim@example.net Ärende Ö (via j-7k9m@drop.test)",
+		});
+		expect(parsed.bcc).toBeUndefined();
+		expect(parsed.replyTo).toEqual([{ address: relayed.from, name: "" }]);
+	});
+
+	test("the reply route minted under a display name still routes the reply home", async () => {
+		const relayed = await relayFrom("lisa@example.com", '"Lisa Smith" <lisa@example.com>');
+
+		const reply = incoming("owner@example.org", relayed.from, "Re: Hello");
+		await handleEmail(reply.message, env, makeCtx());
+
+		expect(reply.rejection()).toBeNull();
+		expect(queued[1]).toMatchObject({ direction: "reply", to: "lisa@example.com" });
 	});
 });

@@ -47,6 +47,20 @@ describe("forwardViaBinding -- envelope", () => {
 		});
 	});
 
+	// Same label as the mask relay, built by the same helper. The name is the
+	// sender's own From header, decoded: a CRLF in it is a real line break.
+	test("a hostile display name is reduced to inert text before the binding sees it", async () => {
+		const email = makeEmail();
+		await forward(email, {
+			fromName: 'Evil "Boss" <ceo@corp.example>\r\nBcc: victim@example.net\\ Ärende Ö',
+		});
+
+		expect(onlyBuilder(email).from).toEqual({
+			name: "Evil Boss ceo@corp.example Bcc: victim@example.net Ärende Ö (via lisa@drop.test)",
+			email: "lisa@drop.test",
+		});
+	});
+
 	test("a subject-less forward still carries a subject", async () => {
 		const email = makeEmail();
 		await forward(email, { subject: null });

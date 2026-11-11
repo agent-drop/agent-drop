@@ -11,6 +11,7 @@ import {
 	createRelayAddress,
 	enqueueRelay,
 	forwardViaBinding,
+	viaDisplayName,
 } from "./lib/relay";
 import { fireRules } from "./lib/rules";
 import type { Env, Drop } from "./types";
@@ -127,10 +128,16 @@ export async function handleEmail(
 
 			const replyTo = await createRelayAddress(env, from, maskLookup.id);
 
+			// The opaque route hides the sender's address, so the display name is
+			// the only place the mask owner still sees who wrote.
 			await enqueueRelay(env, {
 				maskId: maskLookup.id,
 				direction: "inbound",
 				from: replyTo,
+				fromName: viaDisplayName(
+					{ name: parsed.from?.name, address: from },
+					`${maskLookup.id}@${env.MAIL_DOMAIN}`,
+				),
 				to: rule.target,
 				replyTo,
 				subject: parsed.subject || "(no subject)",

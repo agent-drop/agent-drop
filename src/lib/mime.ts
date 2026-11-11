@@ -16,7 +16,7 @@
  * Message-ID and Date are platform-controlled on the builder path.
  */
 
-import { bareContentId } from "./email-builder";
+import { bareContentId, isHeaderControl } from "./email-builder";
 
 export interface MimeAttachment {
 	filename: string;
@@ -36,9 +36,65 @@ function wrap76(s: string): string {
 	return (s.match(/.{1,76}/g) || []).join("\r\n");
 }
 
-// RFC 2047-encode a header value if it contains non-ASCII
+function isPrintableAscii(s: string): boolean {
+	return /^[\x20-\x7E]*$/.test(s);
+}
+
+// 45 bytes is 60 base64 chars, plus "=?UTF-8?B?" and "?=" makes 72: under the
+// 75-char ceiling RFC 2047 sec. 2 puts on a single encoded-word.
+const ENCODED_WORD_BYTES = 45;
+const utf8 = new TextEncoder();
+
+// RFC 2047-encode a header value if it contains non-ASCII. Long text becomes
+// several encoded-words on folded lines, split between characters and never
+// inside one, because a decoder may decode each word on its own.
 function encodeHeaderWord(s: string): string {
-	return /^[\x20-\x7E]*$/.test(s) ? s : `=?UTF-8?B?${b64(s)}?=`;
+	if (isPrintableAscii(s)) return s;
+	const words: string[] = [];
+	let chunk = "";
+	let bytes = 0;
+	for (const ch of s) {
+		const size = utf8.encode(ch).byteLength;
+		if (chunk && bytes + size > ENCODED_WORD_BYTES) {
+			words.push(chunk);
+			chunk = "";
+			bytes = 0;
+		}
+		chunk += ch;
+		bytes += size;
+	}
+	if (chunk) words.push(chunk);
+	return words.map((w) => `=?UTF-8?B?${b64(w)}?=`).join("\r\n ");
+}
+
+/**
+ * Reduce an untrusted display name to text that cannot reshape the header it
+ * lands in. Control characters (CR and LF included) become spaces, so nothing
+ * can start a new header line. `"` and `\` go, so nothing can close or escape
+ * the quoted-string. `<` and `>` go too: they are legal inside quotes, but
+ * `bareAddr` and `addressOf` take the FIRST `<...>` in the value as the address,
+ * so a name carrying one would move it.
+ */
+export function sanitizeDisplayName(name: string): string {
+	return Array.from(name, (ch) => (isHeaderControl(ch.charCodeAt(0)) ? " " : ch))
+		.join("")
+		.replace(/["\\<>]/g, "")
+		.replace(/\s+/g, " ")
+		.trim();
+}
+
+/**
+ * Render `name <address>` for a raw header. An ASCII name rides in a
+ * quoted-string; anything else becomes RFC 2047 encoded-words, which must not
+ * sit inside quotes (RFC 2047 sec. 5). The name is sanitized here because this
+ * is the function that writes it into the header.
+ */
+export function formatMailbox(name: string, address: string): string {
+	const clean = sanitizeDisplayName(name);
+	if (!clean) return address;
+	return isPrintableAscii(clean)
+		? `"${clean}" <${address}>`
+		: `${encodeHeaderWord(clean)} <${address}>`;
 }
 
 interface MimeEntity {
@@ -176,8 +232,7 @@ export function bytesToBase64(data: ArrayBuffer | ArrayBufferView | string): str
 
 /** Render an address the way it goes into a header. */
 function headerAddress(addr: string | EmailAddress): string {
-	if (typeof addr === "string") return addr;
-	return `"${addr.name.replace(/"/g, "")}" <${addr.email}>`;
+	return typeof addr === "string" ? addr : formatMailbox(addr.name, addr.email);
 }
 
 function headerAddressList(

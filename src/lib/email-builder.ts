@@ -19,10 +19,14 @@ export const MAX_HEADER_BYTES = 16 * 1024;
 export const MAX_HEADER_NAME_BYTES = 100;
 export const MAX_HEADER_VALUE_BYTES = 2048;
 
+/** C0 controls (CR, LF, NUL...) and DEL: the code units that can end or reshape a header line. */
+export function isHeaderControl(code: number): boolean {
+	return code <= 0x1f || code === 0x7f;
+}
+
 function hasHeaderControl(value: string): boolean {
 	for (let i = 0; i < value.length; i++) {
-		const code = value.charCodeAt(i);
-		if (code <= 0x1f || code === 0x7f) return true;
+		if (isHeaderControl(value.charCodeAt(i))) return true;
 	}
 	return false;
 }

@@ -3,7 +3,7 @@ import { AwsClient } from "aws4fetch";
 import type { Env, RelayQueueMessage } from "../types";
 import { toEmailAttachment } from "./email-builder";
 import { generateId } from "./id";
-import { bareAddr, buildRawEmail } from "./mime";
+import { bareAddr, buildRawEmail, formatMailbox, sanitizeDisplayName } from "./mime";
 
 const RELAY_TOKEN_ALPHABET = "0123456789abcdefghjkmnpqrstvwxyz";
 const RELAY_TOKEN_CHARS = 26;
@@ -152,6 +152,29 @@ export async function findRelayRule(
 	return null;
 }
 
+// A sender label longer than this is cut. The name is the sender's to choose,
+// and formatMailbox writes an ASCII name as one quoted-string on one line, so an
+// unbounded one could push the From line past the 998-octet limit and get the
+// whole message refused.
+const SENDER_LABEL_MAX = 64;
+
+/**
+ * The display name forwarded and relayed mail carries: `<sender> (via <ours>)`,
+ * where the sender is the From header's name, or the address when there is none.
+ * Both paths call this, so they cannot label a sender two different ways.
+ *
+ * The sender half is attacker-controlled and arrives already RFC 2047-decoded,
+ * so it is sanitized and capped here. `via` is our own address, never input.
+ */
+export function viaDisplayName(
+	sender: { name?: string | null; address?: string | null },
+	via: string,
+): string {
+	const who = sanitizeDisplayName(sender.name || "") || sanitizeDisplayName(sender.address || "");
+	const label = Array.from(who).slice(0, SENDER_LABEL_MAX).join("").trim();
+	return label ? `${label} (via ${via})` : `(via ${via})`;
+}
+
 // Forward a received email to `to` via the Cloudflare Email Sending binding.
 // message.forward() only delivers to CF-verified destinations; re-sending via the
 // binding delivers to any address. The From is rewritten to the box address (so
@@ -181,7 +204,6 @@ export async function forwardViaBinding(
 	},
 ): Promise<string> {
 	const boxAddr = `${opts.box}@${env.MAIL_DOMAIN}`;
-	const label = (opts.fromName || opts.from || "").replace(/"/g, "");
 
 	const attachments = (opts.attachments || []).map((a) =>
 		toEmailAttachment({
@@ -194,7 +216,10 @@ export async function forwardViaBinding(
 	);
 
 	const builder: EmailMessageBuilder = {
-		from: { name: `${label} (via ${boxAddr})`, email: boxAddr },
+		from: {
+			name: viaDisplayName({ name: opts.fromName, address: opts.from }, boxAddr),
+			email: boxAddr,
+		},
 		to: opts.to,
 		subject: opts.subject || "(no subject)",
 	};
@@ -280,12 +305,16 @@ export async function sendRawEmail(
 // The MIME is assembled here, at enqueue time, and replayed verbatim by the
 // consumer -- a relay must reproduce the message it was handed, so the raw API
 // is the right one for this path.
+//
+// `from` stays a bare address all the way to the queue, because the consumer
+// sends it as the envelope sender. `fromName` only decorates the From header.
 export async function enqueueRelay(
 	env: Env,
 	opts: {
 		maskId: string;
 		direction: "inbound" | "reply";
 		from: string;
+		fromName?: string;
 		to: string;
 		replyTo?: string;
 		subject: string;
@@ -296,7 +325,10 @@ export async function enqueueRelay(
 	},
 ): Promise<string> {
 	const logId = generateId();
-	const rawEmail = buildRawEmail(opts);
+	const rawEmail = buildRawEmail({
+		...opts,
+		from: opts.fromName ? formatMailbox(opts.fromName, opts.from) : opts.from,
+	});
 
 	await env.DB.prepare(
 		`INSERT INTO delivery_log (id, drop_id, rule_id, type, target, status, attempts, created_at)
