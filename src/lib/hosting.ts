@@ -2,11 +2,9 @@ import type { Env } from "../types";
 import { normalizeInbox } from "./normalize";
 
 // Top-level reserved path prefix for public static hosting:
-//   {domain}/f/{box}/{site}/...  ->  R2  sites/{box}/{site}/...
-// Kept as a path prefix under the Worker's own host rather than a per-site
-// subdomain, so it can never collide with other subdomains of the zone. /f/* is
-// added to run_worker_first so these requests reach the Worker instead of the
-// SPA fallback.
+//   {host-domain}/f/{box}/{site}/...  ->  R2  sites/{box}/{site}/...
+// HOST_DOMAIN is deliberately separate from the application origin: uploaded
+// HTML can run scripts, but those scripts cannot read the SPA's localStorage.
 export const HOST_PREFIX = "f";
 
 /**
@@ -92,7 +90,7 @@ function notFound(msg = "Not found", privateSite = false): Response {
  * Public URL for a hosted site.
  */
 export function siteUrl(env: Env, inbox: string, site: string): string {
-	return `https://${env.DOMAIN}/${HOST_PREFIX}/${inbox}/${site}/`;
+	return `https://${env.HOST_DOMAIN}/${HOST_PREFIX}/${inbox}/${site}/`;
 }
 
 /**

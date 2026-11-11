@@ -212,8 +212,7 @@ describe("checkDeployIdentity", () => {
 		const problems = checkDeployIdentity(config, REAL);
 		// Every identity-bearing field is wrong, and neither the route pattern nor
 		// its zone_name matches.
-		expect(problems.length).toBe(9);
-		expect(problems.length).toBe(11);
+		expect(problems.length).toBe(12);
 		expect(problems.join("\n")).toContain(PLACEHOLDERS.accountId);
 	});
 

@@ -215,7 +215,7 @@ describe("serveHostedSite", () => {
 
 		expect(response.status).toBe(301);
 		expect(response.headers.get("Location")).toBe(
-			`https://${TEST_DOMAIN}/f/lisa/locked/?auth=s3cr3t&view=compact`,
+			`https://${TEST_HOST_DOMAIN}/f/lisa/locked/?auth=s3cr3t&view=compact`,
 		);
 		expect(response.headers.get("Cache-Control")).toBe("private, no-store");
 	});
